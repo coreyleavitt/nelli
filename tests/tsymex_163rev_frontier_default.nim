@@ -37,6 +37,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 suite "#163 item 3 -- maxFrontierSize default":
 
@@ -89,7 +90,7 @@ suite "#163 item 3 -- the default budget does not truncate an ordinary analysis"
     check x mod 13 == 0
 
   test "under DEFAULT settings (no explicit budget), the deep target is still sxSat":
-    let r = symexFind(manyBranchesReachable, tLabel("deep-hit"))
+    let r = pinFind(manyBranchesReachable, tLabel("deep-hit"))
     check r.status == sxSat
 
 # ---------------------------------------------------------------------------
@@ -119,7 +120,7 @@ suite "#163 item 3 -- an exceeded cap degrades honestly (never a silent wrong ve
       var s = defaultSymexSettings()
       s.budget.maxFrontierSize = 1
       s
-    let r = symexFind(multiBranchUnreachable, tLabel("never"), tightSettings)
+    let r = pinFind(multiBranchUnreachable, tLabel("never"), tightSettings)
     check r.status == sxUnknown
     check r.errors.len > 0
     # RFC-0005 S6a: the prune is `beBudgetExhaustedPrune` (dcOmitted).
@@ -130,7 +131,7 @@ suite "#163 item 3 -- an exceeded cap degrades honestly (never a silent wrong ve
       var s = defaultSymexSettings()
       s.budget.maxFrontierSize = 0
       s
-    check symexFind(multiBranchUnreachable, tLabel("never"), unlimitedSettings).status == sxUnsat
+    check pinFind(multiBranchUnreachable, tLabel("never"), unlimitedSettings).status == sxUnsat
 
 
 suite "#163 item 3 -- walker version pin":

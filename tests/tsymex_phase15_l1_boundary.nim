@@ -1,6 +1,7 @@
 import std/unittest
 import std/macros
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster L (templates/macros), cycle L1: boundary audit.
 # Hypothesis (RFC §Cluster-L): Nim's semchecker expands all templates/macros
@@ -32,13 +33,13 @@ defViaDirty()
 suite "symex Phase 15 — L1 template/macro boundary audit":
 
   test "template-defined SUT reaches parser as expanded proc and symexes":
-    let r = symexFind(templateSut, tLabel("thit"))
+    let r = pinFind(templateSut, tLabel("thit"))
     check r.status == sxSat
 
   test "macro-emitted SUT reaches parser as expanded proc and symexes":
-    let r = symexFind(macroSut, tLabel("mhit"))
+    let r = pinFind(macroSut, tLabel("mhit"))
     check r.status == sxSat
 
   test "{.dirty.} template-defined SUT also symexes soundly":
-    let r = symexFind(dirtySut, tLabel("dhit"))
+    let r = pinFind(dirtySut, tLabel("dhit"))
     check r.status == sxSat

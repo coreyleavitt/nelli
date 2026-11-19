@@ -22,6 +22,7 @@
 ## G5 is ADDITIVE under walker version "7" (no bump; Cluster G bumps at G10).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/[dsl, runtime]
 
 # --- distinct float64 with borrowed `+` and `<` ----------------------------
@@ -68,7 +69,7 @@ proc useDistinctBarrier(m1: Meters): bool =
 
 suite "symex Phase 15 G5 — distinct borrow semantics":
   test "G5: borrowed `+` threads arithmetic through base; target reachable":
-    let r = symexFind(useBorrowAdd, tLabel("borrow_add_reached"))
+    let r = pinFind(useBorrowAdd, tLabel("borrow_add_reached"))
     check r.status == sxSat
     # Witness: m1, m2 as Meters whose base sum exceeds 10.0 (the eject-reader
     # chain renders each through its base float).
@@ -76,11 +77,13 @@ suite "symex Phase 15 G5 — distinct borrow semantics":
     check s > 10.0
 
   test "G5: borrowed `<` produces a correct Z3 bool; target reachable":
-    let r = symexFind(useBorrowLt, tLabel("borrow_lt_reached"))
+    let r = pinFind(useBorrowLt, tLabel("borrow_lt_reached"))
     check r.status == sxSat
     check float64(r.witness[0]) < float64(r.witness[1])
 
   test "G5: non-borrowed bodyless distinct op → geDistinctBarrier (sxUnknown)":
+    # not pinned (K9d-8): the SUT calls an unlinkable `importc` stub, so a
+    # native run of it does not link; the verdict is sxUnknown regardless
     let r = symexFind(useDistinctBarrier, tLabel("barrier_reached"), noReplay)
     check r.status == sxUnknown
     var sawBarrier = false

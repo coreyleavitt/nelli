@@ -16,6 +16,7 @@
 ## pins; on Linux they always passed and simply keep passing.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/canonicalize
 
 proc stripDepth2(s: string): string =
@@ -52,11 +53,11 @@ proc depth3Caller(filename: string) =
 suite "symex re-test C11 — nested-if string helper depth cliff (stack)":
 
   test "depth-2 statement-form strip + replace/contains proves sxUnsat (crashed at 1 MB stack)":
-    let r = symexFind(depth2Caller, tIndexError())
+    let r = pinFind(depth2Caller, tIndexError())
     check r.status == sxUnsat
 
   test "depth-3 strip + replace/contains proves sxUnsat (the catalog-#11 shape)":
-    let r = symexFind(depth3Caller, tIndexError())
+    let r = pinFind(depth3Caller, tIndexError())
     check r.status == sxUnsat
 
 suite "symex re-test C11 — walker version pin":

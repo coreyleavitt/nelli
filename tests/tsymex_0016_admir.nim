@@ -26,6 +26,7 @@ import nelli/smt/magic_dispatch
 import nelli/smt/stdlib_rows
 import nelli/smt/pragmaaxes
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 suite "ADM-IR: the type x memory-op axis (mkZeroValue)":
   let tbl = tTable(tString(), tInt(64, true))
@@ -77,11 +78,11 @@ proc zeroSeq(k: int) =
 
 suite "ADM-IR: verdicts through the real parser are unchanged":
   test "an admitted zero-value row still decides":
-    let a = symexFind(zeroTable, tLabel("hit"))
+    let a = pinFind(zeroTable, tLabel("hit"))
     check a.status == sxSat
-    let b = symexFind(zeroTableNonEmpty, tLabel("hit"))
+    let b = pinFind(zeroTableNonEmpty, tLabel("hit"))
     check b.status == sxUnsat
-    check symexFind(zeroSeq, tLabel("hit")).status == sxSat
+    check pinFind(zeroSeq, tLabel("hit")).status == sxSat
 
 proc zeroCstring(k: int) =
   var f: cstring
@@ -90,7 +91,7 @@ proc zeroCstring(k: int) =
 suite "ADM-IR: a declined fieldDefault row still declines through the parser":
   test "an uninterp zero is not built; the walk reports the decline":
     check not admitTypeOp(itUninterp, moFieldDefault, toZeroValue).admitted
-    let r = symexFind(zeroCstring, tLabel("hit"))
+    let r = pinFind(zeroCstring, tLabel("hit"))
     check r.status == sxUnknown
     var seen = false
     for e in r.errors:
@@ -147,12 +148,12 @@ proc sutAdd(v: int) =
 
 suite "ADM-IR: the scan's verdicts through the real parser are unchanged":
   test "a foreign body after the label is untrusted, carrying ubTailUnverified":
-    let r = symexFind(sutTailForeign, tLabel("hit"))
+    let r = pinFind(sutTailForeign, tLabel("hit"))
     check r.status == sxSat
     check not r.trusted
     check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
   test "the magic defect scan still forks OverflowDefect":
-    check symexFind(sutAdd, tRaisedExn("OverflowDefect")).status == sxRaised
+    check pinFind(sutAdd, tRaisedExn("OverflowDefect")).status == sxRaised
 
 # ---------------------------------------------------------------------------
 # stdlib body, float calls: mkMathCall
@@ -194,8 +195,8 @@ proc sUserDecMin(a: int) =
 
 suite "ADM-IR: the stdlib stamp's verdicts through the parser are unchanged":
   test "user `x - 1` raises; the stdlib body (asUnchecked) is undefined, not a raise":
-    check symexFind(sUserDecMin, tLabel("hit")).status == sxRaised
-    check symexFind(sNextPow2Min, tLabel("hit")).status != sxRaised
+    check pinFind(sUserDecMin, tLabel("hit")).status == sxRaised
+    check pinFind(sNextPow2Min, tLabel("hit")).status != sxRaised
 
 # ---------------------------------------------------------------------------
 # magic: lowerMagic and the arm census; PCRE is enforced at its runtime consumer
@@ -256,8 +257,8 @@ proc magicUnsigned(a: int) =
 
 suite "ADM-IR: dispatched magics still decide":
   test "inc and an unsigned operator":
-    check symexFind(magicInc, tLabel("hit")).status == sxSat
-    check symexFind(magicUnsigned, tLabel("hit")).status == sxSat
+    check pinFind(magicInc, tLabel("hit")).status == sxSat
+    check pinFind(magicUnsigned, tLabel("hit")).status == sxSat
 
 proc srcLines(file: string): seq[string] =
   let f = currentSourcePath().parentDir() / ".." / "src" / "nelli" / "smt" / file

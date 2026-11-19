@@ -46,6 +46,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+import ./s8cu_helpers
 
 proc show(errs: openArray[SymexErrorInfo]): string =
   for e in errs: result.add $e.kind & ": " & e.msg & "\n"
@@ -158,7 +159,7 @@ suite "S8y (b): a tainted hit at least as deep as an exhausted one is declined":
 
   test "one tainted budget-out; every later hit as deep is declined, never solved":
     symexTargetSolveStats = default(typeof(symexTargetSolveStats))
-    let r = symexFind(pairLoopS8y, tLabel("s8y_pair_after"), tightTainted)
+    let r = pinFind(pairLoopS8y, tLabel("s8y_pair_after"), tightTainted)
     let st = symexTargetSolveStats
     checkpoint show(r.errors)
     checkpoint "budgetOut=" & $st.budgetOut & " declined=" & $st.declined &
@@ -183,7 +184,7 @@ suite "S8y (b): a tainted hit at least as deep as an exhausted one is declined":
     check r.errors.named(seUnsupportedStringOp)
 
   test "the decline is recorded as a classified beSolverUndef, so never sxUnsat":
-    let r = symexFind(pairLoopS8y, tLabel("s8y_pair_after"), tightTainted)
+    let r = pinFind(pairLoopS8y, tLabel("s8y_pair_after"), tightTainted)
     # RFC-0005 S8aq: whether the SPECIFIC "not solved (RFC-0005 S8y)"
     # decline placeholder fires is the same Z3-build-sensitive question as
     # the preceding test's. The invariant that must hold on every build is
@@ -199,7 +200,7 @@ suite "S8y (b): a tainted hit at least as deep as an exhausted one is declined":
 
   test "a clean path is always solved, however many budget-outs precede it":
     symexTargetSolveStats = default(typeof(symexTargetSolveStats))
-    let r = symexFind(cleanLoopS8y, tLabel("s8y_clean_after"), starvedClean)
+    let r = pinFind(cleanLoopS8y, tLabel("s8y_clean_after"), starvedClean)
     let st = symexTargetSolveStats
     checkpoint show(r.errors)
     checkpoint "budgetOut=" & $st.budgetOut & " declined=" & $st.declined

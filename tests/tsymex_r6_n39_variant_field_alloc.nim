@@ -79,6 +79,7 @@
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # Shared SUT types
@@ -153,7 +154,7 @@ proc n39SymSetBlock(b: byte) =
 suite "symex N39 -- isVariantConstructSym: confirmed false-sxUnsat, fixed":
 
   test "N39-1: block-nested symbolic-disc construction reaching an unsupported Table arm field -- honest sxUnknown, never a false sxUnsat":
-    let r = symexFind(n39SymTableBlock, tLabel("n39_sym_table_block"))
+    let r = pinFind(n39SymTableBlock, tLabel("n39_sym_table_block"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -164,7 +165,7 @@ suite "symex N39 -- isVariantConstructSym: confirmed false-sxUnsat, fixed":
     check saw
 
   test "N39-1-noblock: same shape without the block -- already honest, unaffected by this slice's fix":
-    let r = symexFind(n39SymTableNoBlock, tLabel("n39_sym_table_noblock"))
+    let r = pinFind(n39SymTableNoBlock, tLabel("n39_sym_table_noblock"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -175,7 +176,7 @@ suite "symex N39 -- isVariantConstructSym: confirmed false-sxUnsat, fixed":
     check saw
 
   test "N39-2: block-nested symbolic-disc construction reaching an unsupported HashSet arm field -- honest sxUnknown, never a false sxUnsat":
-    let r = symexFind(n39SymSetBlock, tLabel("n39_sym_set_block"))
+    let r = pinFind(n39SymSetBlock, tLabel("n39_sym_set_block"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -212,7 +213,7 @@ proc n39LitSetBlock(a: int) =
 suite "symex N39 -- lowerVariantLit: probed clean pre-fix, guarded for certification accuracy":
 
   test "N39-3: block-nested variant LITERAL, unsupported Table field on the INACTIVE arm -- honest sxUnknown, both pre- and post-fix":
-    let r = symexFind(n39LitTableBlock, tLabel("n39_lit_table_block"))
+    let r = pinFind(n39LitTableBlock, tLabel("n39_lit_table_block"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -223,7 +224,7 @@ suite "symex N39 -- lowerVariantLit: probed clean pre-fix, guarded for certifica
     check saw
 
   test "N39-3-noblock: same shape without the block -- unaffected":
-    let r = symexFind(n39LitTableNoBlock, tLabel("n39_lit_table_noblock"))
+    let r = pinFind(n39LitTableNoBlock, tLabel("n39_lit_table_noblock"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -234,7 +235,7 @@ suite "symex N39 -- lowerVariantLit: probed clean pre-fix, guarded for certifica
     check saw
 
   test "N39-4: block-nested variant LITERAL, unsupported HashSet field on the INACTIVE arm -- honest sxUnknown":
-    let r = symexFind(n39LitSetBlock, tLabel("n39_lit_set_block"))
+    let r = pinFind(n39LitSetBlock, tLabel("n39_lit_set_block"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -263,11 +264,11 @@ proc n39GoodSymSat(b: byte, n: int) =
 suite "symex N39 -- companion: fully-backed variant construction unaffected":
 
   test "N39-5: a variant LITERAL with every arm fully backed still reaches sxSat":
-    let r = symexFind(n39GoodLitSat, tLabel("n39_good_lit_sat"))
+    let r = pinFind(n39GoodLitSat, tLabel("n39_good_lit_sat"))
     check r.status == sxSat
 
   test "N39-6: a symbolic-disc construction with every arm fully backed still reaches sxSat":
-    let r = symexFind(n39GoodSymSat, tLabel("n39_good_sym_sat"))
+    let r = pinFind(n39GoodSymSat, tLabel("n39_good_sym_sat"))
     check r.status == sxSat
 
 # =============================================================================
@@ -283,7 +284,7 @@ proc n39SeqArmLit(a: int) =
 suite "symex N39 -- companion: Bug #2 seq-field scoped-decline path unaffected":
 
   test "N39-7: a variant literal whose INACTIVE arm carries an unbacked-seq field (Bug #2's own scoped-decline shape) still reaches sxSat -- N39's guard does not double-decline it":
-    let r = symexFind(n39SeqArmLit, tLabel("n39_seqarm_lit"))
+    let r = pinFind(n39SeqArmLit, tLabel("n39_seqarm_lit"))
     check r.status == sxSat
 
 # =============================================================================

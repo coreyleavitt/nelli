@@ -422,7 +422,8 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkConvIntWidth", emitExpr(e.ciwOperand),
             newLit(e.ciwSrcWidth), newLit(e.ciwSrcSigned),
             newLit(e.ciwTgtWidth), newLit(e.ciwTgtSigned),
-            newLit(e.ciwHasRange), newLit(e.ciwLo), newLit(e.ciwHi))
+            newLit(e.ciwHasRange), newLit(e.ciwLo), newLit(e.ciwHi),
+            newLit(e.ciwHoley))
   of iekConvIntReinterpret:
     newCall(bindSym"mkConvIntReinterpret", emitExpr(e.cirOperand),
             newLit(e.cirWidth), newLit(e.cirTgtSigned))
@@ -626,6 +627,8 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekSeqNew:           ## RFC-0005 S8bi
     newCall(bindSym"mkSeqNew", emitExpr(e.snArg), emitIRType(e.snElemTy),
             newLit(e.snZeroed), newLit(e.snOfCap))
+  of iekPtrCast:          ## RFC-0016 INT-83
+    newCall(bindSym"mkPtrCast", emitExpr(e.pcArg), emitIRType(e.pcTy))
   of iekBitSet:           ## RFC-0005 S8bq
     var args = newNimNode(nnkBracket)
     for a in e.bsArgs: args.add emitExpr(a)
@@ -670,8 +673,17 @@ proc emitIRType*(t: IRType): NimNode =
   of itUninterp:
     newCall(bindSym"tUninterp", newLit(t.uninterpName),
             newLit(t.uninterpRefKey))   # RFC-0016 K9c follow-up
-  of itFloat32: newCall(bindSym"tFloat32")
-  of itFloat64: newCall(bindSym"tFloat64")
+  of itFloat32, itFloat64:
+    let base = newCall(if t.kind == itFloat32: bindSym"tFloat32"
+                       else: bindSym"tFloat64")
+    # RFC-0016 INT-77: a float range's bounds round-trip as `hasRange` does
+    # (the `itInt` arm below); as bits, so -0.0 and every edge survive.
+    if t.floatRange:
+      newCall(bindSym"withFloatRange", base,
+              newCall(bindSym"floatOfBits", newLit(cast[uint64](t.floatLo))),
+              newCall(bindSym"floatOfBits", newLit(cast[uint64](t.floatHi))))
+    else:
+      base
   of itDistinct:   ## Phase 15 G4: name + recursive base.
     newCall(bindSym"tDistinct", newLit(t.distinctName), emitIRType(t.distinctBase))
   of itRef:        ## Phase 15 R1a: ref + recursive pointee.
@@ -696,14 +708,20 @@ proc emitIRType*(t: IRType): NimNode =
     # `classifyType` computed, no matter what `symex.emitTyAndReader`
     # (which reads the macro-time `IRType` directly and needs no round trip
     # of its own) does with the name at witness-codegen time.
-    if t.enumName.len > 0 and t.enumRange:   # RFC-0005 S8bv
-      newCall(bindSym"withEnumRange",
-              newCall(bindSym"withEnumName", ranged, newLit(t.enumName)),
-              newLit(t.rangeLo), newLit(t.rangeHi))
-    elif t.enumName.len > 0:
-      newCall(bindSym"withEnumName", ranged, newLit(t.enumName))
+    let named =
+      if t.enumName.len > 0 and t.enumRange:   # RFC-0005 S8bv
+        newCall(bindSym"withEnumRange",
+                newCall(bindSym"withEnumName", ranged, newLit(t.enumName)),
+                newLit(t.rangeLo), newLit(t.rangeHi))
+      elif t.enumName.len > 0:
+        newCall(bindSym"withEnumName", ranged, newLit(t.enumName))
+      else:
+        ranged
+    # RFC-0016 INT-84: a holey enum's declared ordinals round-trip too.
+    if t.enumOrds.len > 0:
+      newCall(bindSym"withEnumOrds", named, newLit(t.enumOrds))
     else:
-      ranged
+      named
   of itTuple:
     var fieldsLit = newTree(nnkBracket)
     for f in t.fields:
@@ -2465,6 +2483,8 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekHofCall:
     # RFC-0005 S8as: it applies a closure (see `iekClosureCall`).
     result = true
+  of iekPtrCast:
+    result = rhsHasInlineDefectFork(e.pcArg)   # RFC-0016 INT-83
   of iekSeqNew:
     # RFC-0005 S8bc, S8bi: its length guard forks in the preamble
     # (`parseNewSeqLen`), not here.
@@ -2550,6 +2570,7 @@ proc irKids*(e: IRExpr): seq[IRExpr] =
   of iekHofCall: @[e.hofSeq, e.hofClosure, e.hofInit]
   of iekSeqNew: @[e.snArg]   # RFC-0005 S8bc, S8bi (batch 5: one kind)
   of iekBitSet: e.bsArgs     # RFC-0005 S8bq (batch 6)
+  of iekPtrCast: @[e.pcArg]  # RFC-0016 INT-83
   of iekLambda, iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
      iekGetCurrentExn, iekGetCurrentExnMsg, iekNil, iekZeroValue:
     @[]
@@ -6622,6 +6643,16 @@ proc intConvSrcName(operand: NimNode, src: string): string =
   ## representation is its base type's (the bounds are bookkeeping), so the
   ## base's width and signedness are the source's. Every other spelling is
   ## returned unchanged.
+  ## RFC-0016 INT-72: a `Rune` operand (`uint32(r)`, `int8(r)`) spells as
+  ## `int64`, its carrier (`classifyType`: `tInt(64)` over int32). Every
+  ## int conversion is decided by the VALUE (a signed target checks it, an
+  ## unsigned one keeps its low bits of the sign-extended value), and an
+  ## int32 value is the same int64 value, so the result is the int32
+  ## source's. It was the identity pass-through: `uint32(Rune(-1))` stayed
+  ## -1 under an unsigned compare, a false `sxUnsat` once a Rune may be
+  ## negative.
+  if not isIntLiteralNode(operand) and isRuneTyped(operand):
+    return "int64"
   if isIntFamilyName(src) or isIntLiteralNode(operand) or
      operand.typeKind != ntyRange:
     return src
@@ -8939,6 +8970,28 @@ proc parseToIntCall(n, calleeSym: NimNode; preamble: var seq[IRStmt];
   preamble.add mkIf(@[mkBranch(mkBinop(bGe, mkVar(v), zero), arm(bAdd))],
                     arm(bSub))
   mkVar(res)
+proc parseRuneSize(opnd: NimNode; preamble: var seq[IRStmt];
+  ## RFC-0016 INT-72. `unicode.size(r)` (unicode.nim:932), by its thresholds:
+  ## `v = r.uint32`, then 1/2/3/4/5/6 bytes up to 0x7F/0x7FF/0xFFFF/0x1FFFFF/
+  ## 0x3FFFFFF/0x7FFFFFFF, else 1. Over the int32 value that is: a negative
+  ## Rune (`v` > 0x7FFFFFFF) is 1, and every other value meets a threshold.
+  ## Its body was declined (`feUnadmitted`, no stdlib row); a Rune parameter
+  ## is any int32, so every arm is reachable.
+  let i64 = tInt(64, signed = true)
+  let rv = freshSynth(ctx, "runeSizeArg")
+  let rIR = parseExpr(opnd, preamble, ctx)
+  preamble.add mkLet(rv, i64, rIR)
+  let tmp = freshSynth(ctx, "runeSize")
+  var arms: seq[CondArm]
+  arms.add (newSeq[IRStmt](), mkBranch(mkBinop(bLt, mkVar(rv), mkIntLit(0)),
+                                        mkLet(tmp, i64, mkIntLit(1))))
+  for (bound, bytes) in [(0x7F'i64, 1'i64), (0x7FF'i64, 2'i64),
+                         (0xFFFF'i64, 3'i64), (0x1FFFFF'i64, 4'i64),
+                         (0x3FFFFFF'i64, 5'i64)]:
+    arms.add (newSeq[IRStmt](), mkBranch(mkBinop(bLe, mkVar(rv), mkIntLit(bound)),
+                                          mkLet(tmp, i64, mkIntLit(bytes))))
+  preamble.add lowerCondChain(arms, mkLet(tmp, i64, mkIntLit(6)), preamble)
+  mkVar(tmp)
 
 proc parseToStr(opnd, n: NimNode; preamble: var seq[IRStmt];
                 ctx: ParseCtx): IRExpr =
@@ -11897,6 +11950,7 @@ proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
         fallback = m
     else:
       below.add (depth: mc.len, sym: m, chain: mc)
+      registerHierPointee(mp)   # RFC-0016 INT-81: a witness may need an `mp`
   if fallback == nil: return nil
   below.sort(proc (a, b: auto): int = cmp(b.depth, a.depth))
   # The receiver, read once; its tag at the first depth below the static
@@ -12001,6 +12055,7 @@ proc parseOfTest(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
   let nonNil = mkBinop(bNe, mkVar(cell), mkNil(o))
   if tc.len <= sc.len:
     return nonNil
+  registerHierPointee(tp)   # RFC-0016 INT-81: a witness may need a `tp`
   let res = freshSynth(ctx, "ofRes")
   preamble.add mkLet(res, tBool(), mkBoolLit(false))
   var reads: seq[IRStmt]
@@ -12022,12 +12077,37 @@ var miElemGuards {.compileTime.}: seq[tuple[mark: string; loc, site: NimNode;
   ## the element is preceded by a check that the length is still `L`
   ## (`miElemGuard`).
 
+proc pointerCastIR(n: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): IRExpr =
+  ## RFC-0016 INT-83. `n` (a `cast`, a conversion, a hidden conversion)
+  ## reinterprets an address between Nim's `pointer` and a typed `ptr`/`ref`:
+  ## the address kept, its sort changed (`iekPtrCast`; `pointerAddrOf` and
+  ## `pointerAsTyped` in the walker). nil for any other node.
+  if n.len != 2: return nil
+  let src = n[1]
+  let tk = n.typeKind
+  let sk = src.typeKind
+  if tk == ntyPointer and sk == ntyPointer:
+    return parseExpr(src, preamble, ctx)
+  if tk == ntyPointer and sk in {ntyRef, ntyPtr}:
+    let st = classifyType(src).ty
+    if st == nil or st.kind notin {itRef, itPtr}: return nil
+    return mkPtrCast(parseExpr(src, preamble, ctx), tPtr(pointerPointeeTy()))
+  if tk in {ntyRef, ntyPtr} and sk == ntyPointer and n.kind == nnkCast:
+    let tt = classifyType(n).ty
+    if tt == nil or tt.kind notin {itRef, itPtr}: return nil
+    # let-bound, so a dereference of it reads a variable (a cast is pure:
+    # hoisting it out of a short-circuit changes nothing)
+    let tmp = freshSynth(ctx, "ptrcast")
+    preamble.add mkLet(tmp, tt, mkPtrCast(parseExpr(src, preamble, ctx), tt))
+    return mkVar(tmp)
+  nil
 proc pointerNilTy*(): IRType =
-  ## RFC-0016 INT-65. The type a `pointer`'s `nil` is lowered at: Nim's
-  ## `pointer` is an untyped address, and the walk holds a non-nil one as the
-  ## `ptr`/`ref` it was converted from (whose pointee sort it keeps). Its nil
-  ## is the nil of `ptr uint8`; `refEq` compares across pointee sorts.
-  tPtr(tUInt(8))
+  ## RFC-0016 INT-65, re-based on INT-83. The type a `pointer`'s `nil` is
+  ## lowered at: Nim's `pointer` is an address of its own sort
+  ## (`tPtr(pointerPointeeTy())`, `Ref_pointer`), so its nil is that sort's
+  ## nil. INT-65 held it as `ptr uint8`; INT-83's pointer model supersedes it.
+  tPtr(pointerPointeeTy())
 
 proc nilSideCore(refNode: NimNode): NimNode =
   ## RFC-0005 S8bo. The operand a nil comparison or `isNil` decides, seen
@@ -12506,25 +12586,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # RFC-0016 W3-z P16. `cast[ptr T](0)` is the target's nil (no address).
     if isNilPtrCast(n):
       return mkNil(classifyType(n).ty)
-    # RFC-0016 INT-65. `cast[pointer](r)` of a `ref`/`ptr`/`pointer` keeps
-    # the address (`nilSideCore`); a `pointer` holds the address it was
-    # converted from.
-    if nilSideCore(n) != n:
-      return parseExpr(nilSideCore(n), preamble, ctx)
-    # RFC-0016 INT-65. `cast[ptr T](q)` of a `pointer`: what `q` addresses is
-    # not known to be a `T`, so the reinterpretation declines. The stand-in
-    # is let-bound so a dereference of it reads a variable.
-    if n.len == 2 and n[1].typeKind == ntyPointer and
-       n.typeKind in {ntyPtr, ntyRef}:
-      preamble.add ctx.declineUnsafeCast(
-        siteMsg(n, "`" & n.repr & "` reinterprets a `pointer` as a typed " &
-                "address; what it addresses is not known to be that type " &
-                "(RFC-0016 INT-65; heUnsafeCast)"),
-        "cast of a pointer to a typed address (heUnsafeCast)")
-      let tmp = freshSynth(ctx, "ptrcast")
-      let ty = classifyType(n).ty
-      preamble.add mkLet(tmp, ty, mkNil(ty))
-      return mkVar(tmp)
+    # RFC-0016 INT-83. A cast between `pointer` and a typed address.
+    block:
+      let pc = pointerCastIR(n, preamble, ctx)
+      if pc != nil: return pc
     # RFC-0005 S8m. `cast[ref Obj](p)` with `p: ref Obj` reinterprets a ref as
     # the very type it already has: the same address, the same `Ref_<id>`
     # sort, so it is the identity and keeps `p`'s heap identity. Before, the
@@ -12555,6 +12620,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
     let operand = n[n.len - 1]
+    # RFC-0016 INT-83. `pointer(q)` of a typed address.
+    block:
+      let pc = pointerCastIR(n, preamble, ctx)
+      if pc != nil: return pc
     # RFC-0016 W3-z P14. `RefO(nil)` / `PtrT(nil)`: the nil literal's own type
     # is `nil`, so `classifyType(operand)` names no ref; the conversion's
     # TARGET type picks the nil. A target the walk holds no nil for (cstring,
@@ -12583,6 +12652,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if hier.tgtChain.len <= hier.srcChain.len:
         opIR
       else:
+        registerHierPointee(hier.tgtPointee)   # RFC-0016 INT-81
         let cell = freshSynth(ctx, "objConv")
         preamble.add mkLet(cell, hier.tgtTy, opIR)
         var reads: seq[IRStmt]
@@ -12631,7 +12701,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                        cls.ty.width, cls.ty.signed,
                        true, cls.range.lo, cls.range.hi, srcSite(n))
     elif not isIntLiteralNode(operand) and
-         n.typeKind in {ntyRange, ntyEnum} and
+         (n.typeKind in {ntyRange, ntyEnum} or isRuneTyped(n)) and
          operand.typeKind in {ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
                               ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32,
                               ntyUInt64, ntyRange, ntyEnum} and
@@ -12642,12 +12712,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # the operand's value (`RangeDefect`), then converts at the target's
       # width. This was the identity pass-through below: an out-of-range
       # value flowed on as the target type, the check never modelled.
+      # RFC-0016 INT-72: `Rune(x)` too -- a conversion to `distinct int32`,
+      # checked against int32 (`classifyType`'s Rune range), which the
+      # pass-through let through as a false `sxSat` past the `RangeDefect`.
       let tcls = classifyType(n)
       let scls = classifyType(operand)
       mkConvIntWidth(parseExpr(operand, preamble, ctx),
                      scls.ty.width, scls.ty.signed,
                      tcls.ty.width, tcls.ty.signed,
-                     true, tcls.range.lo, tcls.range.hi)
+                     true, tcls.range.lo, tcls.range.hi,
+                     holey = tcls.ty.enumOrds.len > 0)   # RFC-0016 INT-84
     elif tgt in intTyNames and src == "bool":
       # v69 (sello #3): `int32(b)` — previously the pass-through below, which
       # left an svBool flowing where an int-kinded SymVal is required
@@ -12782,6 +12856,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     else:
       parseExpr(operand, preamble, ctx)
   of nnkHiddenStdConv, nnkHiddenSubConv, nnkHiddenAddr:
+    # RFC-0016 INT-83. A typed address passed or bound where a `pointer` is
+    # expected.
+    if n.kind != nnkHiddenAddr:
+      let pc = pointerCastIR(n, preamble, ctx)
+      if pc != nil: return pc
     # RFC-0005 S8bc (item 7). An EMPTY `@[]` passed where a `seq[T]` is
     # expected (`t[k] = @[]`, `mgetOrPut(t, k, @[])`, `getOrDefault(t, k,
     # @[])`) types `seq[empty]` and reaches the parameter through
@@ -14278,6 +14357,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       else:
         # Non-int operand (float, bool, …) → sound degrade.
         return mkStrOp(iekStrUnsupported, calleeSym.strVal & "_non_int", @[])
+    # RFC-0016 INT-72: `toUTF8(r)` is the encoder `$r` calls (unicode.nim:
+    # 290), so it is `$r`'s `iekRuneToStr`; `size(r)` is its byte count
+    # (`parseRuneSize`). Both bodies were walked or declined by name before:
+    # `toUTF8`'s `fastToUTF8Copy` declined, `size` had no stdlib row.
+    if calleeSym.strVal in ["toUTF8", "size"] and n.len == 2 and
+       calleeSym.owner.kind == nnkSym and
+       calleeSym.owner.strVal == "unicode" and isRuneTyped(n[1]):
+      if calleeSym.strVal == "toUTF8":
+        return mkStrOp(iekRuneToStr, "$rune", @[parseExpr(n[1], preamble, ctx)])
+      return parseRuneSize(n[1], preamble, ctx)
     # Phase 16 A7-S3: `runeLen(s)` / `s.runeLen` — UFCS or direct call.
     # Intercept BEFORE the string-receiver guard so the std/unicode body is never
     # walked. Origin guard (owner == "unicode") prevents hijacking a user-defined
@@ -15797,6 +15886,7 @@ proc unsafeCastReason(n: NimNode): string =
   case n.kind
   of nnkCast:
     if isNilPtrCast(n): ""
+    elif n.len == 2 and n[1].typeKind == ntyPointer: ""   # RFC-0016 INT-83
     elif n.len >= 1 and n[0].kind == nnkPtrTy:
       "cast[ptr T]"
     else:

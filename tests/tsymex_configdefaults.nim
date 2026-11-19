@@ -24,6 +24,7 @@
 
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # A SUT whose verdict depends on the arithmetic checks being modelled, which
@@ -133,7 +134,7 @@ suite "RFC-0010 B2 — behaviour through the real entry point":
     # The end-to-end assertion. Under the defaults the arithmetic fork is
     # opened and the query is sxRaised. Structural equality could not have
     # caught a dropped default on its own — the settings travel into a macro and become a cache key.
-    let viaLiteral = symexFind(mayOverflow, tRaisedExn("OverflowDefect"),
+    let viaLiteral = pinFind(mayOverflow, tRaisedExn("OverflowDefect"),
                                SymexSettings(integerSemantics: isOptimised))
     check viaLiteral.status == sxRaised
     # Guarded: `raisedTypeId` lives on the sxRaised arm, so reading it after a
@@ -143,9 +144,9 @@ suite "RFC-0010 B2 — behaviour through the real entry point":
       check viaLiteral.raisedTypeId == "OverflowDefect"
 
   test "the partial literal and defaultSymexSettings() agree":
-    let viaLiteral = symexFind(mayOverflow, tRaisedExn("OverflowDefect"),
+    let viaLiteral = pinFind(mayOverflow, tRaisedExn("OverflowDefect"),
                                SymexSettings(integerSemantics: isOptimised))
-    let viaDefaults = symexFind(mayOverflow, tRaisedExn("OverflowDefect"),
+    let viaDefaults = pinFind(mayOverflow, tRaisedExn("OverflowDefect"),
                                 defaultSymexSettings())
     check viaLiteral.status == viaDefaults.status
     if viaLiteral.status == sxRaised and viaDefaults.status == sxRaised:

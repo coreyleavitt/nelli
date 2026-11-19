@@ -1381,7 +1381,21 @@ suite "Phase 15 CR-2 — version bumps":
     ## XCLASS, `count` lowerings, `replace`'s facts, the 8.37 JIT's folds,
     ## the SKIP:NAME count across attempts, and the attempt automata's
     ## worlds and re-run depths; 413-418 reserved): 412->419.
-    check symexWalkerVersion == "441"
+    ## RFC-0016 INT-72 (a free Rune is any int32; 413-425 reserved):
+    ## 412->426.
+    ## RFC-0016 INT-77 (a float range is the closed IEEE interval; 427-435
+    ## reserved): 426->436.
+    ## RFC-0016 INT-82 (an allocation is apart from the entry state; 437-439
+    ## reserved; provisional): 436->440.
+    ## RFC-0016 INT-83 (a `pointer` is an address of its own sort; 441-442
+    ## reserved; provisional): 440->443.
+    ## RFC-0016 INT-84 (a holey enum input ranges over its declared values;
+    ## provisional): 443->444.
+    ## RFC-0016 INT-85 (a zeroed slot of a type without 0 holds 0;
+    ## provisional): 444->445.
+    ## RFC-0016 INT-85 float (a zeroed float-range slot holds 0.0;
+    ## provisional): 445->446.
+    check symexWalkerVersion == "446"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

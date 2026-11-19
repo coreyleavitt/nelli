@@ -25,6 +25,7 @@ import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/choice
 import z3
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -55,7 +56,7 @@ suite "S8o (0): byte tests take the character form on every Z3 build":
     ## this query needs about 2.3M units; in character form it is
     ## immediate. RED on Z3 4.13.4 (the symex-mingw leg's build), where
     ## the rewrite matched no operator: `sxUnknown` under this budget.
-    let r = symexFind(q20, tLabel("s8o_q20"), tightSeqBudget)
+    let r = pinFind(q20, tLabel("s8o_q20"), tightSeqBudget)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -92,7 +93,7 @@ suite "S8o (1): every byte equality takes the character form":
     ## Lowered, the pair equalities needed 2.5M units from their own text
     ## (Z3 4.13.4) and ran past 20M in the walker on 5.1 (`sxUnknown`);
     ## as `str.at(s, 39) == str.at(s, 3)`, 51k.
-    let r = symexFind(pairs, tLabel("s8o_pairs"), tightSeqBudget)
+    let r = pinFind(pairs, tLabel("s8o_pairs"), tightSeqBudget)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -102,7 +103,7 @@ suite "S8o (1): every byte equality takes the character form":
   test "s[39] == c and s[2] == c for a char parameter c, within 1M units":
     ## Lowered: 8.5M units from its own text, past 20M in the walker.
     ## `str.at(s, 39) == str.from_code(bv2nat(c))`: 185k.
-    let r = symexFind(withChar, tLabel("s8o_char"), tightSeqBudget)
+    let r = pinFind(withChar, tLabel("s8o_char"), tightSeqBudget)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -111,7 +112,7 @@ suite "S8o (1): every byte equality takes the character form":
       check w.len == 40 and w[39] == c and w[2] == c and c != 'a'
 
   test "the character form keeps a byte contradiction UNSAT":
-    let r = symexFind(clash, tLabel("s8o_clash"), tightSeqBudget)
+    let r = pinFind(clash, tLabel("s8o_clash"), tightSeqBudget)
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
@@ -229,7 +230,7 @@ suite "S8o (4): seq.last_indexof never reaches the incremental core":
 
   test "a capped-out rfind query is decided by the one-shot solver":
     const smallCap = SymexSettings(budget: ResourceBudget(maxSeqLen: 8))
-    let r = symexFind(lastIdxFree, tLabel("s8o_rfind_free"), smallCap)
+    let r = pinFind(lastIdxFree, tLabel("s8o_rfind_free"), smallCap)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -240,7 +241,7 @@ suite "S8o (4): seq.last_indexof never reaches the incremental core":
     # RFC-0005 batch 6 (S8bl's fold): no split, so the cap's own regime --
     # an in-band decline, never sxUnsat.
     const smallCap = SymexSettings(budget: ResourceBudget(maxSeqLen: 8))
-    let r = symexFind(lastIdx, tLabel("s8o_rfind"), smallCap)
+    let r = pinFind(lastIdx, tLabel("s8o_rfind"), smallCap)
     checkpoint show(r.errors)
     check r.status == sxUnknown
     var capDecline = false

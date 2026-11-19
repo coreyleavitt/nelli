@@ -21,6 +21,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -69,7 +70,7 @@ suite "S8q (1): a scan-pair offset parameter reaches Z3 as an Int":
 
   test "start is promoted, stamped with its width, over int's range":
     ## RED: no abstraction entry (`start` was a bit-vector).
-    let r = symexFind(sutPairFound, tLabel("s8q_pair_hit"), tightSeqBudget)
+    let r = pinFind(sutPairFound, tLabel("s8q_pair_hit"), tightSeqBudget)
     checkpoint show(r.errors)
     var found = false
     for a in r.abstractions:
@@ -81,7 +82,7 @@ suite "S8q (1): a scan-pair offset parameter reaches Z3 as an Int":
   test "B7R-3's query is decided within 2M units, with a replayable witness":
     ## RED: in the bridged form Z3 does not answer this within the budget
     ## (S8o: past 300 s in the walker, `unknown` at 10M standalone).
-    let r = symexFind(sutPairFound, tLabel("s8q_pair_hit"), tightSeqBudget)
+    let r = pinFind(sutPairFound, tLabel("s8q_pair_hit"), tightSeqBudget)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -95,7 +96,7 @@ suite "S8q (1): a scan-pair offset parameter reaches Z3 as an Int":
     try: sutPairOverflow(@[], high(int))
     except OverflowDefect: raised = true
     check raised
-    let r = symexFind(sutPairOverflow, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sutPairOverflow, tRaisedExn("OverflowDefect"))
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -107,7 +108,7 @@ suite "S8q (1): a scan-pair offset parameter reaches Z3 as an Int":
     try: sutPairNegative(@[0'u8], -1)
     except IndexDefect: raised = true
     check raised
-    let r = symexFind(sutPairNegative, tIndexError())
+    let r = pinFind(sutPairNegative, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -147,7 +148,7 @@ suite "S8q (3): symexAssume(a and b and ...) adds its conjuncts without forking"
     ## IndexDefect raise its read forks (a real raise; `data.len == 12`
     ## makes each one UNSAT).
     symexZ3CallCount = 0
-    let r = symexFind(sutAssume12, tLabel("s8q_assume12"))
+    let r = pinFind(sutAssume12, tLabel("s8q_assume12"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -158,10 +159,10 @@ suite "S8q (3): symexAssume(a and b and ...) adds its conjuncts without forking"
 
   test "short-circuit is kept: a guarded read never raises":
     ## Probe: Nim never evaluates `s[i]` here with `i` out of range.
-    let r = symexFind(sutAssumeGuarded, tIndexError())
+    let r = pinFind(sutAssumeGuarded, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxUnsat
-    let r2 = symexFind(sutAssumeGuarded, tLabel("s8q_guarded"))
+    let r2 = pinFind(sutAssumeGuarded, tLabel("s8q_guarded"))
     check r2.status == sxSat
     if r2.status == sxSat:
       let (s, i) = r2.witness
@@ -173,14 +174,22 @@ suite "S8q (3): symexAssume(a and b and ...) adds its conjuncts without forking"
     try: sutAssumeUnguarded("", 0)
     except IndexDefect: raised = true
     check raised
-    let r = symexFind(sutAssumeUnguarded, tIndexError())
+    let r = pinFind(sutAssumeUnguarded, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxRaised
 
   test "contradictory conjuncts leave the target unreachable":
+    ## The assumption has no model, so the verdict holds vacuously by design:
+    ## no domain can be steered into an empty one, and `pinFind` refuses the
+    ## pin (every generated run is rejected). The refusal is checked, and so
+    ## is the native fact the verdict rests on: no candidate passes the assume.
     let r = symexFind(sutAssumeContradiction, tLabel("s8q_contradiction"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
+    expect PinFailure:
+      discard pinFind(sutAssumeContradiction, tLabel("s8q_contradiction"))
+    for s in ["", "a", "aa", "ab", "ba", "bb", "abc"]:
+      check nativeRun(sutAssumeContradiction(s)).rejected
 
 suite "S8q: walker version floor":
 

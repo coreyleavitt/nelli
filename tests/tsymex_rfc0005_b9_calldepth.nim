@@ -14,6 +14,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/runtime
 import nelli/smt/nativestack
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -51,7 +52,7 @@ suite "batch 9: Nim's call depth limit":
     check nimFramesLeft() <= 800
 
   test "a depth budget past the limit declines in-band, named":
-    let r = symexFind(foreverSut, tLabel("cd_forever_never"), deep)
+    let r = pinFind(foreverSut, tLabel("cd_forever_never"), deep)
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)
@@ -60,7 +61,7 @@ suite "batch 9: Nim's call depth limit":
     check rdNativeStack in r.soundness.runDependence
 
   test "a call the limit leaves room for is inlined and decides":
-    let r = symexFind(shallow, tLabel("cd_shallow"))
+    let r = pinFind(shallow, tLabel("cd_shallow"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check rdNativeStack notin r.soundness.runDependence

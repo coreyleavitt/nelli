@@ -32,6 +32,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 proc readFirst(s: seq[range[0..100]]) =
   if s.len > 0 and s[0] > 100:
@@ -64,11 +65,11 @@ suite "#163 wiring-audit W2 -- seq[range[lo..hi]] elements reach the constraint"
     ## Was `sxSat`: with no constraint on the element, `s[0] > 100` was
     ## satisfiable for a seq declared `seq[range[0..100]]` -- the model
     ## picked `101`, itself already a `RangeDefect` waiting to happen.
-    let r = symexFind(readFirst, tLabel("big"))
+    let r = pinFind(readFirst, tLabel("big"))
     check r.status == sxUnsat
 
   test "the bounds are a refinement, not a ban -- an in-range target survives":
-    let r = symexFind(edgeInRange, tLabel("edge"))
+    let r = pinFind(edgeInRange, tLabel("edge"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0].len > 0
@@ -80,7 +81,7 @@ suite "#163 wiring-audit W2 -- seq[range[lo..hi]] elements reach the constraint"
     ## which `range[50..60]` cannot hold. `s.len == 2` alone does not depend
     ## on any element value, so the verdict is correctly `sxSat` before and
     ## after the fix; only the WITNESS was ever wrong.
-    let r = symexFind(onlyLen, tLabel("hit"))
+    let r = pinFind(onlyLen, tLabel("hit"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0].len == 2
@@ -128,11 +129,11 @@ suite "#163 wiring-audit W4 -- ref object range-typed fields reach the constrain
     ## `c.w` is read only through the lazily-materialised field-split heap
     ## (`runtime_heap.nim`'s `isDeref`), which never asserted the declared
     ## bounds, so the model was free to pick `61` to satisfy `c.w > 60`).
-    let r = symexFind(beyondR, tLabel("impossible"))
+    let r = pinFind(beyondR, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "the bounds are a refinement, not a ban -- an in-range target survives":
-    let r = symexFind(withinR, tLabel("reachable"))
+    let r = pinFind(withinR, tLabel("reachable"))
     check r.status == sxSat
 
   test "an unread sibling ref sharing the field-split heap stays in range":
@@ -145,7 +146,7 @@ suite "#163 wiring-audit W4 -- ref object range-typed fields reach the constrain
     ## `CfgR.w`'s declared `range[50..60]` raised `RangeDefect` out of the
     ## caller's own test process, even though `c1`'s OWN `w` was perfectly
     ## sound.
-    let r = symexFind(twoRefs, tLabel("hit"))
+    let r = pinFind(twoRefs, tLabel("hit"))
     check r.status == sxSat  ## did not crash constructing this result
 
 # ---------------------------------------------------------------------------
@@ -167,11 +168,11 @@ proc withinBoxNonReg(b: BoxNonReg) =
 suite "#163 wiring-audit non-regression -- #162 slice 5 value-object fields":
 
   test "a value-object field's bounds still reach the path condition":
-    let r = symexFind(beyondBoxNonReg, tLabel("impossible"))
+    let r = pinFind(beyondBoxNonReg, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "an in-range value-object target still survives":
-    let r = symexFind(withinBoxNonReg, tLabel("reachable"))
+    let r = pinFind(withinBoxNonReg, tLabel("reachable"))
     check r.status == sxSat
 
 suite "#163 audit -- walker version pin":

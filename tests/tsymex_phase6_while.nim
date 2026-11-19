@@ -7,6 +7,7 @@
 from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex Phase 6 — while":
   test "tracer: target reachable only after loop body executes":
@@ -16,7 +17,7 @@ suite "symex Phase 6 — while":
         i = i + 1
       if i == 3:
         symexTarget("hit")
-    let r = symexFind(loopToThree, tLabel("hit"))
+    let r = pinFind(loopToThree, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] >= 3
 
@@ -30,6 +31,6 @@ suite "symex Phase 6 — while":
         i = i + 1
       if i == 100:
         symexTarget("deep")
-    let r = symexFind(loopToHundred, tLabel("deep"))
+    let r = pinFind(loopToHundred, tLabel("deep"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)

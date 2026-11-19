@@ -61,6 +61,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import audit_scan_utils
+import ./s8cu_helpers
 
 proc kindNames(errs: seq[SymexErrorInfo]): seq[string] =
   for e in errs: result.add $e.kind
@@ -329,7 +330,7 @@ suite "RFC-0005 S6a (a) -- the budget family's classOf rows":
 suite "RFC-0005 S6a (b) -- each kind at its site, and no sxUnsat through it":
 
   test "k-unroll exhaustion records beBudgetExhausted; a dead target stays sxUnknown":
-    let r = symexFind(s6aLoopDead, tLabel("s6a_loop_dead"))
+    let r = pinFind(s6aLoopDead, tLabel("s6a_loop_dead"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.hasKind(beBudgetExhausted)
     check not r.errors.hasKind(beBudgetExhaustedPrune)
@@ -337,57 +338,57 @@ suite "RFC-0005 S6a (b) -- each kind at its site, and no sxUnsat through it":
     check r.status == sxUnknown
 
   test "k-unroll: a target live only in the omitted iterations is sxUnknown, never sxUnsat":
-    let r = symexFind(s6aLoopPastBound, tLabel("s6a_loop_past_bound"))
+    let r = pinFind(s6aLoopPastBound, tLabel("s6a_loop_past_bound"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.sevErrorKinds == @[beBudgetExhausted]
     check r.status == sxUnknown
 
   test "k-unroll: a target live only on the fabricated survivor is sxUnknown, never sxSat":
-    let r = symexFind(s6aLoopFabricated, tLabel("s6a_loop_fabricated"))
+    let r = pinFind(s6aLoopFabricated, tLabel("s6a_loop_fabricated"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.hasKind(beBudgetExhausted)
     check r.status == sxUnknown
 
   test "assumed-bound k-unroll records beBudgetExhaustedAssumedBound; dead target stays sxUnknown":
-    let r = symexFind(s6aAssumedDead, tLabel("s6a_assumed_dead"))
+    let r = pinFind(s6aAssumedDead, tLabel("s6a_assumed_dead"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.hasKind(beBudgetExhaustedAssumedBound)
     check not r.errors.hasKind(beBudgetExhausted)
     check r.status == sxUnknown
 
   test "frontier prune records beBudgetExhaustedPrune (not beBudgetExhausted); dead target stays sxUnknown":
-    let r = symexFind(s6aPruneDead, tLabel("s6a_prune_dead"), frontierOne)
+    let r = pinFind(s6aPruneDead, tLabel("s6a_prune_dead"), frontierOne)
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.hasKind(beBudgetExhaustedPrune)
     check not r.errors.hasKind(beBudgetExhausted)
     check r.status == sxUnknown
 
   test "frontier prune: a target that may live only on an evicted path is never sxUnsat":
-    let r = symexFind(s6aPruneOnlyOneArm, tLabel("s6a_prune_one_arm"), frontierOne)
+    let r = pinFind(s6aPruneOnlyOneArm, tLabel("s6a_prune_one_arm"), frontierOne)
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.sevErrorKinds == @[beBudgetExhaustedPrune]
     check r.status != sxUnsat
 
   test "control: the prune SUT without a cap is sxUnsat (the dead target is genuinely dead)":
-    let r = symexFind(s6aPruneDead, tLabel("s6a_prune_dead"))
+    let r = pinFind(s6aPruneDead, tLabel("s6a_prune_dead"))
     check r.status == sxUnsat
 
   test "maxCallDepth bail records beBudgetExhaustedUnmodelled (not beBudgetExhausted); dead target stays sxUnknown":
-    let r = symexFind(s6aDepthDead, tLabel("s6a_depth_dead"), depthZero)
+    let r = pinFind(s6aDepthDead, tLabel("s6a_depth_dead"), depthZero)
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.hasKind(beBudgetExhaustedUnmodelled)
     check not r.errors.hasKind(beBudgetExhausted)
     check r.status == sxUnknown
 
   test "variant-ctor field budget records beBudgetExhaustedUnmodelled; dead target stays sxUnknown":
-    let r = symexFind(s6aVariantDead, tLabel("s6a_variant_dead"))
+    let r = pinFind(s6aVariantDead, tLabel("s6a_variant_dead"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.hasKind(beBudgetExhaustedUnmodelled)
     check not r.errors.hasKind(beBudgetExhausted)
     check r.status == sxUnknown
 
   test "closure inline budget records ceInlineBudgetExceeded; dead target stays sxUnknown":
-    let r = symexFind(s6aInlineDead, tLabel("s6a_inline_dead"), inlineOne)
+    let r = pinFind(s6aInlineDead, tLabel("s6a_inline_dead"), inlineOne)
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.hasKind(ceInlineBudgetExceeded)
     check r.status == sxUnknown
@@ -399,7 +400,7 @@ suite "RFC-0005 S6a (b) -- each kind at its site, and no sxUnsat through it":
 suite "RFC-0005 S6a (c) -- the maxCallDepth / variant-ctor bail substitutes":
 
   test "a dropped var-param write: the real target (every n) is never sxUnsat":
-    let r = symexFind(s6aDepthVarParam, tLabel("s6a_depth_varparam"), depthZero)
+    let r = pinFind(s6aDepthVarParam, tLabel("s6a_depth_varparam"), depthZero)
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.sevErrorKinds == @[beBudgetExhaustedUnmodelled]
     check r.status != sxUnsat
@@ -407,13 +408,13 @@ suite "RFC-0005 S6a (c) -- the maxCallDepth / variant-ctor bail substitutes":
   test "a witness only through the havoc retSym is a candidate: sxUnknown, never sxSat":
     ## The RFC's warning: under the merged kind classified dcOmitted this
     ## path would carry {} and report a clean sxSat.
-    let r = symexFind(s6aDepthHavocRet, tLabel("s6a_depth_havoc_ret"), depthZero)
+    let r = pinFind(s6aDepthHavocRet, tLabel("s6a_depth_havoc_ret"), depthZero)
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.errors.sevErrorKinds == @[beBudgetExhaustedUnmodelled]
     check r.status == sxUnknown
 
   test "a dropped variant-ctor operand raise: the real handler is never sxUnsat":
-    let r = symexFind(s6aVariantDroppedOperand,
+    let r = pinFind(s6aVariantDroppedOperand,
                       tLabel("s6a_variant_dropped_operand"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     ## The parser A-normalises the construction into a temp

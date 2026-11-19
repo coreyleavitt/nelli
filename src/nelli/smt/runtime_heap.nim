@@ -467,7 +467,7 @@ proc cellImage(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                                 arm.fieldNames[j], refSort, fty, ty)
       keepHeaps(p, cell)
       let v = heapCellSelect(ctx, cell, refAst, fty)
-      for c in rangeCondsIfNeeded(v, fty): p.pc.add c
+      for c in readRangeConds(v, fty): p.pc.add c
       let bits = placeBits(v, f)
       if bits.isSome:
         img = imgWrite(img, f.off - lay.unionOff, f.size, bits.get)
@@ -3232,7 +3232,7 @@ proc refVariantWholeRead(ctx: Z3Context; p: Path; refSort: RawZ3Sort;
     parts.add v
     for c in cell: result.cells.add c
     result.conds.add heapCellWfConds(ctx, s.key, refSort, s.ty, refAst)
-    result.conds.add rangeCondsIfNeeded(v, s.ty)
+    result.conds.add readRangeConds(v, s.ty)
   var scratchPC: seq[Z3Bool]
   let proto = allocateSym(ty, "__refVariantWholeProto", scratchPC)
   result.val = svWithParts(proto, ty, parts)
@@ -3568,7 +3568,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           # field holds independent of which arm is currently active.
           # Review R11: routed through `rangeCondsIfNeeded`.
           for idx, hit in armHits:
-            childPc = childPc & rangeCondsIfNeeded(armSelects[idx][1], hit.fieldTy)
+            childPc = childPc & readRangeConds(armSelects[idx][1], hit.fieldTy)
           childPc = childPc & armWf
           # N42: second drain — covers a degrade from any arm-field heap just
           # materialised above (each iteration can independently degrade via
@@ -3854,7 +3854,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
         # (`renderLeafFieldAt`'s witness-side clamp covers that case).
         # Review R11: routed through `rangeCondsIfNeeded` (defined in
         # runtime.nim, beside `bvRangeConds`; this file is `include`d there).
-        childPc = childPc & rangeCondsIfNeeded(valSV, stmt.dElemTy)
+        # RFC-0016 INT-85: a cell `new` zeroed is not bounded.
+        childPc = childPc & readRangeConds(valSV, stmt.dElemTy)
         # RFC-0005 S8ap: the input cell of a compound / string value is one
         # Nim can hold (see `heapCellWfConds`).
         childPc = childPc & heapCellWfConds(ctx, heapKey, refSort, stmt.dElemTy,
@@ -3900,6 +3901,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
       var child = forkPath(p, p.pc, p.env)
       let newRef = freshRef(ctx, refSort, typeId, child)
       assertFreshness(ctx, child, typeId, newRef, w.settings)
+      noteAllocation(ctx, newRef)   # RFC-0016 INT-82: apart from the entry state
       var newEnv = child.env
       if isPtr:
         newEnv[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,

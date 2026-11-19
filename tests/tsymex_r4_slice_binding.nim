@@ -19,6 +19,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc sliceLenOk(s: string) =
   ## p = find-derived bound; len(s[0 ..< p]) == p always holds when p > 0.
@@ -65,29 +66,29 @@ proc bvBoundDeclined(s: string, i: int) =
 suite "symex round-4 Slice A — bound string slices lower as substrings":
 
   test "find-bounded slice: len(s[0 ..< p]) == p is SAT with a consistent witness":
-    let r = symexFind(sliceLenOk, tLabel("len-ok"))
+    let r = pinFind(sliceLenOk, tLabel("len-ok"))
     check r.status == sxSat
     let ws = r.witness[0]
     let p = ws.find(':')
     check p > 0 and ws[0 ..< p].len == p
 
   test "find-bounded slice: len == p + 1 is UNSAT (soundness)":
-    let r = symexFind(sliceLenImpossible, tLabel("len-impossible"))
+    let r = pinFind(sliceLenImpossible, tLabel("len-impossible"))
     check r.status == sxUnsat
 
   test "strict prefix never equals its extension (the pre-v66 false-SAT hazard)":
-    let r = symexFind(slicePrefixNeq, tLabel("impossible-eq"))
+    let r = pinFind(slicePrefixNeq, tLabel("impossible-eq"))
     check r.status == sxUnsat
 
   test "bound slice flows into a later endsWith: SAT with a consistent witness":
-    let r = symexFind(sliceEndsWith, tLabel("ends-md5"))
+    let r = pinFind(sliceEndsWith, tLabel("ends-md5"))
     check r.status == sxSat
     let ws = r.witness[0]
     let p = ws.find(':')
     check p >= 4 and ws[0 ..< p].endsWith(".md5")
 
   test "free-int-param bound declines classified (the bv2int non-termination shape)":
-    let r = symexFind(bvBoundDeclined, tLabel("bv-bound"))
+    let r = pinFind(bvBoundDeclined, tLabel("bv-bound"))
     check r.status == sxUnknown
     check r.errors.named(seUnsupportedStringOp)
     check r.errors.len > 0

@@ -6,6 +6,7 @@
 ## per-variable-banning regression pin is the same.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 const Unchecked = SymexSettings(integerSemantics: isOptimised)
 
@@ -37,7 +38,7 @@ suite "#163 review R14c -- the wrap-scan bans the whole program, not per-variabl
     check rtUnsafe(4_000_000_000'i64) < 0'i64
 
   test "in isolation, the provably-safe param DOES promote":
-    let r = symexFind(safeAlone, tLabel("t"), Unchecked)
+    let r = pinFind(safeAlone, tLabel("t"), Unchecked)
     check r.status == sxSat
     check r.abstractions.len == 1
 
@@ -46,7 +47,7 @@ suite "#163 review R14c -- the wrap-scan bans the whole program, not per-variabl
     ## leave `safeP` promoted here (`abstractions.len == 1`, naming only
     ## `safeP`) even though `unsafeP` is banned -- exactly the mixed-sort
     ## state the comment says must never happen under unchecked semantics.
-    let r = symexFind(mixedBan, tLabel("t"), Unchecked)
+    let r = pinFind(mixedBan, tLabel("t"), Unchecked)
     check r.status == sxSat
     check r.abstractions.len == 0
 

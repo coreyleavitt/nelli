@@ -48,6 +48,7 @@ import std/[unittest, strutils, sets, os]
 import nelli/symex
 import nelli/smt/canonicalize
 import audit_scan_utils
+import ./s8cu_helpers
 
 # ============================================================================
 # PART 1 — CHARACTERIZATION
@@ -136,20 +137,20 @@ suite "symex H1 — isAtomicIR shape-coupling characterization corpus":
     check parseInt(symexWalkerVersion) >= 73
 
   test "cell F (obj.field comparison operand under AND RHS): twin-identical, sxSat":
-    let rInline  = symexFind(fieldRhsAnd, tLabel("hit"))
-    let rHoisted = symexFind(fieldRhsAndHoisted, tLabel("hit"))
+    let rInline  = pinFind(fieldRhsAnd, tLabel("hit"))
+    let rHoisted = pinFind(fieldRhsAndHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell I (arr[j] comparison operand under AND RHS, in-bounds): twin-identical, sxSat":
-    let rInline  = symexFind(indexRhsAnd, tLabel("hit"))
-    let rHoisted = symexFind(indexRhsAndHoisted, tLabel("hit"))
+    let rInline  = pinFind(indexRhsAnd, tLabel("hit"))
+    let rHoisted = pinFind(indexRhsAndHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell C (x in mySet comparison operand under AND RHS): twin-identical, sxSat":
-    let rInline  = symexFind(containsRhsAnd, tLabel("hit"))
-    let rHoisted = symexFind(containsRhsAndHoisted, tLabel("hit"))
+    let rInline  = pinFind(containsRhsAnd, tLabel("hit"))
+    let rHoisted = pinFind(containsRhsAndHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 

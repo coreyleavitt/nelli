@@ -20,6 +20,7 @@
 ## G4 is ADDITIVE under walker version "7" (no bump; Cluster G bumps at G10).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/[dsl, runtime]
 
 # --- 1. distinct float64 (FP base → bijectivity SKIPPED) --------------------
@@ -55,7 +56,7 @@ proc useKilo(k: KiloMeters): bool =
 
 suite "symex Phase 15 G4 — distinct T as a fresh uninterpreted Z3 sort":
   test "G4: distinct-FP base reaches target; bijectivity SKIPPED hint emitted":
-    let r = symexFind(useMeters, tLabel("meters_reached"))
+    let r = pinFind(useMeters, tLabel("meters_reached"))
     check r.status == sxSat
     # FP base → geDistinctBijectivitySkipped (sevHint), result still sxSat.
     var sawSkip = false
@@ -66,7 +67,7 @@ suite "symex Phase 15 G4 — distinct T as a fresh uninterpreted Z3 sort":
     check sawSkip
 
   test "G4: distinct-INT base round-trip pinned, query decidable (no hang)":
-    let r = symexFind(useUserId, tLabel("userid_reached"))
+    let r = pinFind(useUserId, tLabel("userid_reached"))
     # Decidable: a concrete sat (NOT sxUnknown from a quantifier hang, NOT a
     # 180s engine HANG). The ground eject-pin keeps the query in QF_UFBV.
     check r.status == sxSat
@@ -75,7 +76,7 @@ suite "symex Phase 15 G4 — distinct T as a fresh uninterpreted Z3 sort":
       check e.kind != geDistinctBijectivitySkipped
 
   test "G4: distinct-FP witness is non-empty (eject-reader chain)":
-    let r = symexFind(useMeters, tLabel("meters_reached"))
+    let r = pinFind(useMeters, tLabel("meters_reached"))
     check r.status == sxSat
     # The witness renders through the eject-then-base-reader chain: the
     # Meters param's base float is > 1.5 (Breadth-CRIT-1: a distinct param
@@ -83,5 +84,5 @@ suite "symex Phase 15 G4 — distinct T as a fresh uninterpreted Z3 sort":
     check float64(r.witness[0]) > 1.5
 
   test "G4: nested distinct allocates two sorts, target reachable":
-    let r = symexFind(useKilo, tLabel("kilo_reached"))
+    let r = pinFind(useKilo, tLabel("kilo_reached"))
     check r.status == sxSat

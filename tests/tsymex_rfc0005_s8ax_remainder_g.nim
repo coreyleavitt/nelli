@@ -16,6 +16,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8ax_remainder_g")
@@ -32,7 +33,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -160,7 +161,7 @@ suite "RFC-0005 S8ax (8): `addr` of a routine's variable":
     verdict(sutAddrIndexSeq, "bad", sxUnsat)
   test "a computed index is checked where `addr` takes it":
     verdict(sutAddrIndexChecked, "ok", sxSat)
-    let r = symexFind(sutAddrIndexChecked, tLabel("bad"))
+    let r = pinFind(sutAddrIndexChecked, tLabel("bad"))
     check r.status == sxRaised
 
 # ---- (9) two by-address arguments: a solver check of disjointness ---------
@@ -236,5 +237,5 @@ suite "RFC-0005 S8ax (9): by-address arguments that may be one location":
     verdict(sutAliasArm, "ok", sxSat)
     verdict(sutAliasArm, "bad", sxUnsat)
   test "fields of two arms raise where the address is taken":
-    let r = symexFind(sutAliasArmOther, tLabel("ok"))
+    let r = pinFind(sutAliasArmOther, tLabel("ok"))
     check r.status == sxRaised

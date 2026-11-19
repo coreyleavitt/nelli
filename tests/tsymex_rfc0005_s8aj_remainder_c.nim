@@ -30,6 +30,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+import ./s8cu_helpers
 
 when not defined(symexQueryStats):
   {.error: "tsymex_rfc0005_s8aj_remainder needs -d:symexQueryStats (its .nim.cfg)".}
@@ -134,7 +135,7 @@ suite "S8aj (2): an unchecked sum that wraps decides":
   template bounded(fn: typed, want: SymexStatusKind, maxSteps: int): untyped =
     block:
       symexQueryStats = @[]
-      let r = symexFind(fn, tLabel("t"), exactUnchecked)
+      let r = pinFind(fn, tLabel("t"), exactUnchecked)
       checkpoint astToStr(fn) & " " & $r.status & " " & show(r.errors)
       checkpoint symexQueryStatsSummary()
       check r.status == want

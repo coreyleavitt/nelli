@@ -41,6 +41,7 @@ import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 # =============================================================================
 # 1. Tracer (the S3 shape). `maybeSetResult`'s `x <= 0` path never touches
@@ -63,7 +64,7 @@ proc sutTracerZeroUntouchedUnreachable(x: int) =
 suite "symex round-6 R2 — tracer: untouched-result path must bind to zero":
 
   test "T1: r != 0 on the untouched (x <= 0) path is UNREACHABLE (sxUnsat, not a false sxSat)":
-    let r = symexFind(sutTracerZeroUntouchedUnreachable,
+    let r = pinFind(sutTracerZeroUntouchedUnreachable,
                        tLabel("tracer_zero_untouched_unreachable"))
     check r.status == sxUnsat
 
@@ -80,7 +81,7 @@ proc sutTracerAssignedSat(x: int) =
 suite "symex round-6 R2 — SAT companion: the assigned path":
 
   test "T2: the assigned path (x > 0, result == x) is reachable (sxSat), witness cross-checked":
-    let r = symexFind(sutTracerAssignedSat, tLabel("tracer_assigned_sat"))
+    let r = pinFind(sutTracerAssignedSat, tLabel("tracer_assigned_sat"))
     check r.status == sxSat
     let x = r.witness[0]
     check x > 0
@@ -98,7 +99,7 @@ proc sutTracerZeroSat(x: int) =
 suite "symex round-6 R2 — zero-path SAT":
 
   test "T3: the untouched path's implicit zero (x <= 0, result == 0) is reachable (sxSat)":
-    let r = symexFind(sutTracerZeroSat, tLabel("tracer_zero_sat"))
+    let r = pinFind(sutTracerZeroSat, tLabel("tracer_zero_sat"))
     check r.status == sxSat
     check r.witness[0] <= 0
     check maybeSetResult(r.witness[0]) == 0
@@ -145,19 +146,19 @@ proc sutTriPathExhaustive(x: int) =
 suite "symex round-6 R2 — multi-path: assigned arms + implicit untouched else":
 
   test "T4a: the x > 0 arm (assigned result = 1) is reachable (sxSat)":
-    let r = symexFind(sutTriPathPositive, tLabel("tripath_positive"))
+    let r = pinFind(sutTriPathPositive, tLabel("tripath_positive"))
     check r.status == sxSat
 
   test "T4b: the x < 0 arm (assigned result = -1) is reachable (sxSat)":
-    let r = symexFind(sutTriPathNegative, tLabel("tripath_negative"))
+    let r = pinFind(sutTriPathNegative, tLabel("tripath_negative"))
     check r.status == sxSat
 
   test "T4c: the x == 0 arm (untouched -> implicit result = 0) is reachable (sxSat)":
-    let r = symexFind(sutTriPathZero, tLabel("tripath_zero"))
+    let r = pinFind(sutTriPathZero, tLabel("tripath_zero"))
     check r.status == sxSat
 
   test "T4d: soundness -- the union {1, -1, 0} is exhaustive, no other value is reachable (sxUnsat)":
-    let r = symexFind(sutTriPathExhaustive, tLabel("tripath_exhaustive_impossible"))
+    let r = pinFind(sutTriPathExhaustive, tLabel("tripath_exhaustive_impossible"))
     check r.status == sxUnsat
 
 # =============================================================================
@@ -211,27 +212,27 @@ proc sutTupleZeroUnreachable(x: int) =
 suite "symex round-6 R2 — supported zero-default return types (bool / string / tuple)":
 
   test "T5a: bool -- untouched path's implicit `false` is reachable (sxSat)":
-    let r = symexFind(sutBoolZeroSat, tLabel("bool_zero_sat"))
+    let r = pinFind(sutBoolZeroSat, tLabel("bool_zero_sat"))
     check r.status == sxSat
 
   test "T5b: bool -- `true` on the untouched path is UNREACHABLE (sxUnsat)":
-    let r = symexFind(sutBoolZeroUnreachable, tLabel("bool_zero_unreachable"))
+    let r = pinFind(sutBoolZeroUnreachable, tLabel("bool_zero_unreachable"))
     check r.status == sxUnsat
 
   test "T5c: string -- untouched path's implicit \"\" is reachable (sxSat)":
-    let r = symexFind(sutStringZeroSat, tLabel("string_zero_sat"))
+    let r = pinFind(sutStringZeroSat, tLabel("string_zero_sat"))
     check r.status == sxSat
 
   test "T5d: string -- \"hit\" on the untouched path is UNREACHABLE (sxUnsat)":
-    let r = symexFind(sutStringZeroUnreachable, tLabel("string_zero_unreachable"))
+    let r = pinFind(sutStringZeroUnreachable, tLabel("string_zero_unreachable"))
     check r.status == sxUnsat
 
   test "T5e: tuple -- untouched path's implicit (0, false) is reachable (sxSat)":
-    let r = symexFind(sutTupleZeroSat, tLabel("tuple_zero_sat"))
+    let r = pinFind(sutTupleZeroSat, tLabel("tuple_zero_sat"))
     check r.status == sxSat
 
   test "T5f: tuple -- field a == 999 on the untouched path is UNREACHABLE (sxUnsat)":
-    let r = symexFind(sutTupleZeroUnreachable, tLabel("tuple_zero_unreachable"))
+    let r = pinFind(sutTupleZeroUnreachable, tLabel("tuple_zero_unreachable"))
     check r.status == sxUnsat
 
 # -----------------------------------------------------------------------------
@@ -340,42 +341,42 @@ proc sutMultiVariantZeroDeclines(x: int) =
 suite "symex round-6 R2 — honest decline: a return type defaultZero cannot back (float)":
 
   test "T5g: the assigned float path still proves sxSat (unaffected regression)":
-    let r = symexFind(sutFloatAssignedSat, tLabel("float_assigned_sat"))
+    let r = pinFind(sutFloatAssignedSat, tLabel("float_assigned_sat"))
     check r.status == sxSat
 
   test "T5h: the untouched float path binds 0.0 (RFC-0005 S8f; was a classified decline)":
     ## Walker 154 gives `defaultZero` its float arm (Nim's `default(float)`
     ## is 0.0), so the untouched path is modelled, not havocked: a clean
     ## sxSat with no decline, and `r != 0.0` there is unreachable.
-    let r = symexFind(sutFloatZeroDeclines, tLabel("float_zero_declines"))
+    let r = pinFind(sutFloatZeroDeclines, tLabel("float_zero_declines"))
     check r.status == sxSat
     check rfc0005RawStatus == sxSat
     check r.errors.len == 0
-    let z = symexFind(sutFloatZeroNonzero, tLabel("float_zero_nonzero"))
+    let z = pinFind(sutFloatZeroNonzero, tLabel("float_zero_nonzero"))
     check z.status == sxUnsat
 
   test "T5h-2: an untouched variant result is its zero value (RFC-0005 S8n; was a classified decline)":
     ## Walker 162 gives `defaultZero` the single-case variant's zero value
     ## (discriminator ordinal 0, every field zero), so the untouched path is
     ## modelled: a clean sxSat, and a non-zero value there is unreachable.
-    let r = symexFind(sutVariantZeroDeclines, tLabel("variant_zero_declines"))
+    let r = pinFind(sutVariantZeroDeclines, tLabel("variant_zero_declines"))
     check r.status == sxSat
     check rfc0005RawStatus == sxSat
     check r.errors.len == 0
-    let z = symexFind(sutVariantZeroNonzero, tLabel("variant_zero_nonzero"))
+    let z = pinFind(sutVariantZeroNonzero, tLabel("variant_zero_nonzero"))
     check z.status == sxUnsat
 
   test "T5h-3: an untouched multi-variant result is its zero value (RFC-0005 S8p; was a classified decline)":
-    let r = symexFind(sutMultiVariantZero, tLabel("multivariant_zero"))
+    let r = pinFind(sutMultiVariantZero, tLabel("multivariant_zero"))
     check r.status == sxSat
     check rfc0005RawStatus == sxSat
     check r.errors.len == 0
-    let z = symexFind(sutMultiVariantZeroNonzero,
+    let z = pinFind(sutMultiVariantZeroNonzero,
                       tLabel("multivariant_zero_nonzero"))
     check z.status == sxUnsat
 
   test "T5h-4: a result type with no modelled zero (a multi-variant with a `HashSet[string]` field) still declines, never a bound wrong value":
-    let r = symexFind(sutMultiVariantZeroDeclines,
+    let r = pinFind(sutMultiVariantZeroDeclines,
                       tLabel("multivariant_zero_declines"))
     # RFC-0005 S8z: the reachable target was a replay-confirmed sxSat over
     # an enum field with no ordinal 0, which S8z gives its zero. No type
@@ -416,7 +417,7 @@ proc sutTupleUnbackedSeqZeroFieldNoCrash(x: int) =
 suite "symex round-6 R2 — nested unbacked-elem seq field zero-inits without crashing":
 
   test "T5i: the untouched path's sibling scalar field still proves sxSat, no crash":
-    let r = symexFind(sutTupleUnbackedSeqZeroFieldNoCrash,
+    let r = pinFind(sutTupleUnbackedSeqZeroFieldNoCrash,
                        tLabel("tuple_unbackedseq_zero_field_sat"))
     check r.status == sxSat
 
@@ -467,21 +468,21 @@ proc sutAlwaysAssignNeverNegative(x: int) =
 suite "symex round-6 R2 — regression: explicit return still binds correctly":
 
   test "T6a: explicit-return callee, reachable arm (sxSat)":
-    let r = symexFind(sutExplicitReturnSat, tLabel("explicit_return_sat"))
+    let r = pinFind(sutExplicitReturnSat, tLabel("explicit_return_sat"))
     check r.status == sxSat
 
   test "T6b: explicit-return callee, soundness -- r != x is impossible for x > 0 (sxUnsat)":
-    let r = symexFind(sutExplicitReturnUnsat, tLabel("explicit_return_impossible"))
+    let r = pinFind(sutExplicitReturnUnsat, tLabel("explicit_return_impossible"))
     check r.status == sxUnsat
 
 suite "symex round-6 R2 — regression: v86 always-assigned fallthrough still binds correctly":
 
   test "T6c: always-assigned fallthrough callee, reachable arm (sxSat)":
-    let r = symexFind(sutAlwaysAssignSat, tLabel("always_assign_sat"))
+    let r = pinFind(sutAlwaysAssignSat, tLabel("always_assign_sat"))
     check r.status == sxSat
 
   test "T6d: always-assigned fallthrough callee, soundness -- result is never negative (sxUnsat)":
-    let r = symexFind(sutAlwaysAssignNeverNegative, tLabel("always_assign_never_negative"))
+    let r = pinFind(sutAlwaysAssignNeverNegative, tLabel("always_assign_never_negative"))
     check r.status == sxUnsat
 
 # =============================================================================

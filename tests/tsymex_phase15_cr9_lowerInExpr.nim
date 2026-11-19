@@ -1,4 +1,4 @@
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/unittest
 import std/sequtils
 import nelli/symex
@@ -73,7 +73,7 @@ suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate"
     ## low(int)), so no RangeDefect path exists.
     ## K10a-float: the out-of-range side halts (`ubFloatToIntRange`), so the
     ## run is an untrusted sxUnknown rather than an sxUnsat.
-    let r = symexFind(cr9_floatIntLet, tRaisedExn("RangeDefect"))
+    let r = pinFind(cr9_floatIntLet, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
     check r.errors.named(ubFloatToIntRange)
     check not r.trusted
@@ -81,18 +81,18 @@ suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate"
   test "CR-9 S1: float→int let — tLabel search returns sxSat (ADR-0012: label wins)":
     ## The label `cr9_floatIntLet_hit` (v==7 at x=7.0) is cleanly reachable,
     ## so the verdict is sxSat.
-    let r = symexFind(cr9_floatIntLet, tLabel("cr9_floatIntLet_hit"))
+    let r = pinFind(cr9_floatIntLet, tLabel("cr9_floatIntLet_hit"))
     check r.status == sxSat
 
   test "CR-9 S2: arithmetic let: sxSat (no drain side-effects; identity path)":
     ## Plain a + b == 42.  No float bounds, no closure.  The drain (and future
     ## wrapper) must be a no-op: path is returned unchanged, verdict is sxSat.
-    let r = symexFind(cr9_arithLet, tLabel("cr9_arithLet_hit"))
+    let r = pinFind(cr9_arithLet, tLabel("cr9_arithLet_hit"))
     check r.status == sxSat
 
   test "CR-9 S2: arithmetic let witness round-trips (a + b == 42 at runtime)":
     ## The witness (a, b) must satisfy a + b == 42.
-    let r = symexFind(cr9_arithLet, tLabel("cr9_arithLet_hit"))
+    let r = pinFind(cr9_arithLet, tLabel("cr9_arithLet_hit"))
     check r.status == sxSat
     let a = r.witness[0]
     let b = r.witness[1]
@@ -101,12 +101,12 @@ suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate"
   test "CR-9 S3: float→int in while-guard: sxSat (domain-bound hint retired by R16-2)":
     ## R16-2 retired the feConvDomainExcluded hint; S8g retired its
     ## RangeDefect fork (Nim's int(f) never raises). The sat verdict remains.
-    let r = symexFind(cr9_floatIntWhile, tLabel("cr9_floatIntWhile_hit"))
+    let r = pinFind(cr9_floatIntWhile, tLabel("cr9_floatIntWhile_hit"))
     check r.status == sxSat
 
   test "CR-9 S3: float→int while-guard witness round-trips (int(x) == 5 at runtime)":
     ## The witness (x, k) must produce int(x) == 5 at the target.
-    let r = symexFind(cr9_floatIntWhile, tLabel("cr9_floatIntWhile_hit"))
+    let r = pinFind(cr9_floatIntWhile, tLabel("cr9_floatIntWhile_hit"))
     check r.status == sxSat
     let x = r.witness[0]
     check int(x) == 5

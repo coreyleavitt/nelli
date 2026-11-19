@@ -1911,6 +1911,9 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   of iekBitSet:
     # RFC-0005 S8bq. A set, or a bool / card computed from sets.
     none(SymVal)
+  of iekPtrCast:
+    # RFC-0016 INT-83. An address: compared through `refEq`, not a proto.
+    none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
@@ -2642,6 +2645,55 @@ proc bitSetCardFacts(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       result.add ka == both + bsPopcount(bsBin(Z3_mk_bvand, a, bsNot(b)), n)
       result.add kb == both + bsPopcount(bsBin(Z3_mk_bvand, b, bsNot(a)), n)
 
+proc lowerPtrCast(env: Env, e: IRExpr): SymVal =
+  ## RFC-0016 INT-83. An address reinterpreted between `pointer` and a typed
+  ## sort (`pointerAddrOf` / `pointerAsTyped`, heap_model.nim's section on
+  ## `pointer`). A run whose pointers are read as one sort and converted from
+  ## or to another declines here (`heUnresolvedRef`, no answer: a
+  ## stand-in there may disagree with a later read of the location): such a location would be
+  ## read at two types, which the per-sort heap does not follow.
+  let v = lower(env, e.pcArg)
+  let toPointer = isPointerTy(e.pcTy)
+  if v.kind notin {svRef, svPtr} or
+     (v.kind == svRef and v.refPointee == nil) or
+     (v.kind == svPtr and v.ptrPointee == nil):
+    return degradeAlloc(e.pcTy, heUnresolvedRef,
+      "`" & render(e) & "`: an address the walk does not hold as a ref or " &
+        "ptr (RFC-0016 INT-83; heUnresolvedRef)", "__ptrCastDegrade")
+  let ctx = requireCurrentContext()
+  let ast = if v.kind == svRef: v.refAst else: v.ptrAst
+  let srcPointee = if v.kind == svRef: v.refPointee else: v.ptrPointee
+  let srcTid = refPointeeTypeId(srcPointee)
+  let dstPointee = if e.pcTy.kind == itRef: e.pcTy.refPointeeTy
+                   else: e.pcTy.ptrPointeeTy
+  let dstTid = refPointeeTypeId(dstPointee)
+  if srcTid == dstTid: return v
+  proc punned(tid: string): SymVal =
+    degradeAlloc(e.pcTy, heUnresolvedRef,
+      "`" & render(e) & "`: pointers of this run are read as one type and " &
+        "converted from or to another (`" & tid & "`); a location read at " &
+        "two types is not modelled (RFC-0016 INT-83; heUnresolvedRef)",
+      "__ptrCastDegrade")
+  if toPointer:
+    for t in pointerReadSorts:
+      if t != srcTid: return punned(srcTid)
+    pointerSortsUsed.incl srcTid
+    let whole = v.kind == svRef and pointerWholeObject(ctx, ast.raw)
+    SymVal(kind: svPtr, ptrFamily: true, ptrPointee: pointerPointeeTy(),
+           ptrAst: pointerAddrOf(ctx, ast, srcPointee, whole))
+  elif srcTid == pointerTypeId:
+    for t in pointerSortsUsed:
+      if t != dstTid: return punned(dstTid)
+    pointerSortsUsed.incl dstTid
+    pointerReadSorts.incl dstTid
+    let typed = pointerAsTyped(ctx, ast, dstPointee)
+    if e.pcTy.kind == itRef:
+      SymVal(kind: svRef, refAst: typed, refPointee: dstPointee)
+    else:
+      SymVal(kind: svPtr, ptrAst: typed, ptrFamily: true, ptrPointee: dstPointee)
+  else:
+    punned(dstTid)
+
 proc lowerBitSet(env: Env, e: IRExpr): SymVal =
   ## RFC-0005 S8bq (item 2). An `iekBitSet` operation. The arguments are
   ## lowered in order; an element is already converted to `T` (its range
@@ -3162,6 +3214,7 @@ proc lowerConvIntRange(sv: SymVal, e: IRExpr): SymVal =
     # conversion's defect CONDITION, not a path constraint on a stored
     # value, so `rangeCondsIfNeeded` is not the applicable helper]
     conds = bvRangeConds(sv, lo, hi, sgn)  # [range-invariant: range-defect-check]
+  if e.ciwHoley: enumHolesMade = true   # RFC-0016 INT-84: a hole may result
   if conds.len > 0:
     when defined(symexTestInjectWalkerFault):
       injectShapeFault("conds")  # RFC-0005 S8ce: a local seq[Z3Bool] held
@@ -3630,6 +3683,8 @@ proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
   ## (`allocEnumZeroLegal`).
   let saved = allocEnumZeroLegal
   allocEnumZeroLegal = true
+  # RFC-0016 INT-84: a callee the walk does not see may return a hole.
+  if hasHoleyEnum(ty): enumHolesMade = true
   result = allocateSym(ty, name, pcOut, intOffsetPositions = intOffsetPositions)
   allocEnumZeroLegal = saved
   # RFC-0016 PRC-07 slice B: which bytes of a returned variant no write
@@ -5674,6 +5729,10 @@ proc globalInitValue(name: string; ty: IRType): SymVal =
   var facts: seq[Z3Bool]
   result = allocateSym(ty, "__glInit_" & displayName(name), facts)
   globalEntryVals[name] = result
+  block:   # RFC-0016 INT-82: a global's entry value is entry state
+    var acc: seq[RawZ3Ast]
+    svAsts(result, acc)
+    notePreExistingTerms(ctx, acc)
   registerUnwritten(ctx, result, displayName(name), havoc = false)
 
 var noinitSerial {.threadvar.}: int
@@ -7384,6 +7443,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
   of iekBitSet:
     # RFC-0005 S8bq (item 2). A builtin `set[T]` operation.
     lowerBitSet(env, e)
+  of iekPtrCast:
+    lowerPtrCast(env, e)   # RFC-0016 INT-83
   of iekSeqNew:
     lowerSeqNew(env, e)
 
@@ -7625,6 +7686,16 @@ proc clampWitnessField(w: var RawWitness, path: string, fty: IRType) =
       w.intVals[path] = clampToDeclaredRange(w.intVals[path], fty)
     elif not fty.signed and w.uintVals.hasKey(path):
       w.uintVals[path] = uint64(clampToDeclaredRange(int64(w.uintVals[path]), fty))
+  elif fty.kind in {itFloat32, itFloat64} and fty.floatRange:
+    # RFC-0016 INT-77: an unread float-range cell, as an unread int one; a
+    # value outside the interval (NaN included) is replaced by its low bound
+    template clampF(x, lo, hi: untyped): untyped =
+      (if x >= lo and x <= hi: x else: lo)
+    if fty.kind == itFloat64 and w.float64Vals.hasKey(path):
+      w.float64Vals[path] = clampF(w.float64Vals[path], fty.floatLo, fty.floatHi)
+    elif fty.kind == itFloat32 and w.float32Vals.hasKey(path):
+      w.float32Vals[path] = clampF(w.float32Vals[path], float32(fty.floatLo),
+                                   float32(fty.floatHi))
 
 proc renderedSize(m: Z3Model; size: Z3Int): int =
   ## RFC-0005 S8f. A table/set size under the model. Allocation bounds it to
@@ -8260,6 +8331,18 @@ proc collectTreeRefPositions(m: Z3Model, path: string, sv: SymVal,
                                 sv.seqElemTy, acc)
   else: discard
 
+proc pointerViewPos(m: Z3Model; path: string; p: Z3AnyAst): RefPos =
+  ## RFC-0016 INT-83. The `pointer` position `path` seen as the typed
+  ## address of the first cast of the run (`pointerViews`) the model gives
+  ## its address: as that typed position it aliases every other position of
+  ## the address, and its cell holds the value a `cast[ptr T]` read saw. One
+  ## no cast relates to a typed address is a cell of its own (or nil).
+  let v = $m.eval(p)
+  for view in pointerViews:
+    if $m.eval(view.addrAst) == v:
+      return RefPos(name: path, addrAst: view.typedAst, pointee: view.pointee)
+  RefPos(name: path, addrAst: p, pointee: pointerPointeeTy())
+
 proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
                          acc: var seq[RefPos]) =
   ## RFC-0005 S8h. The `ref`/`ptr` positions inside the input value `sv` at
@@ -8272,7 +8355,10 @@ proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
     if sv.refPointee != nil:
       acc.add RefPos(name: path, addrAst: sv.refAst, pointee: sv.refPointee)
   of svPtr:
-    if sv.ptrPointee != nil:
+    if sv.ptrPointee != nil and
+       refPointeeTypeId(sv.ptrPointee) == pointerTypeId:
+      acc.add pointerViewPos(m, path, sv.ptrAst)   # RFC-0016 INT-83
+    elif sv.ptrPointee != nil:
       acc.add RefPos(name: path, addrAst: sv.ptrAst, pointee: sv.ptrPointee)
   of svTuple:
     for i, f in sv.fields:
@@ -8454,6 +8540,12 @@ type
     entryOf: Table[string, int]      ## cell name -> its index in `entries`
     queue:   seq[RefPos]             ## cells to render, in discovery order
     entries: seq[HeapSnapshotEntry]
+    floor:   Table[string, IRType]   ## RFC-0016 INT-81: cell name -> the
+                                     ## deepest static pointee of a position
+                                     ## holding it (`cellDynamicType`)
+    seenPos: HashSet[string]         ## RFC-0016 INT-81: positions recorded
+    renderedLvls: Table[string, seq[int64]]  ## RFC-0016 INT-81: the tags a
+                                             ## cell was rendered for
 
 proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
                  inlineNil: bool): string =
@@ -8463,10 +8555,18 @@ proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
   let sortName = "Ref_" & refPointeeTypeId(pos.pointee)
   let address = refAddrOf(m, pos.addrAst, pos.pointee)
   if address.len == 0:
-    if not inlineNil:
+    if not inlineNil and not b.seenPos.containsOrIncl(pos.name):
       b.entries.add HeapSnapshotEntry(name: pos.name, sort: sortName,
         value: "nil", pointsTo: none(string), aliasRef: none(string))
     return "nil"
+  # RFC-0016 INT-81: a cell rendered again (`buildHeapSnapshot`) meets its
+  # positions again; each is recorded once.
+  if b.seenPos.containsOrIncl(pos.name): return "@" & pos.name
+  # RFC-0016 INT-81: the cell's floor, the deepest static type holding it.
+  block:
+    let cname = b.cellOf.getOrDefault(address, pos.name)
+    if hierChain(pos.pointee).len > hierChain(b.floor.getOrDefault(cname)).len:
+      b.floor[cname] = pos.pointee
   let rendering = $m.eval(pos.addrAst)
   if b.cellOf.hasKey(address) and b.cellOf[address] != pos.name:
     b.entries.add HeapSnapshotEntry(name: pos.name, sort: sortName,
@@ -8705,10 +8805,43 @@ proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     # read of it): no leaf, the typed witness keeps the zero value.
     "<unsupported>"
 
+proc cellDynamicType(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                     cell: RefPos): seq[int64] =
+  ## RFC-0016 INT-81. The run-type tags of the hierarchy object `cell`, at
+  ## depths `1 ..`, written as the leaves `<cell>.@lvl<j>` with its floor
+  ## (`<cell>.@floor`) for the witness (`cellDynBuild`); empty outside a
+  ## hierarchy. The depths down to the floor -- the deepest static type of
+  ## a position holding the cell -- are that type's chain: Nim's static
+  ## typing, which a parameter's facts state (`allocateSym`) and a field's
+  ## do not. Each deeper depth is the model's input tag where the walk read
+  ## that level's heap (an `of`, a down-conversion, a dispatch) and is
+  ## unobserved, the sentinel, where it did not: a type no read names is
+  ## one no test of the path told apart from the deepest one it did.
+  let floorTy = b.floor.getOrDefault(cell.name, cell.pointee)
+  let fc = hierChain(floorTy)
+  if fc.len == 0: return
+  for j in 1 ..< fc.len: result.add inheritTagCode(fc[j])
+  var j = fc.len
+  while true:
+    let key = inheritTagKey(floorTy, j)
+    if not currentVariantHeaps.hasKey(key): break
+    var tmp: RawWitness
+    extractLeaf(m, tmp, "t", heapSelect(cell.addrAst.ctx, inputHeap(key),
+                                        cell.addrAst, tInt(64, signed = true)))
+    let v = tmp.intVals.getOrDefault("t", 0)
+    if v == 0: break
+    result.add v
+    inc j
+  w.intVals[cell.name & ".@floor"] = int64(fc.len - 1)
+  for i, v in result: w.intVals[cell.name & ".@lvl" & $(i + 1)] = v
+
 proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                 cell: RefPos): Option[string] =
   ## RFC-0005 S8h. Write `cell`'s leaves and return its `pointsTo`.
   let typeId = refPointeeTypeId(cell.pointee)
+  # RFC-0016 INT-81: a hierarchy object's dynamic type (its tags).
+  let lvls = cellDynamicType(b, m, w, cell)
+  b.renderedLvls[cell.name] = lvls
   # RFC-0005 S8at: an anonymous tuple pointee is held whole (`isNew`'s
   # `anonTuple`), its elements the leaves `<cell>.Field<i>`.
   var anonTuple = false
@@ -8828,6 +8961,22 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
                                             fname, nil)
     done.add fname
+  # RFC-0016 INT-81. A field a type below the root declares keys on that
+  # type (`fieldHeapKey`), outside this cell's prefix: each the walk read
+  # whose declaring type is on the cell's dynamic chain.
+  if lvls.len > 0:
+    var owned: seq[string]
+    for key, o in heapFieldOwners:
+      if o.depth >= 1 and o.depth <= lvls.len and lvls[o.depth - 1] == o.code:
+        owned.add key
+    sort(owned)
+    for key in owned:
+      let fname = key[key.rfind("__") + 2 .. ^1]
+      if fname in done: continue
+      let r = renderCellField(b, m, w, cell, key, fname, nil)
+      if r == "<unobserved>": continue
+      parts.add fname & "=" & r
+      done.add fname
   some("{" & parts.join(", ") & "}")
 
 proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
@@ -8854,11 +9003,26 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
   for pos in top:
     discard addPosition(b, m, pos, inlineNil = false)
   var i = 0
-  while i < b.queue.len:
-    let cell = b.queue[i]
-    let pointsTo = renderCell(b, m, w, cell)
-    b.entries[b.entryOf[cell.name]].pointsTo = pointsTo
-    inc i
+  while true:
+    while i < b.queue.len:
+      let cell = b.queue[i]
+      let pointsTo = renderCell(b, m, w, cell)
+      b.entries[b.entryOf[cell.name]].pointsTo = pointsTo
+      inc i
+    # RFC-0016 INT-81. A position found after its cell was rendered (a
+    # field of a later cell) may be of a deeper static type, which deepens
+    # the cell's dynamic type: such a cell is rendered again, for the fields
+    # its deeper type declares (a position is recorded once, so its ref
+    # fields add no entry twice).
+    var again = false
+    for k in 0 ..< b.queue.len:
+      let cell = b.queue[k]
+      var probe: RawWitness
+      let lvls = cellDynamicType(b, m, probe, cell)
+      if lvls != b.renderedLvls.getOrDefault(cell.name):
+        b.entries[b.entryOf[cell.name]].pointsTo = renderCell(b, m, w, cell)
+        again = true
+    if not again and i >= b.queue.len: break
   # RFC-0005 S8bh (item 2). A `ptr` cell whose input target (`sel`, see
   # `ptrTargets`) is a field of an object the snapshot holds as a cell
   # aliases that field: `aliasRef = "&<cell>.<field>"`, which the typed
@@ -13165,6 +13329,8 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   for c in currentClosureCallAxioms:
     roots.add c
   # RFC-0005 S8as: the entry values' type facts (`globalEntryFacts`).
+  for c in pointerFacts:          # RFC-0016 INT-83: the casts' facts
+    roots.add c
   for c in globalEntryFacts:
     roots.add c
   # Round-4 Slice B (ADR-0026): drain the strip decomposition constraints
@@ -13193,6 +13359,12 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   var reach = @base
   reach.add roots
   for c in indexSplitRoots(currentContext(), reach):
+    roots.add c
+  # RFC-0016 INT-82: an allocation is no object of the entry state. True of
+  # every real execution (the entry state predates the walk), so it prunes no
+  # real input (`refProvenanceRoots`).
+  reach.add roots
+  for c in refProvenanceRoots(currentContext(), reach):
     roots.add c
   roots
 
@@ -15200,6 +15372,7 @@ proc havocOpaqueHeaps(w: var WalkCtx; p: Path; stmt: IRStmt): bool =
   ## replaced by a fresh constant of its sort; one it has not touched yet is
   ## read from a constant of its own from here on (`heapInputName`). True
   ## when anything was havocked.
+  enumHolesMade = true   # RFC-0016 INT-84: the callee may store a hole
   var ids: seq[string]
   for t in stmt.opaqueHeapTys:
     let pointee = if t.kind == itRef: t.refPointeeTy else: t.ptrPointeeTy
@@ -15254,6 +15427,7 @@ proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
   ## fresh `ref` is any address, nil included), and the cells it reaches
   ## take fresh contents (`havocOpaqueHeaps`, `feOpaqueEffectHavoc`). S8as
   ## kept such a call non-inert, and declined one under `havocAllGlobals`.
+  enumHolesMade = true   # RFC-0016 INT-84: the callee may write a hole
   var names: seq[string]
   for nm in stmt.opaqueHavoc:
     if nm == "*":
@@ -16564,7 +16738,7 @@ proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
   if av.kind == svInt and av.ziIvl.isSome and
      av.ziIvl.get.lo >= targetTy.rangeLo and av.ziIvl.get.hi <= targetTy.rangeHi:
     return cp   ## provably in range: no fork, no solver call.
-  let conds = rangeCondsIfNeeded(av, targetTy)
+  let conds = rangeCondsIfNeeded(av, targetTy, holes = false)  # INT-84: a check
   if conds.len == 0:
     return cp   ## `av`'s kind carries no bound assertion (e.g. a degrade
                 ## placeholder reaching an itInt target) — honest-incomplete,
@@ -19636,7 +19810,7 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
         # own comment just above for the full rationale. Review R11: routed
         # through `rangeCondsIfNeeded`. RFC-0005 S8ar: a string value is a
         # string of bytes (`seqStrElemConds`, a free string's fact).
-        let tblRangeConds = rangeCondsIfNeeded(tableVal, arrSV.tabValTy) &
+        let tblRangeConds = readRangeConds(tableVal, arrSV.tabValTy) &
                             seqStrElemConds(tableVal)
         survivors.add forkPath(p, p.pc & @[presentCond] & tblRangeConds, newEnv)
       continue
@@ -19762,8 +19936,9 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
           else:
             raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassign's discriminator is always BV/Z3Int-allocated)]
               "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
-          # Review R11: routed through `rangeCondsIfNeeded`.
-          rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)
+          # Review R11: routed through `rangeCondsIfNeeded`; RFC-0016
+          # INT-85: a slot the program zeroed is not bounded (`readRangeConds`).
+          rangeConds = readRangeConds(indexed, arrSV.seqElemTy)
         of itBool:
           let typed = wrap[Z3Array[Z3Int, Z3Bool]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
@@ -19772,10 +19947,12 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
           let typed = wrap[Z3Array[Z3Int, Z3Float32]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
           indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
+          rangeConds = readRangeConds(indexed, arrSV.seqElemTy)   # INT-77, INT-85
         of itFloat64:   ## Phase 15 F9b
           let typed = wrap[Z3Array[Z3Int, Z3Float64]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
           indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
+          rangeConds = readRangeConds(indexed, arrSV.seqElemTy)   # INT-77, INT-85
         of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
           let typed = wrap[Z3Array[Z3Int, Z3String]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
@@ -25074,6 +25251,10 @@ proc entryValueOf(name: string): SymVal =
     globalEntryVals[name] =
       allocateSym(g.ty, "__glEntry_" & displayName(name), facts)
     for f in facts: globalEntryFacts.add f
+    block:   # RFC-0016 INT-82: a global's entry value is entry state
+      var acc: seq[RawZ3Ast]
+      svAsts(globalEntryVals[name], acc)
+      notePreExistingTerms(ctx, acc)
     registerUnwritten(ctx, globalEntryVals[name], displayName(name),
                       havoc = true)
   globalEntryVals[name]
@@ -27900,6 +28081,9 @@ proc runSymexImpl(prog: SymexProgram,
     let paramAllocIssue = unallocatableFieldIssue(p.ty)
     if paramAllocIssue.isSome:
       raiseParamAllocIssue(paramAllocIssue.get)
+  # RFC-0016 INT-84: what `allocateSym` builds here is the walk's input, so
+  # a holey enum in it ranges over its declared values (`allocInputDomain`).
+  allocInputDomain = true
   for p in prog.params:
     case p.ty.kind
     of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64, itDistinct, itRef, itPtr, itBitSet:
@@ -28164,6 +28348,19 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
+    # RFC-0016 INT-84: a holey enum parameter is one of its declared values
+    # (the arms above bound it by `[rangeLo, rangeHi]`, holes included).
+    if p.ty.kind == itInt and p.ty.enumOrds.len > 0:
+      for c in enumHoleConds(env[p.name], p.ty, zeroLegal = false):
+        initialPC.add c
+  allocInputDomain = false
+  # RFC-0016 INT-82: every parameter's leaves (a ref's address, a seq's or
+  # table's backing) are the walk's entry state (`refProvenanceRoots`).
+  block:
+    var acc: seq[RawZ3Ast]
+    for p in prog.params:
+      if env.hasKey(p.name): svAsts(env[p.name], acc)
+    notePreExistingTerms(ctx, acc)
   let initial = initialWalkPath(initialPC, env)
   let exitClock = newExitClock()
   var w = WalkCtx(
@@ -29637,12 +29834,25 @@ proc readString*(w: RawWitness, name: string): string = w.strVals[name]
 # placeholder by construction).
 
 type
+  WitnessCellBuild* = proc (c: RefWitness; cell, leaves: string;
+                            dst: pointer) {.nimcall.}
+    ## RFC-0016 INT-81. Builds the cell `cell` as one Nim type (`buildCellAs`)
+    ## into the ref slot `dst`, whatever the slot's static type is: the
+    ## object is the cell's dynamic type, and a slot of an ancestor type
+    ## holds it upcast.
+  WitnessCellType = object
+    ## RFC-0016 INT-81. A dynamic type a cell may have: its run-type tag
+    ## codes at depths `1 ..` (`inheritTagCode` of each type of its chain
+    ## below the root), and its builder (nil: no witness can name it).
+    chain: seq[int64]
+    build: WitnessCellBuild
   RefWitness* = ref object
     ## RFC-0005 S8h. One per rendered witness tuple, shared by every position
     ## in it: the snapshot's position -> cell map, and the cells built so far.
     w: RawWitness
     cellOf: Table[string, string]   ## position -> its cell's name ("" = nil)
     cells: Table[string, pointer]   ## cell name -> the object built for it
+    types: seq[WitnessCellType]     ## RFC-0016 INT-81: `registerCellType`
 
 proc newRefWitness*(w: RawWitness): RefWitness =
   ## RFC-0005 S8h. A position absent from the snapshot is nil: a nil field is
@@ -29698,6 +29908,41 @@ proc cellSetMembers(c: RefWitness; path: string): seq[int64] =
   c.w.setMembers.getOrDefault(path)
 proc cellBuilt(c: RefWitness; cell: string): pointer = c.cells.getOrDefault(cell, nil)
 proc cellRecord(c: RefWitness; cell: string; p: pointer) = c.cells[cell] = p
+
+proc registerCellType*(c: RefWitness; chain: seq[int64];
+                       build: WitnessCellBuild) =
+  ## RFC-0016 INT-81. A dynamic type a cell of this witness may have (see
+  ## `cellDynBuild`); the witness tuple registers every type of the
+  ## hierarchies its positions hold (`emitWitnessTuple`).
+  c.types.add WitnessCellType(chain: chain, build: build)
+
+proc cellDynBuild(c: RefWitness; leaves: string): WitnessCellBuild =
+  ## RFC-0016 INT-81. The builder of the cell whose leaves are under
+  ## `leaves`, as the dynamic type the model chose for it, or nil (build it
+  ## as the position's static type). The snapshot writes the cell's run-type
+  ## tag at each depth (`<cell>.@lvl<j>`) and the depth of the deepest
+  ## static type among the positions that hold it (`<cell>.@floor`,
+  ## `cellDynamicType`). The type is the deepest registered one whose chain
+  ## the tags spell, no shallower than that floor: so it is a descendant of
+  ## (or is) every position's static type, and a slot of any of them holds
+  ## it. A tag the registered types do not spell is a type no test of the
+  ## path named (the walk compares tags with the codes of the types it
+  ## names), which the deepest spelled type stands for. A type the witness
+  ## cannot name (nil builder) is skipped for the deepest nameable one;
+  ## `witnessFidelity` classifies such a witness lossy.
+  var floor = 0'i64
+  if not cellInt(c, leaves & ".@floor", floor): return nil
+  var lvls: seq[int64]
+  var v: int64
+  while cellInt(c, leaves & ".@lvl" & $(lvls.len + 1), v): lvls.add v
+  var best = -1
+  for i, t in c.types:
+    if t.build == nil or int64(t.chain.len) < floor or
+       t.chain.len > lvls.len:
+      continue
+    if t.chain != lvls[0 ..< t.chain.len]: continue
+    if best < 0 or t.chain.len > c.types[best].chain.len: best = i
+  if best < 0: nil else: c.types[best].build
 
 var ptrAims {.threadvar.}: Table[pointer, string]
   ## RFC-0005 S8bn (item 2). Each `ptr` witness cell built for a position
@@ -29828,6 +30073,8 @@ proc validDefault[F](f: var F) =
   else:
     discard
 
+proc fillCell[T: ref | ptr](c: RefWitness; cell, leaves: string; x: var T)
+
 proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
   ## RFC-0005 S8h. The witness value of the `ref`/`ptr` position `pos`.
   var cell = cellNameOf(c, pos)
@@ -29850,26 +30097,51 @@ proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
   elif cell.startsWith(ptrAimPrefix):
     leaves = pos
   when T is ref:
-    new(result)
+    # RFC-0016 INT-81. A cell is built ONCE, as the dynamic type the model
+    # gave its address (its run-type tags), not as the static type of the
+    # position that reaches it first; every position holding it gets that
+    # one object, upcast. Built as the position's type, a descendant the
+    # verdict needs (a method override, `of`, a down-conversion) replayed as
+    # its ancestor, and a cell a base-typed position reached first was too
+    # small for a descendant-typed one.
+    let dyn = cellDynBuild(c, leaves)
+    if dyn != nil:
+      dyn(c, cell, leaves, addr result)
+      return
+  fillCell(c, cell, leaves, result)
+
+proc buildCellAs*[T: ref](c: RefWitness; cell, leaves: string; dst: pointer) =
+  ## RFC-0016 INT-81. The `WitnessCellBuild` of the type `T`: the cell built
+  ## as a `T`, stored into the ref slot `dst` (a slot of `T` or an ancestor;
+  ## it holds nil).
+  fillCell(c, cell, leaves, cast[ptr T](dst)[])
+
+proc fillCell[T: ref | ptr](c: RefWitness; cell, leaves: string; x: var T) =
+  ## RFC-0005 S8h (factored out of `resolveRef` at RFC-0016 INT-81). Allocate
+  ## the cell `cell` as a `T`, record it before its fields are read (so a
+  ## cycle back to it finds it), and fill each field from the leaves under
+  ## `leaves`.
+  when T is ref:
+    new(x)
   else:
     # A `ptr` witness cell is unmanaged memory the witness owns for the rest
     # of the process: nothing frees what a SUT is handed as a raw pointer.
-    result = cast[T](alloc0(sizeof(result[])))
-    ptrAimRecord(cell, cast[pointer](result))
-  cellRecord(c, cell, cast[pointer](result))
-  when result[] is object:
+    x = cast[T](alloc0(sizeof(x[])))
+    ptrAimRecord(cell, cast[pointer](x))
+  cellRecord(c, cell, cast[pointer](x))
+  when x[] is object:
     # A case object's discriminator is assigned in field order, before the
     # branch fields `fieldPairs` then yields for the branch it selected.
     {.cast(uncheckedAssign).}:
-      for fname, fv in fieldPairs(result[]):
+      for fname, fv in fieldPairs(x[]):
         readCellField(c, leaves & "." & fname, fv)
         # RFC-0005 S8bh (item 2): the field's address, for a pointer the
         # snapshot aims at it (`aliasRef = "&<cell>.<field>"`).
         cellRecord(c, "&" & leaves & "." & fname, cast[pointer](addr fv))
-    when compiles(cellRecordBranches(c, "&" & leaves, result[])):
-      cellRecordBranches(c, "&" & leaves, result[])
+    when compiles(cellRecordBranches(c, "&" & leaves, x[])):
+      cellRecordBranches(c, "&" & leaves, x[])
   else:
-    readCellField(c, leaves, result[])
+    readCellField(c, leaves, x[])
 
 proc readCellSeq[E](c: RefWitness; path: string; f: var seq[E]) =
   ## RFC-0005 S8ap. A seq cell field: `seqLens[path]` elements, each the leaf
@@ -30021,6 +30293,43 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
       inc i
   else:
     discard
+
+proc resolvePointer*(c: RefWitness; pos: string): pointer =
+  ## RFC-0016 INT-83. The witness value of the `pointer` position `pos`:
+  ## nil, the cell of the typed position the snapshot aliases it to, or a
+  ## cell of its own, of the scalar sort the snapshot gave it (the sort a
+  ## `cast[ptr T]` of it reads; `pointerViewPos`), filled from its leaf, or
+  ## sixteen zero bytes for an address no read looks through.
+  ## Defined after `readCellField`'s body: an instantiation of that generic
+  ## made before its body is compiled is empty, and every later use of the
+  ## same instantiation (a `bool` or `int` field of any witness cell) would
+  ## read nothing.
+  let cell = cellNameOf(c, pos)
+  if cell.len == 0: return nil
+  let built = cellBuilt(c, cell)
+  if built != nil: return built
+  var srt = ""
+  for e in c.w.heapSnapshot:
+    if e.name == cell: srt = e.sort
+  template scalar(T: typedesc; ty: IRType) =
+    if srt == "Ref_" & refPointeeTypeId(ty):
+      let q = cast[ptr T](alloc0(max(sizeof(T), 16)))
+      readCellField(c, cell, q[])
+      cellRecord(c, cell, cast[pointer](q))
+      return cast[pointer](q)
+  scalar(int, tInt(64, signed = true))
+  scalar(int32, tInt(32, signed = true))
+  scalar(int16, tInt(16, signed = true))
+  scalar(int8, tInt(8, signed = true))
+  scalar(uint64, tInt(64, signed = false))
+  scalar(uint32, tInt(32, signed = false))
+  scalar(uint16, tInt(16, signed = false))
+  scalar(uint8, tInt(8, signed = false))
+  scalar(bool, tBool())
+  # A cell no read looks through as a scalar: its own address only. Never
+  # freed (the witness's cells live for the process, as a `ptr` cell does).
+  result = alloc0(16)
+  cellRecord(c, cell, result)
 
 proc readSeqLen*(w: RawWitness, name: string): int =
   ## Phase 15 R3 (ADR-0010). The model length of a seq witness leaf — used by

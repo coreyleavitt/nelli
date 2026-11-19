@@ -7,6 +7,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/[dsl, runtime]
+import ./s8cu_helpers
 
 # --- unconditional raise ----------------------------------------------------
 proc uncondRaise(x: int) =
@@ -19,28 +20,28 @@ proc condRaise(x: int) =
 
 suite "symex Phase 15 E2b — real raise semantics + InternalVerdict boundary":
   test "E2b: unconditional raise yields sxRaised with raisedTypeId (isExact)":
-    let r = symexFind(uncondRaise, tAssertionViolation())
+    let r = pinFind(uncondRaise, tAssertionViolation())
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
 
   test "E2b: unconditional raise yields sxRaised (isOptimised)":
-    let r = symexFind(uncondRaise, tAssertionViolation(), optimisedSymexSettings())
+    let r = pinFind(uncondRaise, tAssertionViolation(), optimisedSymexSettings())
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
 
   test "E2b: conditional raise — non-existent label is sxUnsat":
-    let r = symexFind(condRaise, tLabel("unreachable"))
+    let r = pinFind(condRaise, tLabel("unreachable"))
     check r.status == sxUnsat
 
   test "E2b: conditional raise — stkRaisedExn finds witness with x > 0 (isExact)":
-    let r = symexFind(condRaise, tRaisedExn("ValueError"))
+    let r = pinFind(condRaise, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     # The witness must satisfy the raise path condition x > 0.
     check r.raisedWitness[0] > 0
 
   test "E2b: conditional raise — stkRaisedExn finds witness with x > 0 (isOptimised)":
-    let r = symexFind(condRaise, tRaisedExn("ValueError"), optimisedSymexSettings())
+    let r = pinFind(condRaise, tRaisedExn("ValueError"), optimisedSymexSettings())
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] > 0

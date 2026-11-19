@@ -44,7 +44,7 @@
 ## unchanged; `array`/`tuple` of a ref were already witness-renderable
 ## structurally, this slice only changes what verdicts are REACHABLE, not
 ## what shape a witness takes).
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli/symex
 
@@ -156,43 +156,44 @@ proc setNodeGuard(s: HashSet[Node]) =
 suite "Cluster H H_containers — seq/array/tuple of named ref-objects":
 
   test "seq[Node]: read through s[0] after a.val write is REAL sxSat (was raised)":
-    let r = symexFind(seqNodeReadHit, tLabel("seq_node_read_hit"))
+    let r = pinFind(seqNodeReadHit, tLabel("seq_node_read_hit"))
     check r.status == sxSat
 
   test "seq[Node] UNSAT soundness: s[0].val == x is impossible after a.val := x+1":
-    let r = symexFind(seqNodeReadUnsat, tLabel("seq_node_read_unsat"))
+    let r = pinFind(seqNodeReadUnsat, tLabel("seq_node_read_unsat"))
     check r.status == sxUnsat
 
   test "seq[Node] aliasing: write through s[0] alias is visible through the original param":
-    let r = symexFind(seqNodeWriteThroughAliasHit, tLabel("seq_node_alias_hit"))
+    let r = pinFind(seqNodeWriteThroughAliasHit, tLabel("seq_node_alias_hit"))
     check r.status == sxSat
 
   test "array[N, Node]: read through arr[0] after a.val write is REAL sxSat (was raised)":
-    let r = symexFind(arrNodeReadHit, tLabel("arr_node_read_hit"))
+    let r = pinFind(arrNodeReadHit, tLabel("arr_node_read_hit"))
     check r.status == sxSat
 
   test "array[N, Node] UNSAT soundness: arr[0].val == x is impossible after a.val := x+1":
-    let r = symexFind(arrNodeReadUnsat, tLabel("arr_node_read_unsat"))
+    let r = pinFind(arrNodeReadUnsat, tLabel("arr_node_read_unsat"))
     check r.status == sxUnsat
 
   test "array[N, Node]: second slot arr[1] resolves through the same merge chain":
-    let r = symexFind(arrNodeSecondElemHit, tLabel("arr_node_second_hit"))
+    let r = pinFind(arrNodeSecondElemHit, tLabel("arr_node_second_hit"))
     check r.status == sxSat
 
   test "tuple[a: Node]: field read t.n.val after a.val write is REAL sxSat":
-    let r = symexFind(tupleNodeReadHit, tLabel("tuple_node_read_hit"))
+    let r = pinFind(tupleNodeReadHit, tLabel("tuple_node_read_hit"))
     check r.status == sxSat
 
   test "tuple[a: Node] UNSAT soundness: t.n.val == x is impossible after a.val := x+1":
-    let r = symexFind(tupleNodeReadUnsat, tLabel("tuple_node_read_unsat"))
+    let r = pinFind(tupleNodeReadUnsat, tLabel("tuple_node_read_unsat"))
     check r.status == sxUnsat
 
   test "Table[string, Node] STAYS degraded: sxUnknown, no crash, no false verdict":
-    let r = symexFind(tableNodeGuard, tLabel("table_node_guard_hit"))
+    let r = pinFind(tableNodeGuard, tLabel("table_node_guard_hit"))
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedWitnessType)
 
   test "HashSet[Node] STAYS degraded: sxUnknown, no crash, no false verdict":
+    # (symexFind: a HashSet of a ref with no `hash` has no native value)
     let r = symexFind(setNodeGuard, tLabel("set_node_guard_hit"))
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedWitnessType)

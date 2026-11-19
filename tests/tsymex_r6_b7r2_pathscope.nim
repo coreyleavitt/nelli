@@ -94,6 +94,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type TftpDecodeError = object of CatchableError
 
@@ -172,7 +173,7 @@ suite "symex round-6 B7r2 -- BLOCKER B7-1(a): if-wrapped pair-loop now proves (w
         result = 1
       else:
         result = 2
-    let r = symexFind(sut, tLabel("b7r2_1a_done"))
+    let r = pinFind(sut, tLabel("b7r2_1a_done"))
     check r.status == sxSat
 
   test "B7r2-1a-red trip-wire: the SAME wrapped shape with a non-`.len` bound now proves sxSat -- genuine concrete-replay reachability, not a fast-path or budget artifact":
@@ -233,7 +234,7 @@ suite "symex round-6 B7r2 -- BLOCKER B7-1(a): if-wrapped pair-loop now proves (w
         result = 1
       else:
         result = 2
-    let r = symexFind(sut, tLabel("b7r2_1a_red_done"))
+    let r = pinFind(sut, tLabel("b7r2_1a_red_done"))
     check r.status == sxSat
     # Witness-replay justification: the `symexAssume`s pin `data` exactly, so
     # the witness must reproduce them, and replaying the real helper confirms
@@ -271,7 +272,7 @@ suite "symex round-6 B7r2 -- BLOCKER B7-1(b): pair-loop followed by construction
         pos = finalPos
       result = Packet(kind: pkOack, oackOptions: @[])
       symexTarget("b7r2_1b_done")
-    let r = symexFind(sut, tLabel("b7r2_1b_done"))
+    let r = pinFind(sut, tLabel("b7r2_1b_done"))
     check r.status == sxSat
 
 suite "symex round-6 B7r2 -- BLOCKER B7-1(c): call-boundary seq[(string,string)]-returning helper no longer poisons its caller":
@@ -284,7 +285,7 @@ suite "symex round-6 B7r2 -- BLOCKER B7-1(c): call-boundary seq[(string,string)]
       discard opts
       result = Packet(kind: pkOack, oackOptions: @[])
       symexTarget("b7r2_1c_done")
-    let r = symexFind(callerSut, tLabel("b7r2_1c_done"))
+    let r = pinFind(callerSut, tLabel("b7r2_1c_done"))
     check r.status == sxSat
 
   test "B7r2-1c companion: a genuine defect on a CLEAN sibling of the SAME caller (never touching the seq[(string,string)] call) is still found -- the generalized placeholder allocates rather than raising, so it never reaches this unrelated path either":
@@ -298,7 +299,7 @@ suite "symex round-6 B7r2 -- BLOCKER B7-1(c): call-boundary seq[(string,string)]
         result = Packet(kind: pkOack, oackOptions: @[])
       else:
         discard data[99999]   # unconditional, always-unguarded -- a real IndexDefect
-    let r = symexFind(callerSut2, tIndexError())
+    let r = pinFind(callerSut2, tIndexError())
     check r.status == sxRaised
 
 suite "symex round-6 B7r2 -- opOack-faithful composite (dispatch + call-boundary readOptions + variant construction), chapulin's real decodeOackTwin shape, end-to-end":
@@ -317,7 +318,7 @@ suite "symex round-6 B7r2 -- opOack-faithful composite (dispatch + call-boundary
         symexTarget("b7r2_composite_done")
       else:
         discard
-    let r = symexFind(decodeOackTwinLike, tLabel("b7r2_composite_done"))
+    let r = pinFind(decodeOackTwinLike, tLabel("b7r2_composite_done"))
     check r.status == sxSat
 
   test "B7r2-composite sibling: a genuine IndexDefect on a DISJOINT arm of the SAME composite proc is still found (the wireOp==6 arm's own machinery never poisons it)":
@@ -335,7 +336,7 @@ suite "symex round-6 B7r2 -- opOack-faithful composite (dispatch + call-boundary
         discard data[99999]
       else:
         discard
-    let r = symexFind(decodeOackTwinLike2, tIndexError())
+    let r = pinFind(decodeOackTwinLike2, tIndexError())
     check r.status == sxRaised
 
 suite "symex round-6 B7r2 -- BLOCKER B7-2 (case/else-raise sibling poisoning): CLOSED `cac15e6` (walker v124), now pinned at the FIXED behavior":
@@ -355,7 +356,7 @@ suite "symex round-6 B7r2 -- BLOCKER B7-2 (case/else-raise sibling poisoning): C
         # unrelated to case-as-expression / scanned-string content.
         if blockNum == 5:
           symexTarget("b7r2_2_sibling_reached")
-    let r = symexFind(sut, tLabel("b7r2_2_sibling_reached"))
+    let r = pinFind(sut, tLabel("b7r2_2_sibling_reached"))
     ## Verified against this EXACT SUT (including `s.toLowerAscii`, which the
     ## minimal r7 repro omits) via a standalone probe at walker v124 —
     ## `tsymex_r6_b7r2_pathscope` itself cannot run on Linux/podman, so the
@@ -382,7 +383,7 @@ suite "symex round-6 B7r2 -- regression: a genuinely-unmodeled whole-proc shape 
       var t: Table[string, DT]
       t["k"] = DT((x, x))
       result = t.len > 0
-    let r = symexFind(sut, tIndexError())
+    let r = pinFind(sut, tIndexError())
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedOpHavoc)
     check r.errors.named(feUnsupportedStmtKind)

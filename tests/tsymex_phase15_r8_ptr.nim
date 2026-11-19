@@ -22,6 +22,7 @@
 ## (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # Canonical R8 SUT 1: a `ptr int` param dereferenced and compared — same heap
 # model as `ref int`, so the deref is decidable and the solver picks heap[p]==7.
@@ -57,7 +58,7 @@ proc ptrCastArith(p: ptr int) =
 suite "symex Phase 15 R8 — ptr T heap model + pointer-arith classification":
 
   test "R8.1: ptr int deref works like ref int (sxSat) + carries hePtrFamily hint":
-    let r = symexFind(ptrDerefIs7, tLabel("hit"))
+    let r = pinFind(ptrDerefIs7, tLabel("hit"))
     check r.status == sxSat
     # The ptr deref routes through the SAME heap as a ref deref.
     var sawPtrFamily = false
@@ -68,20 +69,20 @@ suite "symex Phase 15 R8 — ptr T heap model + pointer-arith classification":
     check sawPtrFamily
 
   test "R8.1b: parallel ref int SUT is sxSat with NO hePtrFamily hint":
-    let r = symexFind(refDerefIs7, tLabel("hit"))
+    let r = pinFind(refDerefIs7, tLabel("hit"))
     check r.status == sxSat
     for e in r.errors:
       check e.kind != hePtrFamily
 
   test "R8.2: a user no-op inc(p: ptr int) is walked: sxSat, no error recorded":
-    let r = symexFind(ptrInc, tLabel("any"))
+    let r = pinFind(ptrInc, tLabel("any"))
     check r.status == sxSat
     for e in r.errors:
       check e.severity != sevError
       check e.kind != hePtrArith
 
   test "R8.2b: real pointer arithmetic (cast offset) → sxUnknown + heUnsafeCast":
-    let r = symexFind(ptrCastArith, tLabel("hit"))
+    let r = pinFind(ptrCastArith, tLabel("hit"))
     check r.status == sxUnknown
     var sawCast = false
     for e in r.errors:
@@ -98,7 +99,7 @@ suite "symex Phase 15 R8 — ptr T heap model + pointer-arith classification":
       dec(i)
       if i == x:
         symexTarget("back")
-    let r = symexFind(incInt, tLabel("back"))
+    let r = pinFind(incInt, tLabel("back"))
     check r.status == sxSat
     for e in r.errors:
       check e.kind != hePtrArith

@@ -23,6 +23,7 @@
 ##   - the walker version pin: `symexWalkerVersion == "8"` (this cycle's bump).
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/dsl   ## re-exports dsl_parser (conformsToStdlibConcept)
 
 # === SUTs ====================================================================
@@ -98,33 +99,33 @@ suite "symex Phase 15 G10 — Cluster-G regression smoke + walker version 8":
 
   # ---- G8: multi-param at mixed types ----
   test "G10: multi-param generic at int+string resolves T/U independently":
-    let r = symexFind(g10MultiParam, tLabel("multiparam_hit"))
+    let r = pinFind(g10MultiParam, tLabel("multiparam_hit"))
     check r.status == sxSat
     check r.witness[0] > 0
     check r.witness[1] == "ok"
 
   # ---- G1a: same generic at two types, one SUT ----
   test "G10: same generic at two types both dispatch (szof@int8 + szof@int64)":
-    let r = symexFind(g10TwoInsts, tLabel("twoinsts_hit"))
+    let r = pinFind(g10TwoInsts, tLabel("twoinsts_hit"))
     check r.status == sxSat
 
   # ---- G4 + G5: distinct + borrowed operator ----
   test "G10: distinct float64 with borrowed `+` threads base op; reachable":
-    let r = symexFind(g10Borrow, tLabel("borrow_hit"))
+    let r = pinFind(g10Borrow, tLabel("borrow_hit"))
     check r.status == sxSat
     let s = float64(r.witness[0]) + float64(r.witness[1])
     check s > 10.0
 
   # ---- G7: static[int] at two values ----
   test "G10: static[int] generic at two values dispatches to distinct bodies":
-    let r = symexFind(g10StaticTwo, tLabel("static_hit"))
+    let r = pinFind(g10StaticTwo, tLabel("static_hit"))
     check r.status == sxSat
     check r.witness[0][2] > 0    ## a3[N-1] = a3[2] (N=3)
     check r.witness[1][4] > 0    ## a5[N-1] = a5[4] (N=5)
 
   # ---- G6: concept-constrained at a conforming type ----
   test "G10: concept-constrained generic at conforming type reaches target":
-    let r = symexFind(g10UseConcept, tLabel("concept_hit"))
+    let r = pinFind(g10UseConcept, tLabel("concept_hit"))
     check r.status == sxSat
     check r.witness[0] > 10
     # The G6 membership helper still classifies a non-conforming pair (no
@@ -134,7 +135,7 @@ suite "symex Phase 15 G10 — Cluster-G regression smoke + walker version 8":
 
   # ---- G1c: instantiation cap ----
   test "G10: exceeding the per-proc cap → sxUnknown + geInstantiationCapped":
-    let r = symexFind(g10ThreeInsts, tLabel("cap_hit"), g10LowCap)
+    let r = pinFind(g10ThreeInsts, tLabel("cap_hit"), g10LowCap)
     check r.status == sxUnknown
     check r.errors.len > 0                     # no silent empty-errors sxUnknown
     var sawCap = false

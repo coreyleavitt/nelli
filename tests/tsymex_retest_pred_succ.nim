@@ -9,6 +9,7 @@
 ## unconstrained result would report them sxSat.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/canonicalize
 
 proc succHit(x: int) =
@@ -38,21 +39,21 @@ proc dotdotLessSlice(s: string) =
 suite "symex re-test #pred — pred/succ arithmetic passthrough":
 
   test "succ(x) == 5 is SAT with witness x == 4":
-    let r = symexFind(succHit, tLabel("succ-hit"))
+    let r = pinFind(succHit, tLabel("succ-hit"))
     check r.status == sxSat
     check r.witness[0] == 4
 
   test "pred(x, 3) == 10 is SAT with witness x == 13 (explicit step)":
-    let r = symexFind(predHit, tLabel("pred-step-hit"))
+    let r = pinFind(predHit, tLabel("pred-step-hit"))
     check r.status == sxSat
     check r.witness[0] == 13
 
   test "pred(x) == x is UNSAT (soundness)":
-    let r = symexFind(predImpossible, tLabel("impossible-pred"))
+    let r = pinFind(predImpossible, tLabel("impossible-pred"))
     check r.status == sxUnsat
 
   test "`..<` string slice with expression bound compiles and walks (no IndexError path)":
-    let r = symexFind(dotdotLessSlice, tIndexError())
+    let r = pinFind(dotdotLessSlice, tIndexError())
     check r.status in {sxUnsat, sxUnknown}
 
 suite "symex re-test #pred — walker version pin":

@@ -21,6 +21,7 @@ import std/[unittest, tables]
 import nelli/symex
 import nelli/smt/[dsl, runtime]
 import nelli/smt/exn_hierarchy
+import ./s8cu_helpers
 
 # --- CR-14 test proc: EOFError caught by IOError handler --------------------
 proc eofCaughtByIOError(x: int): int =
@@ -56,6 +57,6 @@ suite "symex Phase 15 CR-14 — missing stdlib exception types":
   test "CR-14: raise EOFError caught by except IOError reaches label (sxSat)":
     ## RED: sxUnknown (EOFError unknown → no match → uncaught → sxUnknown).
     ## GREEN: sxSat (EOFError is-a IOError → handler fires → label reached).
-    let r = symexFind(eofCaughtByIOError, tLabel("caught_eof"))
+    let r = pinFind(eofCaughtByIOError, tLabel("caught_eof"))
     check r.status == sxSat
     check r.witness[0] < 0

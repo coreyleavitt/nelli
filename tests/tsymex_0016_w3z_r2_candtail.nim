@@ -70,7 +70,7 @@ suite "W3-z R2: a replay-confirmed candidate's tail is checked":
     check parseInt(symexWalkerVersion) >= 313
 
   test "(a) a havoc-tainted candidate, undefined tail: confirmed but untrusted":
-    let r = symexFind(candTailOverflow, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(candTailOverflow, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat
@@ -80,7 +80,7 @@ suite "W3-z R2: a replay-confirmed candidate's tail is checked":
     check r.witness[1] > 100
 
   test "(b) a havoc-tainted candidate, defined tail: stays trusted":
-    let r = symexFind(candTailDefined, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(candTailDefined, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat
@@ -90,7 +90,7 @@ suite "W3-z R2: a replay-confirmed candidate's tail is checked":
     check r.witness[1] == 7
 
   test "(c) an open branch in the tail forks: the undefined arm is found":
-    let r = symexFind(candBranchOverflow, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(candBranchOverflow, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat
@@ -99,7 +99,7 @@ suite "W3-z R2: a replay-confirmed candidate's tail is checked":
     check r.soundness.undefinedKinds == {UbKind(ubSignedOverflow)}
 
   test "(d) an open branch in the tail, defined on both arms: stays trusted":
-    let r = symexFind(candBranchDefined, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(candBranchDefined, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat
@@ -109,7 +109,7 @@ suite "W3-z R2: a replay-confirmed candidate's tail is checked":
     check r.witness[1] == 7
 
   test "(e) gate off: the confirmed candidate is trusted on its prefix":
-    let r = symexFind(candTailOverflow, tLabel("hit"), gateOff)
+    let r = pinFind(candTailOverflow, tLabel("hit"), gateOff)
     check r.status == sxSat
     check r.soundness.replay == rsConfirmed
     check r.trusted

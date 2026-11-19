@@ -14,6 +14,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc halve(x: int): int = 100 div x
 
@@ -28,13 +29,13 @@ proc discardedCallGuarded(x: int) =
 suite "symex round-5 — discarded expressions are walked":
 
   test "discarded call: the callee's DivByZeroDefect is FOUND":
-    let r = symexFind(discardedCallUnguarded, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(discardedCallUnguarded, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
 
   test "guarded discarded call: no defect path (sxUnsat)":
-    let r = symexFind(discardedCallGuarded, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(discardedCallGuarded, tRaisedExn("DivByZeroDefect"))
     check r.status == sxUnsat
 
 proc discardedIndexUnguarded(data: seq[int], i: int) =
@@ -48,11 +49,11 @@ proc discardedIndexGuarded(data: seq[int], i: int) =
 suite "symex round-5 — discarded non-call expressions":
 
   test "discarded `data[i]`: the IndexDefect is FOUND":
-    let r = symexFind(discardedIndexUnguarded, tIndexError())
+    let r = pinFind(discardedIndexUnguarded, tIndexError())
     check r.status == sxRaised
 
   test "guarded discarded `data[i]`: no defect path (sxUnsat)":
-    let r = symexFind(discardedIndexGuarded, tIndexError())
+    let r = pinFind(discardedIndexGuarded, tIndexError())
     check r.status == sxUnsat
 
 suite "symex round-5 discard — walker version pin":

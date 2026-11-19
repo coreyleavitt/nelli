@@ -67,6 +67,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ===========================================================================
 # SUTs
@@ -119,13 +120,13 @@ proc twoScalarMixed(p: int, q: int) =
 
 suite "symex Phase 15 C2 — descriptor-backed static-param derivation (finding L7)":
   test "static-first / type-second and type-first / static-second both dispatch correctly":
-    let r = symexFind(twoMixedOrders, tLabel("mixed"))
+    let r = pinFind(twoMixedOrders, tLabel("mixed"))
     check r.status == sxSat
     check r.witness[0][2] > r.witness[2]   ## a3[N-1] = a3[2] > t1
     check r.witness[1][4] > r.witness[3]   ## b5[N-1] = b5[4] > t2
 
   test "scalar static[bool] mixed with an ordinary generic param dispatches per-value":
-    let r = symexFind(twoScalarMixed, tLabel("scalar_mixed"))
+    let r = pinFind(twoScalarMixed, tLabel("scalar_mixed"))
     check r.status == sxSat
     check r.witness[0] > 0     ## scalarMixed[true]:  p > 0
     check r.witness[1] <= 0    ## scalarMixed[false]: q <= 0

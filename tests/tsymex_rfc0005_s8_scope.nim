@@ -25,6 +25,7 @@ import nelli/smt/runtime
 import nelli/smt/dsl_parser
 import nelli/smt/canonicalize
 import audit_scan_utils
+import ./s8cu_helpers
 
 macro progOf(fn: typed): untyped =
   ## The `SymexProgram` `symexFind` would build for `fn` (incl. the S8
@@ -216,7 +217,7 @@ suite "RFC-0005 S8 (a) -- a false annotation claim is its own channel (§13.3, i
     usesProbeS8(0x5A4D - 11)
 
   test "result-used: symexFind carries it on annotationViolations with pragma, callee and site":
-    let r = symexFind(usesProbeS8, tLabel("s8_probe"))
+    let r = pinFind(usesProbeS8, tLabel("s8_probe"))
     checkpoint(show(r.errors))
     check r.annotationViolations.len == 1
     let av = r.annotationViolations[0]
@@ -228,7 +229,7 @@ suite "RFC-0005 S8 (a) -- a false annotation claim is its own channel (§13.3, i
     check "statement position" in av.msg
 
   test "result-used: it is NOT a decline -- no retired kind in errors; the opaque fallback still taints":
-    let r = symexFind(usesProbeS8, tLabel("s8_probe"))
+    let r = pinFind(usesProbeS8, tLabel("s8_probe"))
     checkpoint(show(r.errors))
     var opaque = false
     for e in r.errors:
@@ -238,7 +239,7 @@ suite "RFC-0005 S8 (a) -- a false annotation claim is its own channel (§13.3, i
     check r.status != sxUnsat
 
   test "arg-not-inert: the var-argument overclaim is avArgNotInert on the same channel":
-    let r = symexFind(argNotInertS8, tLabel("s8_bump"))
+    let r = pinFind(argNotInertS8, tLabel("s8_bump"))
     checkpoint(show(r.errors))
     check r.annotationViolations.len == 1
     check r.annotationViolations[0].kind == avArgNotInert
@@ -256,7 +257,7 @@ suite "RFC-0005 S8 (a) -- a false annotation claim is its own channel (§13.3, i
     check runTaintOf(prog.parseErrors) == Taint({})
 
   test "a clean SUT has an empty channel":
-    let r = symexFind(cleanS8, tLabel("s8_clean"))
+    let r = pinFind(cleanS8, tLabel("s8_clean"))
     check r.status == sxSat
     check r.annotationViolations.len == 0
 
@@ -419,7 +420,7 @@ suite "RFC-0005 S8 (d) -- the i3 flips, each justified":
     ## -- nothing is approximated because of it; the opaque fallback's own
     ## walk-time `feOpaqueCallUnmodelled` taints every path through the call
     ## -- so the hit, on a path that never passes the call, is clean.
-    let r = symexFind(flipSatS8, tLabel("s8_flip_sat"))
+    let r = pinFind(flipSatS8, tLabel("s8_flip_sat"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     check r.witness[0] == 7
@@ -432,7 +433,7 @@ suite "RFC-0005 S8 (d) -- the i3 flips, each justified":
     ## coordinate carries `scIncomplete`, so rule 5 stays blocked (§4.3: an
     ## `sxUnsat` flip would need every admitted record to leave the claim
     ## sound, and this one does not).
-    let r = symexFind(flipUnsatS8, tLabel("s8_flip_unsat"))
+    let r = pinFind(flipUnsatS8, tLabel("s8_flip_unsat"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
     check r.errors.named(feOpaqueCallUnmodelled)

@@ -12,6 +12,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -76,11 +77,11 @@ proc sutB3ImmediateMatchNotFoundImpossible(s: string, start: int) =
 suite "symex round-6 N10(a) -- B3 immediate-match boundary":
 
   test "N10a-1: match at the starting offset itself (zero advances) -> sxSat":
-    let r = symexFind(sutB3ImmediateMatch, tLabel("immediate_match"))
+    let r = pinFind(sutB3ImmediateMatch, tLabel("immediate_match"))
     check r.status == sxSat
 
   test "N10a-2 UNSAT companion: a forced immediate match can never fall through to not-found":
-    let r = symexFind(sutB3ImmediateMatchNotFoundImpossible, tLabel("impossible"))
+    let r = pinFind(sutB3ImmediateMatchNotFoundImpossible, tLabel("impossible"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -120,19 +121,19 @@ proc byteFromCharRoundTrips(c: char) =
 suite "symex round-6 N10(b) -- char-vs-byte cross-alias comparison":
 
   test "N10b-1: char(b) == c reachable -- char compared against a converted byte (SAT)":
-    let r = symexFind(charEqualsConvertedByte, tLabel("char_eq_byte"))
+    let r = pinFind(charEqualsConvertedByte, tLabel("char_eq_byte"))
     check r.status == sxSat
 
   test "N10b-2: b == byte(c) reachable -- byte compared against a converted char (SAT)":
-    let r = symexFind(byteEqualsConvertedChar, tLabel("byte_eq_char"))
+    let r = pinFind(byteEqualsConvertedChar, tLabel("byte_eq_char"))
     check r.status == sxSat
 
   test "N10b-3 UNSAT companion: byte(65) converts to char('A') for every witness (byte -> char direction)":
-    let r = symexFind(charFromByteRoundTrips, tAssertionViolation())
+    let r = pinFind(charFromByteRoundTrips, tAssertionViolation())
     check r.status == sxUnsat
 
   test "N10b-4 UNSAT companion: char('A') converts to byte(65) for every witness (char -> byte direction)":
-    let r = symexFind(byteFromCharRoundTrips, tAssertionViolation())
+    let r = pinFind(byteFromCharRoundTrips, tAssertionViolation())
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -176,11 +177,11 @@ proc sutMultipleEmbeddedNuls(s: string) =
 suite "symex round-6 N10(c) -- NUL-first witness":
 
   test "N10c-1: NUL as the string's own first byte is reachable (sxSat)":
-    let r = symexFind(sutNulAtPositionZero, tLabel("nul_first"))
+    let r = pinFind(sutNulAtPositionZero, tLabel("nul_first"))
     check r.status == sxSat
 
   test "N10c-1-content: the witness's leading byte is a real single NUL, not the 5-char escape text":
-    let r = symexFind(sutNulAtPositionZero, tLabel("nul_first"))
+    let r = pinFind(sutNulAtPositionZero, tLabel("nul_first"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.len == 2
@@ -188,11 +189,11 @@ suite "symex round-6 N10(c) -- NUL-first witness":
     check ord(s[1]) == ord('X')
 
   test "N10c-2: a NUL-delimited scan whose delimiter sits at witness position 0 (sxSat)":
-    let r = symexFind(sutNulFirstAsDelimiter, tLabel("nul_delim_at_zero"))
+    let r = pinFind(sutNulFirstAsDelimiter, tLabel("nul_delim_at_zero"))
     check r.status == sxSat
 
   test "N10c-2-cross: the witness, replayed through the real function, reproduces the exact found outcome":
-    let r = symexFind(sutNulFirstAsDelimiter, tLabel("nul_delim_at_zero"))
+    let r = pinFind(sutNulFirstAsDelimiter, tLabel("nul_delim_at_zero"))
     check r.status == sxSat
     let (s, start) = r.witness
     check start == 0
@@ -205,11 +206,11 @@ suite "symex round-6 N10(c) -- NUL-first witness":
 suite "symex round-6 N10(c) -- multiple embedded NULs":
 
   test "N10c-3: two embedded NULs sharing one witness is reachable (sxSat)":
-    let r = symexFind(sutMultipleEmbeddedNuls, tLabel("multi_nul"))
+    let r = pinFind(sutMultipleEmbeddedNuls, tLabel("multi_nul"))
     check r.status == sxSat
 
   test "N10c-3-content: every byte, including BOTH NULs, extracts exactly -- no offset shift from either NUL's own extraction":
-    let r = symexFind(sutMultipleEmbeddedNuls, tLabel("multi_nul"))
+    let r = pinFind(sutMultipleEmbeddedNuls, tLabel("multi_nul"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.len == 5
@@ -220,7 +221,7 @@ suite "symex round-6 N10(c) -- multiple embedded NULs":
     check ord(s[4]) == 0
 
   test "N10c-3-cross: the witness, replayed through the real function at BOTH NUL positions, reproduces the exact found outcome":
-    let r = symexFind(sutMultipleEmbeddedNuls, tLabel("multi_nul"))
+    let r = pinFind(sutMultipleEmbeddedNuls, tLabel("multi_nul"))
     check r.status == sxSat
     let s = r.witness[0]
     let (payload1, q1) = readCStringNulTracer(s, 0)
@@ -298,39 +299,39 @@ proc readOptionsEmptySUT(s: string, start: int) =
 suite "symex round-6 N10(d) -- empty-receiver family-wide, B0":
 
   test "N10d-1: B0 empty receiver leaves i untouched -> sxSat":
-    let r = symexFind(sutB0EmptyReceiver, tLabel("b0_empty_done"))
+    let r = pinFind(sutB0EmptyReceiver, tLabel("b0_empty_done"))
     check r.status == sxSat
 
   test "N10d-1-unsat: B0 empty receiver never raises IndexDefect":
-    let r = symexFind(sutB0EmptyReceiver, tIndexError())
+    let r = pinFind(sutB0EmptyReceiver, tIndexError())
     check r.status == sxUnsat
 
 suite "symex round-6 N10(d) -- empty-receiver family-wide, Q1":
 
   test "N10d-2: Q1's not-found clamp UNSAT companion still proves on an empty receiver":
-    let r = symexFind(sutQ1EmptyReceiverImpossible, tLabel("q1_empty_impossible"))
+    let r = pinFind(sutQ1EmptyReceiverImpossible, tLabel("q1_empty_impossible"))
     check r.status == sxUnsat
 
 suite "symex round-6 N10(d) -- empty-receiver family-wide, B3":
 
   test "N10d-3: B3 empty receiver falls straight to the not-found ScanError raise -> sxRaised":
-    let r = symexFind(scanPairEmptySUT, tRaisedExn("ScanError"))
+    let r = pinFind(scanPairEmptySUT, tRaisedExn("ScanError"))
     check r.status == sxRaised
 
   test "N10d-3-unsat: B3 empty receiver never raises IndexDefect (the guard prevents the entry-read probe)":
-    let r = symexFind(scanPairEmptySUT, tIndexError())
+    let r = pinFind(scanPairEmptySUT, tIndexError())
     check r.status == sxUnsat
 
 suite "symex round-6 N10(d) -- empty-receiver family-wide, B4":
 
   test "N10d-4: B4 (accumulating scan) empty receiver falls straight to the not-found ScanError raise -> sxRaised":
-    let r = symexFind(accScanEmptySUT, tRaisedExn("ScanError"))
+    let r = pinFind(accScanEmptySUT, tRaisedExn("ScanError"))
     check r.status == sxRaised
 
 suite "symex round-6 N10(d) -- empty-receiver family-wide, B6":
 
   test "N10d-5: B6 empty receiver -- the degenerate empty region is vacuously a MEMBER -> sxSat":
-    let r = symexFind(readOptionsEmptySUT, tLabel("b6_empty_done"))
+    let r = pinFind(readOptionsEmptySUT, tLabel("b6_empty_done"))
     check r.status == sxSat
 
   test "N10d-5-decline: the fallback branch's raise is unreachable on an empty receiver (sxUnsat)":
@@ -369,7 +370,7 @@ suite "symex round-6 N10(d) -- empty-receiver family-wide, B6":
     ## status/soundness are unchanged either way, and this pin's job is to
     ## catch a REGRESSION to `sxUnsat`/`sxSat`, not to police which of the
     ## two honest-decline kinds fires.
-    let r = symexFind(readOptionsEmptySUT, tRaisedExn("ScanError"))
+    let r = pinFind(readOptionsEmptySUT, tRaisedExn("ScanError"))
     check r.status == sxUnsat
 
 suite "symex round-6 N10 -- walker version pin":

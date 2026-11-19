@@ -49,6 +49,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
+import ./s8cu_helpers
 
 proc show(errs: openArray[SymexErrorInfo]): string =
   for e in errs: result.add $e.kind & ": " & e.msg & "\n"
@@ -95,7 +96,7 @@ suite "S8ag (5): a tainted SAT after half its budget bounds later hits":
 
 
   test "the declines are classified beSolverUndef, never sxUnsat":
-    let r = symexFind(pairLoopS8ag, tLabel("s8ag_pair_after"), midTainted)
+    let r = pinFind(pairLoopS8ag, tLabel("s8ag_pair_after"), midTainted)
     var declined = false
     for e in r.errors:
       if e.kind == beSolverUndef and "not solved (RFC-0005 S8y)" in e.msg:

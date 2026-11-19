@@ -4,6 +4,7 @@
 ## Arm-field access lands in cycle 4; tFieldDefect in cycle 5.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 type
   ShapeKind = enum skCircle, skSquare
@@ -28,12 +29,12 @@ proc isLargeCircle(s: Shape) =
 
 suite "symex Phase 11 cycle 3 — discriminator access":
   test "symex finds a witness for a discriminator-gated label target":
-    let r = symexFind(isSquare, tLabel("hit"))
+    let r = pinFind(isSquare, tLabel("hit"))
     check r.status == sxSat
 
 suite "symex Phase 11 cycle 4 — arm-field access":
   test "field-in-arm gated by `kind == X` resolves to that arm's symbol":
-    let r = symexFind(isLargeCircle, tLabel("big-circle"))
+    let r = pinFind(isLargeCircle, tLabel("big-circle"))
     check r.status == sxSat
 
 proc unsafeRead(s: Shape) =
@@ -47,7 +48,7 @@ proc unsafeRead(s: Shape) =
 suite "symex Phase 11 cycle 5 — tFieldDefect":
   test "tFieldDefect finds an input that exercises a bad arm-field read":
     ## Phase 16 D1a: sxSat→sxRaised.
-    let r = symexFind(unsafeRead, tFieldDefect())
+    let r = pinFind(unsafeRead, tFieldDefect())
     check r.status == sxRaised
     check r.raisedTypeId == "FieldDefect"
 
@@ -70,7 +71,7 @@ suite "symex Phase 11 cycle 6 — discriminator reassignment":
     ## assignment raise `FieldDefect` ("assignment to discriminant changes
     ## object branch"), which Nim does and the walker used to model as a
     ## legal transition. The oracle below runs exactly that input.
-    let r = symexFind(forceTo, tLabel("impossible"))
+    let r = pinFind(forceTo, tLabel("impossible"))
     check r.status == sxRaised
     check r.raisedTypeId == "FieldDefect"
     var sq = Shape(kind: skSquare, side: 1)
@@ -85,14 +86,14 @@ proc bigSquare(s: Shape) =
 
 suite "symex Phase 11 cycle 7 — variant witness construction":
   test "witness for skCircle path is a proper Shape(kind: skCircle, ...)":
-    let r = symexFind(isLargeCircle, tLabel("big-circle"))
+    let r = pinFind(isLargeCircle, tLabel("big-circle"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.kind == skCircle
     check s.radius > 100
 
   test "witness for skSquare path is a proper Shape(kind: skSquare, ...)":
-    let r = symexFind(bigSquare, tLabel("big-square"))
+    let r = pinFind(bigSquare, tLabel("big-square"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.kind == skSquare
@@ -104,7 +105,7 @@ proc identifyCircle(s: Shape) =
 
 suite "symex Phase 11 cycle 9 — abstraction interval for variant disc":
   test "discriminator's [min, max] arm-ordinal range is logged":
-    let r = symexFind(identifyCircle, tLabel("c"),
+    let r = pinFind(identifyCircle, tLabel("c"),
                      optimisedSymexSettings())
     check r.status == sxSat
     # Audit log must include an entry whose name targets the
@@ -145,7 +146,7 @@ proc deepCheck(o: Outer) =
 
 suite "symex Phase 11 cycle 10 — nested variants":
   test "outer + inner variants compose; witness shape carries both":
-    let r = symexFind(deepCheck, tLabel("deep"))
+    let r = pinFind(deepCheck, tLabel("deep"))
     check r.status == sxSat
     let o = r.witness[0]
     check o.kind == okA
@@ -172,7 +173,7 @@ proc plainSurvivesReassign(x: var PfFoo) =
 
 suite "symex Phase 11 — plain fields shared across variant arms (#5)":
   test "plain field survives discriminator reassignment":
-    let r = symexFind(plainSurvivesReassign, tLabel("preserved"))
+    let r = pinFind(plainSurvivesReassign, tLabel("preserved"))
     check r.status == sxSat
 
 # ---- #4 — wide-enum discriminator -------------------------------------------
@@ -217,7 +218,7 @@ proc reachWide(b: BigKind) =
 
 suite "symex Phase 11 — wide-enum discriminator (#4)":
   test "256<n enum classifies as uint16; symex finds the high-ordinal arm":
-    let r = symexFind(reachWide, tLabel("wide"))
+    let r = pinFind(reachWide, tLabel("wide"))
     check r.status == sxSat
     # Issue #163: the witness reader now emits a correctly-typed `BigKind`
     # value directly (see `IRType.enumName`), so `r.witness[0]` is already
@@ -240,7 +241,7 @@ suite "symex Phase 11 — consecutive reassignments (#9)":
     ## whatever the input, so Nim raises `FieldDefect` at the second
     ## assignment on EVERY input and the label is never reached -- the old
     ## `sxSat` was a witness that raised. The oracle runs both inputs.
-    let r = symexFind(threeReassigns, tLabel("final"))
+    let r = pinFind(threeReassigns, tLabel("final"))
     check r.status == sxRaised
     check r.raisedTypeId == "FieldDefect"
     for k in [skCircle, skSquare]:

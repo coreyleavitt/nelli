@@ -24,6 +24,7 @@
 ## machinery; it confirms the existing machinery composes.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # ── R2 / R3 / R4 / R7: ref alloc + read + write + alias ──────────────────────
 
@@ -141,29 +142,29 @@ proc castPtr(x: int) =
 suite "symex Phase 15 R11b — cross-cluster regression smoke (Cluster R composed)":
 
   test "R11b: two `new T` allocations are distinct → p == q is sxUnsat (R2)":
-    let r = symexFind(twoNewsDistinct, tLabel("alias"))
+    let r = pinFind(twoNewsDistinct, tLabel("alias"))
     check r.status == sxUnsat
 
   test "R11b: real read-after-write p[]=99; p[]==99 is sxSat (R3/R4)":
-    let r = symexFind(readAfterWrite, tLabel("raw"))
+    let r = pinFind(readAfterWrite, tLabel("raw"))
     check r.status == sxSat
 
   test "R11b: write FIXES the value — p[]=99; p[]==7 is sxUnsat (R4 propagation proof)":
-    let r = symexFind(readAfterWriteContradiction, tLabel("rawno"))
+    let r = pinFind(readAfterWriteContradiction, tLabel("rawno"))
     check r.status == sxUnsat
 
   test "R11b: alias chain p==q==r; write through r seen through p → sxSat (R7)":
-    let r = symexFind(aliasChainWrite, tLabel("aliaswrite"))
+    let r = pinFind(aliasChainWrite, tLabel("aliaswrite"))
     check r.status == sxSat
 
   test "R11b: ref-object field write p.x=42; aliased q.x==42 → sxSat (R6)":
-    let r = symexFind(fieldAliasWrite, tLabel("fieldalias"))
+    let r = pinFind(fieldAliasWrite, tLabel("fieldalias"))
     check r.status == sxSat
 
   test "R11b: nil-access defect — deref nil path under tNilAccess → sxRaised (R5, D1a)":
     ## Phase 16 D1a: tNilAccess now returns sxRaised (unconditional fork via
     ## routeRaise). Was sxSat before D1a.
-    let r = symexFind(nilDeref, tNilAccess())
+    let r = pinFind(nilDeref, tNilAccess())
     check r.status == sxRaised
     check r.raisedTypeId == "NilAccessDefect"
 
@@ -172,11 +173,11 @@ suite "symex Phase 15 R11b — cross-cluster regression smoke (Cluster R compose
     ## label (unconditional fork, first-found wins). nilDerefGuarded wraps the
     ## deref in `if p != nil:` so the nil fork is SHORT-CIRCUITED by
     ## pcImpliesNonNil and the label target is reachable via the non-nil path.
-    let r = symexFind(nilDerefGuarded, tLabel("nilhit"))
+    let r = pinFind(nilDerefGuarded, tLabel("nilhit"))
     check r.status == sxSat
 
   test "R11b: ptr int deref works like ref + carries hePtrFamily hint (R8)":
-    let r = symexFind(ptrDeref, tLabel("ptrhit"))
+    let r = pinFind(ptrDeref, tLabel("ptrhit"))
     check r.status == sxSat
     var sawPtrFamily = false
     for e in r.errors:
@@ -186,7 +187,7 @@ suite "symex Phase 15 R11b — cross-cluster regression smoke (Cluster R compose
     check sawPtrFamily
 
   test "R11b: recursive list walk halts cleanly at maxHeapDepth=3 → sxUnknown + heDepthExhausted (R9)":
-    let r = symexFind(walkDeep, tLabel("deep"), depth3)
+    let r = pinFind(walkDeep, tLabel("deep"), depth3)
     check r.status == sxUnknown
     var sawDepth = false
     for e in r.errors:
@@ -194,7 +195,7 @@ suite "symex Phase 15 R11b — cross-cluster regression smoke (Cluster R compose
     check sawDepth
 
   test "R11b: unsafe cast[ptr int](addr x) → sxUnknown + heUnsafeCast (sevError) (R11)":
-    let r = symexFind(castPtr, tLabel("casthit"))
+    let r = pinFind(castPtr, tLabel("casthit"))
     check r.status == sxUnknown
     check r.errors.len > 0
     var sawUnsafeCast = false

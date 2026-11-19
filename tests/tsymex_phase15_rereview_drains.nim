@@ -17,6 +17,7 @@
 import std/[unittest, sequtils]
 import nelli/symex
 
+from ./s8cu_helpers import pinFind
 # ============================================================================
 # S-1: liveRefs union-merge drops equal-length arms → false SAT aliasing
 # ============================================================================
@@ -318,11 +319,11 @@ suite "symex Phase 15 re-review S-1: liveRefs union-merge":
   ## and by the absence of regression in CR-5 tests.
 
   test "S-1-arm1: callerRef seeded before closure; arm-T new int is distinct (sxUnsat)":
-    let r = symexFind(s1BranchNewDistinctFromCaller, tLabel("s1AliasArm1"))
+    let r = pinFind(s1BranchNewDistinctFromCaller, tLabel("s1AliasArm1"))
     check r.status == sxUnsat
 
   test "S-1-arm2: callerRef seeded before closure; arm-F new int is distinct (sxUnsat)":
-    let r = symexFind(s1BranchNewDistinctFromCaller, tLabel("s1AliasArm2"))
+    let r = pinFind(s1BranchNewDistinctFromCaller, tLabel("s1AliasArm2"))
     check r.status == sxUnsat
 
 suite "symex Phase 15 re-review S-2a: isAssert missing seed+drain":
@@ -330,13 +331,13 @@ suite "symex Phase 15 re-review S-2a: isAssert missing seed+drain":
   test "S-2a-1: symexAssert predicate closure write p[]=99 visible after assert (sxSat)":
     ## RED test: before fix, isAssert has no seedCallerHeapThreadvars/drainClosureExitHeap
     ## → write lost → sxUnsat or sxUnknown (false). After fix: sxSat.
-    let r = symexFind(s2AssertPredicateClosure, tLabel("s2AssertHit"))
+    let r = pinFind(s2AssertPredicateClosure, tLabel("s2AssertHit"))
     check r.status == sxSat
 
   test "S-2a-2: symexAssert predicate write proof: p[]==7 after p[]=99 is sxUnsat":
     ## RED test: without fix, heap is stale/free → 7 is sxSat (false SAT).
     ## After fix: write fixed to 99 → 7 is sxUnsat.
-    let r = symexFind(s2AssertContradiction, tLabel("s2AssertNoHit"))
+    let r = pinFind(s2AssertContradiction, tLabel("s2AssertNoHit"))
     check r.status == sxUnsat
 
 suite "symex Phase 15 re-review S-2b: isWhile missing seed+drain":
@@ -344,7 +345,7 @@ suite "symex Phase 15 re-review S-2b: isWhile missing seed+drain":
   test "S-2b-1: while guard closure write p[]=55 visible after loop (sxSat)":
     ## RED test: isWhile has no seedCallerHeapThreadvars → write lost → false UNSAT.
     ## After fix: sxSat.
-    let r = symexFind(s2WhileGuardClosure, tLabel("s2WhileHit"))
+    let r = pinFind(s2WhileGuardClosure, tLabel("s2WhileHit"))
     check r.status == sxSat
 
   test "S-2b-2: while guard write proof: p[]==7 after p[]=55 is NOT sxSat":
@@ -354,7 +355,7 @@ suite "symex Phase 15 re-review S-2b: isWhile missing seed+drain":
     ## exhausts the maxLoopUnwind limit (dead truePaths from iter 0 propagate
     ## to iter 1..4), and the "still active after unwind" arm sets sawUnknown.
     ## The RED→GREEN signal is: before fix = sxSat; after fix = NOT sxSat.
-    let r = symexFind(s2WhileContradiction, tLabel("s2WhileNoHit"))
+    let r = pinFind(s2WhileContradiction, tLabel("s2WhileNoHit"))
     check r.status != sxSat
 
 suite "symex Phase 15 re-review NI-1: per-branch reset in isIf elif":
@@ -362,18 +363,18 @@ suite "symex Phase 15 re-review NI-1: per-branch reset in isIf elif":
   test "NI-1-1: elif branch sees clo2 write p[]=22 (sxSat)":
     ## This should already pass (the elif branch's own drain works); verifies
     ## the sxSat signal is correct.
-    let r = symexFind(ni1ElifNoStale, tLabel("ni1ElifHit"))
+    let r = pinFind(ni1ElifNoStale, tLabel("ni1ElifHit"))
     check r.status == sxSat
 
   test "NI-1-2: elif branch has no stale clo1 heap (p[]==11 is sxUnsat)":
     ## RED test: without per-branch reset, clo1's exit heap bleeds into the
     ## elif path → p[]==11 is sxSat (false SAT). After fix: sxUnsat.
-    let r = symexFind(ni1ElifNoStale, tLabel("ni1ElifStale"))
+    let r = pinFind(ni1ElifNoStale, tLabel("ni1ElifStale"))
     check r.status == sxUnsat
 
   test "NI-1-3: contradiction — p[]==11 on elif path after clo1 (sxUnsat)":
     ## RED test: without fix → sxSat. After fix → sxUnsat.
-    let r = symexFind(ni1ElifContradiction, tLabel("ni1Contradiction"))
+    let r = pinFind(ni1ElifContradiction, tLabel("ni1Contradiction"))
     check r.status == sxUnsat
 
 suite "symex Phase 15 re-review NI-2: isDerefWrite missing float→int drain":
@@ -381,14 +382,14 @@ suite "symex Phase 15 re-review NI-2: isDerefWrite missing float→int drain":
   test "NI-2-1: p[]=int(x); p[]==3 is sxSat (domain-bound hint retired by R16-2)":
     ## R16-2 retired the feConvDomainExcluded hint and S8g its RangeDefect
     ## fork. The sat verdict (post-NI-2 fix) remains.
-    let r = symexFind(ni2DerefWriteFloatConv, tLabel("ni2DerefHit"))
+    let r = pinFind(ni2DerefWriteFloatConv, tLabel("ni2DerefHit"))
     check r.status == sxSat
 
   test "NI-2-2: p[]=int(NaN) path is never a claim (K10a-float: halted undefined, sxUnknown)":
     ## The drain still runs at the deref-write (the NI-2 fix); what it decides
     ## is now the undefined out-of-range side, so the verdict carries
     ## `ubFloatToIntRange`.
-    let r = symexFind(ni2DerefWriteNanExcluded, tLabel("ni2NanHit"))
+    let r = pinFind(ni2DerefWriteNanExcluded, tLabel("ni2NanHit"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -400,12 +401,12 @@ suite "symex Phase 15 re-review S-3: isCall arg-lowering drainClosureExitHeap":
   test "S-3-1: closure-arg heap write visible after named-proc call (sxSat)":
     ## RED test: without fix, closure-arg heap mutation lost → false UNSAT.
     ## After fix: mutation propagated → sxSat.
-    let r = symexFind(s3CallArgClosure, tLabel("s3Hit"))
+    let r = pinFind(s3CallArgClosure, tLabel("s3Hit"))
     check r.status == sxSat
 
   test "S-3-2: contradiction — after closure-arg write, p[]==7 is sxUnsat":
     ## RED test: without fix, false SAT. After fix: sxUnsat.
-    let r = symexFind(s3CallArgContradiction, tLabel("s3NoHit"))
+    let r = pinFind(s3CallArgContradiction, tLabel("s3NoHit"))
     check r.status == sxUnsat
 
 suite "symex Phase 15 re-review S-4: isReturn retExpr seed+drain":
@@ -413,10 +414,10 @@ suite "symex Phase 15 re-review S-4: isReturn retExpr seed+drain":
   test "S-4-1: return-expr closure write p[]=55 visible to outer caller (sxSat)":
     ## RED test: without fix, empty heap threadvars + no drain → false UNSAT.
     ## After fix: seed + drain propagate the write → sxSat.
-    let r = symexFind(s4Caller, tLabel("s4Hit"))
+    let r = pinFind(s4Caller, tLabel("s4Hit"))
     check r.status == sxSat
 
   test "S-4-2: contradiction — after return-expr closure write, p[]==7 is sxUnsat":
     ## RED test: without fix, false SAT. After fix: sxUnsat.
-    let r = symexFind(s4CallerContradiction, tLabel("s4NoHit"))
+    let r = pinFind(s4CallerContradiction, tLabel("s4NoHit"))
     check r.status == sxUnsat

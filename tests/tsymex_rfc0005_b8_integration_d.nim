@@ -31,6 +31,7 @@ import std/[unittest, strutils, tables]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "b8_integration_d")
@@ -47,7 +48,7 @@ proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
 
 template verdict(fn: typed; lbl: static string; want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
 

@@ -13,6 +13,7 @@ import std/[unittest, strutils, math]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -26,7 +27,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -36,7 +37,7 @@ template notUnsat(fn: typed, lbl: string, kind: SymexErrorKind) =
   ## (`kind` recorded), so the target is a candidate. Replay decides it: the
   ## solver's witness need not be one that reaches it for real.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status in {sxSat, sxUnknown}
     check r.errors.hasKind(kind)
@@ -45,7 +46,7 @@ template notUnsat(fn: typed, lbl: string, kind: SymexErrorKind) =
 template clean(fn: typed, lbl: string, want: SymexStatusKind) =
   ## The verdict, with nothing recorded at all.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0

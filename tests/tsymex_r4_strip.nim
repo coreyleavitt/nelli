@@ -14,6 +14,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 const boundedSettings = SymexSettings(
   integerSemantics: isOptimised,
@@ -55,16 +56,16 @@ proc stripIdempotent(s: string) =
 suite "symex round-4 Slice B — strip as decomposition constraints":
 
   test "chain: s.strip().endsWith(\"x\") is SAT with a REAL-strip-consistent witness":
-    let r = symexFind(chainStrip, tLabel("chain-x"))
+    let r = pinFind(chainStrip, tLabel("chain-x"))
     check r.status == sxSat
     check r.witness[0].strip().endsWith("x")
 
   test "bound: strip never lengthens (UNSAT soundness pin)":
-    let r = symexFind(boundStripNeverLonger, tLabel("impossible-longer"))
+    let r = pinFind(boundStripNeverLonger, tLabel("impossible-longer"))
     check r.status == sxUnsat
 
   test "bound-across-statements (chapulin #9 shape): SAT with a REAL-strip-consistent witness":
-    let r = symexFind(boundStripAcross, tLabel("md5"))
+    let r = pinFind(boundStripAcross, tLabel("md5"))
     check r.status == sxSat
     check r.witness[0].strip(leading = false, trailing = true,
                              chars = {'.', ' '}).endsWith(".md5")
@@ -76,7 +77,7 @@ suite "symex round-4 Slice B — strip as decomposition constraints":
     ## verdict is never sxSat/sxRaised. A stub returning an unconstrained
     ## fresh string (instead of the forced decomposition core) would find a
     ## t != u model INSTANTLY — well inside the budget — and fail this.
-    let r = symexFind(stripIdempotent, tLabel("impossible-nonidem"),
+    let r = pinFind(stripIdempotent, tLabel("impossible-nonidem"),
                       boundedSettings)
     check r.status in {sxUnsat, sxUnknown}
 

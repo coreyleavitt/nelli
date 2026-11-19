@@ -98,7 +98,7 @@ suite "PRC-02m: symexFind over a dynamic call":
     if hostAdmission().isSome:
       skipUnadmitted()
     else:
-      let r = symexFind(sutHit, tLabel("hit"), pinSettingsConst)
+      let r = pinFind(sutHit, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
       decides(r)
       if r.status == sxSat: check r.witness[0] == 9
@@ -107,7 +107,7 @@ suite "PRC-02m: symexFind over a dynamic call":
     if hostAdmission().isSome:
       skipUnadmitted()
     else:
-      let r = symexFind(sutHit2, tLabel("hit"), pinSettingsConst)
+      let r = pinFind(sutHit2, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
       decides(r)
       if r.status == sxSat: check r.witness[0] == -3
@@ -116,7 +116,7 @@ suite "PRC-02m: symexFind over a dynamic call":
     if hostAdmission().isSome:
       skipUnadmitted()
     else:
-      let r = symexFind(sutNever, tLabel("hit"), pinSettingsConst)
+      let r = pinFind(sutNever, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
       when hasMethodTable:
         check r.status == sxUnsat
@@ -129,7 +129,7 @@ suite "PRC-02m: symexFind over a dynamic call":
     if hostAdmission().isSome:
       skipUnadmitted()
     else:
-      let r = symexFind(sutHiddenFind, tLabel("hit"), pinSettingsConst)
+      let r = pinFind(sutHiddenFind, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
       # With the table, it lists `Sub`'s override, which no scan read: the
       # walk's dispatch (the base body only) cannot stand, sat or unsat. Without
@@ -149,7 +149,7 @@ suite "PRC-02m: symexFind over a dynamic call":
       # subtype in the binary has another (`subtypeRouteGuard`). `MSub` and
       # `MSub2` have none. Without the table a subtype declared where no scan
       # sees it may carry a hook, so the global's route stays open.
-      let r = symexFind(sutBiased, tLabel("hit"), pinSettingsConst)
+      let r = pinFind(sutBiased, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
       when hasSubtypeTable:
         check r.status == sxSat
@@ -169,7 +169,7 @@ suite "PRC-02m: symexFind over a dynamic call":
     else:
       # `HSub` is built only at module init and has a `=destroy` no scan of
       # `sutHeld` reads: the table names it, so every read declines.
-      let r = symexFind(sutHeld, tLabel("hit"), pinSettingsConst)
+      let r = pinFind(sutHeld, tLabel("hit"), pinSettingsConst)
       checkpoint $r.status & " " & show(r.errors)
       check r.status == sxUnknown
       check r.errors.named(feGlobalHavoc)

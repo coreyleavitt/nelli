@@ -25,6 +25,7 @@
 ## See ADR-0010 (logical heap), §F-E (E5 finally), RFC §R13.
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # The try body writes 7 to the heap cell `p` points at. E5 runs the finally on
 # the normal exit continuation of the try body; the finally derefs the SAME heap
@@ -49,13 +50,13 @@ suite "symex Phase 15 R13-B — ptr T + try/finally composition":
     # Natively `f(nil)` is a SIGSEGV. The walk routed the nil edge into the
     # finally, so the ValueError path was found first; the crash is a reachable
     # defect, which surfaces under any target (E6), and is now found first.
-    let r = symexFind(f, tRaisedExn("ValueError"))
+    let r = pinFind(f, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "NilAccessDefect"
 
   test "R13-B: ptr T + try/finally composition produces sxRaised(ValueError) with witness p[]==7":
     # RFC-0005 S8cu: with the nil crash excluded, the composition this pins.
-    let r = symexFind(f, tRaisedExn("ValueError"), noNilCrash)
+    let r = pinFind(f, tRaisedExn("ValueError"), noNilCrash)
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     # The heap state threaded through the try/finally exit continuation: the

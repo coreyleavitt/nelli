@@ -87,6 +87,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -121,7 +122,7 @@ proc sutN28ShadowedOffsetOverflow(data: seq[byte], offset: int) =
 suite "symex N28 -- int-offset collector: shadow-collision root acceptance":
 
   test "N28-1: the real formal's overflow is reachable (sxRaised) -- pre-fix this was the false sxUnsat":
-    let r = symexFind(sutN28ShadowedOffsetOverflow,
+    let r = pinFind(sutN28ShadowedOffsetOverflow,
                        tLabel("n28_shadow_offset_overflow"))
     # PRE-FIX (verified RED): `offset` was wrongly traced to the shadow's
     # root by NAME, unconditionally svInt-promoted with no width stamp
@@ -167,7 +168,7 @@ proc sutN28LegitOffsetCallReturn(data: seq[byte], start: int) =
 suite "symex N28 -- regression: genuine (non-shadowed) root tracing unaffected":
 
   test "N28-2: a genuinely-traced call-return offset still forks OverflowDefect (sxRaised, unchanged by this fix)":
-    let r = symexFind(sutN28LegitOffsetCallReturn,
+    let r = pinFind(sutN28LegitOffsetCallReturn,
                        tLabel("n28_legit_call_return_overflow"))
     check r.status == sxRaised
     check r.raisedTypeId == "OverflowDefect"
@@ -198,7 +199,7 @@ proc sutN28StringBackedShadowCollision(data: seq[byte], src: seq[byte]) =
 suite "symex N28 -- string-backed collector: shadow-collision receiver acceptance":
 
   test "N28-3: the real formal's honest array read is unaffected either way (already-GREEN both pre- and post-fix -- see file header, hardening only)":
-    let r = symexFind(sutN28StringBackedShadowCollision,
+    let r = pinFind(sutN28StringBackedShadowCollision,
                        tLabel("n28_stringbacked_shadow_read"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -219,7 +220,7 @@ proc sutN28StringBackedLegitScan(data: seq[byte]) =
 suite "symex N28 -- regression: genuine (non-shadowed) string-backed receiver unaffected":
 
   test "N28-4: a genuinely string-backed receiver is still classified and scanned correctly (sxSat)":
-    let r = symexFind(sutN28StringBackedLegitScan,
+    let r = pinFind(sutN28StringBackedLegitScan,
                        tLabel("n28_stringbacked_legit_scan"))
     check r.status == sxSat
 

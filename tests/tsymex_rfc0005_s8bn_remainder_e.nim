@@ -18,6 +18,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/dsl_parser
+from ./s8cu_helpers import pinFind
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -27,7 +28,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 template clean(fn: typed, lbl: string, want: SymexStatusKind,
                st: SymexSettings = SymexSettings()): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl), st)
+    let r = pinFind(fn, tLabel(lbl), st)
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.

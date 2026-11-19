@@ -47,6 +47,7 @@
 ## falls back to `maxCallDepth`/256 without spuriously halting a shallow SUT.
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type
   Node = ref object
@@ -103,7 +104,7 @@ suite "symex Phase 15 R9 — recursive ref heap-depth budget (heDepthExhausted)"
   test "R9: linked-list SUT with unknown depth halts cleanly at budget":
     # maxHeapDepth = 3: the depth-4 walk exhausts the budget → sxUnknown with a
     # heDepthExhausted error. CRITICAL: this must HALT, not hang.
-    let r = symexFind(walk4, tLabel("deep"), depth3)
+    let r = pinFind(walk4, tLabel("deep"), depth3)
     check r.status == sxUnknown
     var sawDepth = false
     for e in r.errors:
@@ -112,11 +113,11 @@ suite "symex Phase 15 R9 — recursive ref heap-depth budget (heDepthExhausted)"
 
   test "R9: depth-4 walk within an 8-budget is sxSat":
     # maxHeapDepth = 8: the depth-4 walk is within budget → sxSat.
-    let r = symexFind(walk4, tLabel("deep"), depth8)
+    let r = pinFind(walk4, tLabel("deep"), depth8)
     check r.status == sxSat
 
   test "R9: maxHeapDepth=0 falls back to maxCallDepth/256 (shallow SUT not halted)":
     # A 2-deref SUT under the unlimited (=0) sentinel resolves the effective
     # limit to maxCallDepth (>0) or 256 — far above 2 — so it does NOT halt.
-    let r = symexFind(shallow, tLabel("shallow"), depth0)
+    let r = pinFind(shallow, tLabel("shallow"), depth0)
     check r.status == sxSat

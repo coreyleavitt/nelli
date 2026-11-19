@@ -26,6 +26,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -91,11 +92,11 @@ proc sutScanPairNotFoundClampImpossible(s: string, start: int) =
 suite "symex round-6 B3 — symbolic-start lift":
 
   test "B3-1: found position start+4 from a symbolic start -> sxSat":
-    let r = symexFind(sutScanPairFoundFromOffset, tLabel("hit"))
+    let r = pinFind(sutScanPairFoundFromOffset, tLabel("hit"))
     check r.status == sxSat
 
   test "B3-1b UNSAT companion: not-found clamp never exceeds bound, for a symbolic start":
-    let r = symexFind(sutScanPairNotFoundClampImpossible, tLabel("impossible"))
+    let r = pinFind(sutScanPairNotFoundClampImpossible, tLabel("impossible"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -115,7 +116,7 @@ suite "symex round-6 B3 — not-found fork":
     ## typeId string an exception raised through a nested-call boundary
     ## renders as (an orthogonal, pre-existing exception-hierarchy concern,
     ## out of B3's scope).
-    let r = symexFind(scanPairDiscardSUT, tRaisedExn("ScanError"))
+    let r = pinFind(scanPairDiscardSUT, tRaisedExn("ScanError"))
     check r.status == sxRaised
 
 # ---------------------------------------------------------------------------
@@ -125,7 +126,7 @@ suite "symex round-6 B3 — not-found fork":
 suite "symex round-6 B3 — OOB entry guard":
 
   test "B3-3: negative symbolic start -> the entry-read probe deposits a real IndexDefect (sxRaised)":
-    let r = symexFind(scanPairDiscardSUT, tIndexError())
+    let r = pinFind(scanPairDiscardSUT, tIndexError())
     check r.status == sxRaised
 
 # ---------------------------------------------------------------------------
@@ -190,7 +191,7 @@ proc sutAccPositionHonoredImpossible(s: string, start: int) =
 suite "symex round-6 B3 — trip wires (recognizer stays narrow)":
 
   test "B3-4: non-.len bound is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
-    let r = symexFind(sutScanPairNonLenBoundImpossible, tLabel("impossible"))
+    let r = pinFind(sutScanPairNonLenBoundImpossible, tLabel("impossible"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
@@ -204,7 +205,7 @@ suite "symex round-6 B3 — trip wires (recognizer stays narrow)":
     ## `tLabel` search can report is the callee's OWN not-found `ScanError`
     ## raise (verified empirically — the target line is unreachable through
     ## the closed form; the raise is the sole surviving observable finding).
-    let r = symexFind(sutAccPositionHonoredImpossible, tLabel("impossible"))
+    let r = pinFind(sutAccPositionHonoredImpossible, tLabel("impossible"))
     check r.status == sxRaised
 
 suite "symex round-6 B3 — walker version pin":

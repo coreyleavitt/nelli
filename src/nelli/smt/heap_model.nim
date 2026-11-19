@@ -28,6 +28,8 @@ import std/tables
 import std/options
 import std/sets
 import std/strutils
+import std/hashes   # RFC-0016 INT-83: `@addrKind` codes
+import std/algorithm   # RFC-0016 INT-84: `sort`
 import z3
 import ./types
 import ./abstraction
@@ -35,6 +37,7 @@ import ./symval
 import ./walk_state
 import ./z3check
 import ./variant_layout as vl
+export sanitizeTypeId, refPointeeTypeId   # RFC-0016 INT-83: now in types.nim
 
 # Forward declarations: the container registry (below, with the runtime half
 # of this file) reads the leaf split, whose bodies follow the cell model.
@@ -76,7 +79,78 @@ var allocEnumZeroLegal* {.threadvar.}: bool
   ## conditions of an enum without ordinal 0 admit 0 there. Inputs (params)
   ## keep the exact member range: their witness must render as a member.
 
-proc rangeCondsIfNeeded*(v: SymVal, ty: IRType): seq[Z3Bool] =
+var allocInputDomain* {.threadvar.}: bool
+  ## RFC-0016 INT-84. Set while `runSymexImpl` allocates the walk's inputs
+  ## (its parameters and what `allocateSym` builds of them): a holey enum
+  ## there ranges over its declared values exactly (`enumHoleConds`), since
+  ## no caller can pass a hole.
+
+var enumHolesMade* {.threadvar.}: bool
+  ## RFC-0016 INT-84. Set once the walk lowers a value a holey enum's hole
+  ## may come from that the walk does not see made: a conversion to a holey
+  ## enum (`E(k)` checks `low .. high` only; `lowerConvIntRange`) or an
+  ## opaque call's result or writes (`freshRetSym`, the opaque havocs).
+  ## Until then every holey enum value a read site sees is an input or a
+  ## value the program made from declared values and zero-initialisation,
+  ## so a read site may assert the declared ordinals and 0
+  ## (`rangeCondsIfNeeded`). Monotone over a run: a read on another path,
+  ## or earlier on this one, read no hole.
+
+proc hasHoleyEnum*(ty: IRType): bool =
+  ## RFC-0016 INT-84. `ty` holds a holey enum value somewhere by value: the
+  ## type itself, a field, an element, a key or a set member; a case object
+  ## and a ref (whose cells are the heap's) conservatively.
+  if ty == nil: return false
+  case ty.kind
+  of itInt: ty.enumOrds.len > 0
+  of itTuple:
+    for f in ty.fields:
+      if hasHoleyEnum(f): return true
+    false
+  of itArray: hasHoleyEnum(ty.elemTy)
+  of itSeq: hasHoleyEnum(ty.seqElemTy)
+  of itTable: hasHoleyEnum(ty.tabKeyTy) or hasHoleyEnum(ty.tabValTy)
+  of itSet: hasHoleyEnum(ty.setElemTy)
+  of itDistinct: hasHoleyEnum(ty.distinctBase)
+  of itVariant, itMultiVariant, itRef, itPtr: true   # conservatively
+  else: false
+
+proc rangeCondsIfNeeded*(v: SymVal, ty: IRType; holes = true): seq[Z3Bool]
+
+proc enumHoleConds*(v: SymVal, ty: IRType, zeroLegal: bool): seq[Z3Bool] =
+  ## RFC-0016 INT-84. A holey enum value is one of its declared ordinals
+  ## (`IRType.enumOrds`), and `0` too when `zeroLegal` (a zero-initialised
+  ## slot): one disjunction, a run of consecutive ordinals compared as a
+  ## range. Empty for any type that is not a holey enum, and for a value
+  ## whose kind carries no bound (as `bvRangeConds`).
+  if ty == nil or ty.kind != itInt or ty.enumOrds.len == 0: return @[]
+  var ords = ty.enumOrds
+  if zeroLegal and 0'i64 notin ords:
+    ords.add 0'i64
+    ords.sort()
+  var runs: seq[(int64, int64)]
+  for o in ords:
+    if runs.len > 0 and runs[^1][1] + 1 == o: runs[^1][1] = o
+    else: runs.add (o, o)
+  # Each run's bounds go through `rangeCondsIfNeeded` (the range-invariant
+  # audit's sanctioned path) on a plain ranged copy of `ty`: no enum name or
+  # ordinals, so neither the zero-legal nor the holes arm applies.
+  let runTy = IRType()
+  runTy[] = ty[]
+  runTy.hasRange = true
+  runTy.enumName = ""
+  runTy.enumOrds = @[]
+  var clause: Z3Bool
+  for i, (a, b) in runs:
+    runTy.rangeLo = a
+    runTy.rangeHi = b
+    let cs = rangeCondsIfNeeded(v, runTy, holes = false)
+    if cs.len != 2: return @[]
+    let inRun = cs[0] and cs[1]
+    clause = if i == 0: inRun else: clause or inRun
+  @[clause]
+
+proc rangeCondsIfNeeded*(v: SymVal, ty: IRType; holes = true): seq[Z3Bool] =
   ## Issue #163 review R11. The CONSTRAINT half of the two-obligation
   ## contract every `range[lo..hi]`-typed value carries wherever it is
   ## materialized from a backing store: (a) here — assert the symbol lies
@@ -126,8 +200,32 @@ proc rangeCondsIfNeeded*(v: SymVal, ty: IRType): seq[Z3Bool] =
         if v.kind == svInt: @[v.zi >= mkZ3IntLit(0), v.zi <= mkZ3IntLit(0)]
         else: bvRangeConds(v, 0, 0, ty.signed)
       if zero.len == 2:
-        return @[(conds[0] and conds[1]) or (zero[0] and zero[1])]
+        return @[(conds[0] and conds[1]) or (zero[0] and zero[1])] &
+               (if holes and allocInputDomain:
+                  enumHoleConds(v, ty, zeroLegal = true) else: @[])
+    # RFC-0016 INT-84: a holey enum's holes. An input ranges over its
+    # declared values; a value a read site sees, over them and 0, unless a
+    # hole may have been made (`enumHolesMade`). `holes = false` is a range
+    # CHECK, which Nim makes against `low .. high` only.
+    if holes and ty.enumOrds.len > 0:
+      if allocInputDomain:
+        result = conds & enumHoleConds(v, ty, zeroLegal = allocEnumZeroLegal)
+        return
+      elif not enumHolesMade:
+        result = conds & enumHoleConds(v, ty, zeroLegal = true)
+        return
     conds
+  elif ty.kind in {itFloat32, itFloat64} and ty.floatRange:
+    # RFC-0016 INT-77: Nim's float range check is `lo <= x and x <= hi` in
+    # the base width, so the value set is the closed IEEE interval: NaN
+    # fails both comparisons, -0.0 passes wherever 0.0 does.
+    if v.kind == svFloat64:
+      @[v.fp64 >= mkFloat64(ty.floatLo), v.fp64 <= mkFloat64(ty.floatHi)]
+    elif v.kind == svFloat32:
+      @[v.fp32 >= mkFloat32(float32(ty.floatLo)),
+        v.fp32 <= mkFloat32(float32(ty.floatHi))]
+    else:
+      @[]
   else:
     @[]
 
@@ -310,6 +408,14 @@ func intHeapCell*(ty: IRType): bool =
   ## `int2bv(bv2int(v))` shape, which is the slow direction the other way.
   {.cast(noSideEffect).}:
     intHeapIsInt and ty != nil and ty.kind == itInt and ty.signed
+
+var heapFieldOwners* {.threadvar.}: Table[string, tuple[code: int64; depth: int]]
+  ## RFC-0016 INT-81. The field heap of a hierarchy type below the root ->
+  ## the run-type tag of the type declaring the field (`inheritTagCode`)
+  ## and its depth, written by `fieldHeapKey`. `buildHeapSnapshot` renders a
+  ## cell's fields of its DYNAMIC type from it: a field a descendant
+  ## declares keys on that descendant, outside the root's heap prefix.
+  ## Reset at `runSymexImpl` entry (`resetHeapModel`).
 
 var heapKeyShapes* {.threadvar.}: Table[string, HeapKeyShape]
   ## RFC-0005 S8h. Heap key -> `HeapKeyShape`, written by `mkHeapArrayVar`.
@@ -814,69 +920,9 @@ var globalEntryFacts* {.threadvar.}: seq[Z3Bool]
   ## at least 0, a range's bounds): true of every value of the type, so
   ## asserted into every check (`globalRoots`), as the values are run-wide.
 
-proc sanitizeTypeId*(base: string): string =
-  ## The heap/sort-name spelling of a type id: every character outside
-  ## `[A-Za-z0-9_]` becomes `_` (split out of `refPointeeTypeId` at RFC-0005
-  ## S8bh, whose `fieldHeapKey` spells a declaring type's id the same way).
-  result = base
-  for i in 0 ..< result.len:
-    if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-      result[i] = '_'
+## `sanitizeTypeId` and `refPointeeTypeId` live in `types.nim` (RFC-0016
+## INT-83: the witness emitter names a pointer cell's sort at compile time).
 
-proc refPointeeTypeId*(pointeeTy: IRType): string =
-  ## Phase 15 R1; flipped at Cluster H Step B (ADR-0022). A stable
-  ## per-pointee-type identifier used to key the `Ref_T` sort + heap array +
-  ## nil const (and, via `fieldHeapKey`, the per-field heap arrays — an
-  ## object's ref sort and its field-array keys must agree, so the same
-  ## preference applies uniformly to `refPointeeTypeId(objTy)` calls too).
-  ##
-  ## Prefer the pointee's `nominalId` (a canonical, symbol-unique nominal
-  ## identity — Cluster H Step A) over the structural `$pointeeTy` rendering
-  ## when the pointee is a named object (`itTuple` with a non-empty
-  ## `nominalId`). Two `IRType`s for the SAME nominal object can carry
-  ## DIFFERENT structural renderings — e.g. a bare ref's full-field pointee
-  ## vs. a recursive field's empty-fielded placeholder (`namedRefPlaceholder`,
-  ## built to break compile-time self-reference) — yet they denote the same
-  ## Nim type and must key the SAME `Ref_T` sort. Keying on `nominalId`
-  ## unifies them; keying on `$pointeeTy` (the pre-Step-B behaviour) would
-  ## mint two distinct sorts and a Z3 sort mismatch on the first cross-use
-  ## (degrading to `sxUnknown`). That unification becomes reachable once a
-  ## bare named-ref parameter itself routes through `itRef` (Step C); Step B
-  ## proves the mechanism keeps inline-ref sort naming consistent first.
-  ## Anonymous tuples and non-object pointees have no `nominalId` and keep
-  ## the structural rendering (unchanged behaviour).
-  ##
-  ## RFC-0005 S8j: a variant pointee keys on its `vNominalId` the same way.
-  ## An inline `ref Obj` field's pointee is the empty-fielded placeholder
-  ## tuple, keyed on `nominalId(Obj)`; when `Obj` is a case object, every
-  ## other position (the nil in `h.v != nil`, the pointee of `h.v.kind`)
-  ## carries the full variant. Keyed structurally, the two were distinct
-  ## sorts for one Nim type: a Z3 sort error, or a false `sxUnsat`.
-  ## RFC-0005 S8l: a multi-variant keys on its `mvNominalId` for the same
-  ## reason (an inline `ref MV` field was that sort error).
-  ## RFC-0005 S8bh (item 3): a type of an inheritance hierarchy keys on the
-  ## hierarchy's ROOT (`inheritChain[0]`): every ref of the hierarchy is an
-  ## address of one sort, as in Nim, where `Base(d)` is `d`'s own address.
-  ## RFC-0016 K9c follow-up: a named object the classifier could not
-  ## represent (`__unsupported:<name>`) keys on `uninterpRefKey`, the key
-  ## its placeholder pointee carries, for the same reason.
-  let base = if pointeeTy.kind == itTuple and pointeeTy.inheritChain.len > 0:
-               pointeeTy.inheritChain[0]
-             elif pointeeTy.kind == itVariant and
-                  pointeeTy.vInheritChain.len > 0:
-               pointeeTy.vInheritChain[0]   # RFC-0005 S8bn (item 8)
-             elif pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
-               pointeeTy.nominalId
-             elif pointeeTy.kind == itVariant and pointeeTy.vNominalId.len > 0:
-               pointeeTy.vNominalId
-             elif pointeeTy.kind == itMultiVariant and pointeeTy.mvNominalId.len > 0:
-               pointeeTy.mvNominalId   # RFC-0005 S8l
-             elif pointeeTy.kind == itUninterp and
-                  pointeeTy.uninterpRefKey.len > 0:
-               pointeeTy.uninterpRefKey   # RFC-0016 K9c follow-up
-             else:
-               $pointeeTy
-  result = sanitizeTypeId(base)
 
 proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
   ## Phase 15 R1 (ADR-0010). Return the per-walker `Ref_<typeId>` uninterpreted
@@ -1296,6 +1342,15 @@ proc heapStoreValue*(valSV: SymVal; proto: SymVal; ty: IRType): SymVal =
     of svBV64: result = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
     else: discard
 
+var preExistingNames {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-82. The names of the constants that hold the walk's entry
+  ## state (`notePreExistingTerms`, `mkHeapArrayVar`'s `heap_<key>`). Reset
+  ## per run.
+
+proc notePreExistingName*(name: string) =
+  ## RFC-0016 INT-82. Record the constant `name` as part of the entry state.
+  preExistingNames.incl name
+
 proc mkHeapArrayVar*(ctx: Z3Context, refSort: RawZ3Sort,
                     pointeeTy: IRType, name: string,
                     variantTy: IRType = nil, leaf = 0): Z3AnyAst =
@@ -1328,6 +1383,10 @@ proc mkHeapArrayVar*(ctx: Z3Context, refSort: RawZ3Sort,
   if leaf == 0 and "@ep" notin key and (not heapKeyShapes.hasKey(key) or
      (variantTy != nil and heapKeyShapes[key].variantTy == nil)):
     heapKeyShapes[key] = HeapKeyShape(valTy: pointeeTy, variantTy: variantTy)
+  # RFC-0016 INT-82: an input heap (`heap_<key>`, not a havoc's `@ep<n>`)
+  # is the walk's entry state (`refProvenanceRoots`).
+  if name.startsWith("heap_") and '@' notin name:
+    notePreExistingName(name)
   var scratchPC: seq[Z3Bool]
   let proto = allocateSym(pointeeTy, "__heapValSort", scratchPC,
                                       false, @[])
@@ -1621,6 +1680,129 @@ proc intCellRangeFacts*(ctx: Z3Context; arr, idx: RawZ3Ast; ty: IRType) =
       todo.add Z3_get_app_arg(ctx.raw, app, 1)
       todo.add Z3_get_app_arg(ctx.raw, app, 2)
 
+var madeKinds {.threadvar.}:
+    tuple[ready: bool, select, store, ite, constArr: int]
+  ## RFC-0016 INT-85. The linked Z3's decl kinds `madeValueCond` reads, off
+  ## probe terms (`heapChainKinds`' discipline). Process-stable.
+
+proc madeValueCond*(ctx: Z3Context; t: RawZ3Ast):
+    tuple[known: bool; holds: bool; cond: Z3Bool] =
+  ## RFC-0016 INT-85. When the scalar term `t` is a value the program
+  ## itself made, exactly: a numeral (a zeroed slot's 0 from `newSeq`,
+  ## `setLen` growth, `new` or a default, or a literal the walk stored),
+  ## read through the `store`, `ite`, constant-array and `lambda` views the
+  ## walk builds over a container's backing. A Boolean term over the path's
+  ## symbols that holds exactly when the value `t` denotes is such a
+  ## numeral; `known` with `holds` when it is a constant. Any other leaf (a
+  ## free backing array, an input's constant, an arithmetic term) is no
+  ## made value: the declared domain is its read-site fact.
+  ##
+  ## A read site asserts its type's declared domain only where this does
+  ## not hold (`readRangeConds`): a zero-initialised slot of a type whose
+  ## declared values exclude 0 holds 0 natively, which the domain refutes,
+  ## while a value a caller passed lies in it. Past `termWalkMaxDepth` a
+  ## subterm is no made value (the domain is asserted on it, as before).
+  if not madeKinds.ready:
+    let pc = probeContext()
+    let b = mkBoolVar(pc, "__int85_kind_probe_b")
+    let x = mkIntVar(pc, "__int85_kind_probe_x")
+    let arr = mkArrayVar[Z3Int, Z3Int](pc, "__int85_kind_probe_arr")
+    proc kindOf(a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(pc.raw, Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, a))))
+    # Each probe term is wrapped (ref-counted) before the next Z3 call.
+    let ka = wrap[Z3AnyAst](pc, pc.checkErr Z3_mk_const_array(pc.raw,
+      pc.checkErr(Z3_get_sort(pc.raw, x.raw)), x.raw))
+    let kc = kindOf(ka.raw)
+    let st = wrap[Z3AnyAst](pc, checkedStore(pc, arr.raw, x.raw, x.raw))
+    let ks = kindOf(st.raw)
+    madeKinds = (ready: true, select: kindOf(select(arr, x).raw), store: ks,
+                 ite: kindOf(ite(b, x, x + mkInt(pc, 1)).raw), constArr: kc)
+  let kinds = madeKinds
+  type M = tuple[known: bool; holds: bool; cond: Z3Bool]
+  let no = (known: true, holds: false, cond: default(Z3Bool))
+  let yes = (known: true, holds: true, cond: default(Z3Bool))
+  proc asBool(m: M): Z3Bool =
+    if not m.known: m.cond else: mkBool(ctx, m.holds)
+  proc iteM(c: RawZ3Ast; a, b: M): M =
+    if a.known and b.known and a.holds == b.holds: return a
+    (known: false, holds: false,
+     cond: wrap[Z3Bool](ctx, checkedIte(ctx, c, asBool(a).raw, asBool(b).raw)))
+  var memoV: Table[int, M]
+  var memoA: Table[(int, int), M]
+  # One walk for both shapes, so it recurses without a forward declaration:
+  # `arr` set, the element of array `a` at `i`; else, the value `a`.
+  proc walkMade(a, i: Z3AnyAst; arr: bool; level: int): M =
+    if level > termWalkMaxDepth: return no
+    if not arr:
+      if isNumeralAst(ctx, a.raw): return yes
+      if getAstKind(a) != akApp: return no
+      let id = astId(ctx, a.raw)
+      if id in memoV: return memoV[id]
+      result = no
+      let (decl, args) = unpackApp(a)
+      let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+      if k == kinds.select and args.len == 2:
+        result = walkMade(args[0], args[1], true, level + 1)
+      elif k == kinds.ite and args.len == 3:
+        result = iteM(args[0].raw, walkMade(args[1], i, false, level + 1),
+                      walkMade(args[2], i, false, level + 1))
+      memoV[id] = result
+      return
+    let key = (astId(ctx, a.raw), astId(ctx, i.raw))
+    if key in memoA: return memoA[key]
+    result = no
+    case getAstKind(a)
+    of akQuantifier:
+      if Z3_is_lambda(ctx.raw, a.raw) and
+         Z3_get_quantifier_num_bound(ctx.raw, a.raw) == 1:
+        var sub = i.raw
+        let body = Z3_get_quantifier_body(ctx.raw, a.raw)
+        let inst = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute_vars(ctx.raw,
+          body, 1'u32, cast[ptr UncheckedArray[RawZ3Ast]](addr sub)))
+        result = walkMade(inst, i, false, level + 1)
+    of akApp:
+      let (decl, args) = unpackApp(a)
+      let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+      if k == kinds.store and args.len == 3:
+        let hit = wrap[Z3Bool](ctx, checkedEq(ctx, i.raw, args[1].raw))
+        result = iteM(hit.raw, walkMade(args[2], i, false, level + 1),
+                      walkMade(args[0], i, true, level + 1))
+      elif k == kinds.ite and args.len == 3:
+        result = iteM(args[0].raw, walkMade(args[1], i, true, level + 1),
+                      walkMade(args[2], i, true, level + 1))
+      elif k == kinds.constArr and args.len == 1:
+        result = walkMade(args[0], i, false, level + 1)
+    else: discard
+    memoA[key] = result
+  let root = wrap[Z3AnyAst](ctx, t)
+  walkMade(root, root, false, 0)
+
+proc readRangeConds*(v: SymVal; ty: IRType): seq[Z3Bool] =
+  ## RFC-0016 INT-85. The declared-domain facts of a value read out of a
+  ## container (a seq element, a heap cell, a table value): the type's
+  ## domain (`rangeCondsIfNeeded`) unless the slot holds a value the program
+  ## made (`madeValueCond`). A slot the program created starts at 0, an
+  ## exact value the walk already models; only a value from a caller (an
+  ## input's backing, a havoc) is bounded to the declared values. A float
+  ## range's zeroed slot holds +0.0 (INT-77's interval is its caller
+  ## domain): the same rule, over the FP numeral.
+  result = rangeCondsIfNeeded(v, ty)
+  if result.len == 0 or v.kind notin {svInt, svBV8, svBV16, svBV32, svBV64,
+                                       svFloat32, svFloat64}:
+    return
+  let ctx = requireCurrentContext()
+  let t = case v.kind
+          of svFloat32: v.fp32.raw
+          of svFloat64: v.fp64.raw
+          else: rawAstOf(v)
+  let m = madeValueCond(ctx, t)
+  if m.known:
+    if m.holds: result = @[]
+    return
+  var dom = result[0]
+  for i in 1 ..< result.len: dom = dom and result[i]
+  result = @[dom or m.cond]
+
 proc heapSelect*(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
                 pointeeTy: IRType): SymVal =
   ## Phase 15 R1 (ADR-0010). The GROUND heap read `select(heap, p)` — a single
@@ -1722,7 +1904,7 @@ proc svCellWf*(sv: SymVal; ty: IRType; nested: bool; bounded = true): seq[Z3Bool
         domainClause(sv.mvAxes[xi].disc[], axisDiscriminatorDomain(ax)[2])
     r
   else:
-    if nested: rangeCondsIfNeeded(sv, ty) else: @[]
+    if nested: readRangeConds(sv, ty) else: @[]   # RFC-0016 INT-85
 
 proc heapCellWfConds*(ctx: Z3Context; key: string; refSort: RawZ3Sort;
                      valTy: IRType; refAst: Z3AnyAst): seq[Z3Bool] =
@@ -1841,15 +2023,25 @@ proc fieldHeapKey*(objTy: IRType, field: string): string =
   ## heap, and siblings' same-named fields are two. A field the type does
   ## not list (a tag level, `@lvl<j>`, or a type without `of`) keeps the
   ## `refPointeeTypeId` key -- the hierarchy's root for a tag level.
+  template owned(id: string; chain: seq[string]): string =
+    let key = sanitizeTypeId(id) & "__" & field
+    # RFC-0016 INT-81: the declaring type's tag, for the witness.
+    let depth = chain.find(id)
+    when nimvm:
+      discard
+    else:
+      if depth >= 1:
+        heapFieldOwners[key] = (code: inheritTagCode(id), depth: depth)
+    key
   if objTy != nil and objTy.kind == itTuple:
     let i = objTy.ownedFieldNames.find(field)
     if i >= 0 and i < objTy.ownedFieldIds.len:
-      return sanitizeTypeId(objTy.ownedFieldIds[i]) & "__" & field
+      return owned(objTy.ownedFieldIds[i], objTy.inheritChain)
   # RFC-0005 S8bn (item 8): a case-object hierarchy's plain field likewise.
   if objTy != nil and objTy.kind == itVariant:
     let i = objTy.vOwnedFieldNames.find(field)
     if i >= 0 and i < objTy.vOwnedFieldIds.len:
-      return sanitizeTypeId(objTy.vOwnedFieldIds[i]) & "__" & field
+      return owned(objTy.vOwnedFieldIds[i], objTy.vInheritChain)
   refPointeeTypeId(objTy) & "__" & field
 
 proc inheritTagKey*(objTy: IRType, level: int): string =
@@ -1969,24 +2161,377 @@ func heapDerefDecline*(chainDepth, derefCount, limit: int): string =
   else: ""
 
 
+# ---- address provenance: an allocation is no pre-existing object ------------
+# RFC-0016 INT-82 (SOUNDNESS). Natively a `new T` / `T(...)` returns an object
+# distinct from every object that existed when it was made: every ref the SUT
+# was handed (a parameter, a field or element reached through one, a global's
+# entry value), and every earlier allocation. `assertFreshness` states the
+# second half pairwise against the path's own allocations (`liveRefs`), but a
+# caller's ref is never one of them, so `p == Node(...)` was satisfiable (a
+# false sxSat; `h_verification` asserted it).
+#
+# The encoding is a disjointness predicate per ref sort, `@pre_<T>: Ref_T ->
+# Bool`, "names an object of the walk's ENTRY state": every allocation is
+# `not @pre(f)` and every entry-state address is `@pre(a)`. It is the
+# watermark idea with the order dropped (only "before the walk / during it"
+# matters; allocations among themselves keep `assertFreshness`), so it stays
+# in EUF: one ground unary application per term, no arithmetic, no quantifier
+# (the G4 lesson). Entry-state addresses are not enumerated from a path's live
+# set, which is what missed the parameters; they are read off the query's own
+# terms at solve time (`refProvenanceRoots`, from `globalRoots`), which is
+# complete for every address a query can mention:
+#   * a constant of the entry state (`notePreExistingTerms`: each parameter's
+#     leaves, each global's entry value) is `@pre`;
+#   * a `select(A, i)` whose array `A` reaches, through `store`s and `ite`s,
+#     an entry-state array `B` (an input heap `heap_<key>`, noted by
+#     `mkHeapArrayVar`, or a parameter's seq / table backing) gives
+#     `@pre(i) -> @pre(select(B, i))` for a `Ref`-keyed `B` (a field of an
+#     entry object is an entry object or nil) and `@pre(select(B, i))` for an
+#     Int-keyed one, nested selects composing their guards. `B`'s entry value
+#     is what the read sees wherever no store on the path intervenes, and the
+#     array theory relates the two terms (`select(store(B, f, v), i)` is
+#     `select(B, i)` for `i != f`), so a field a SUT stored a fresh node into
+#     reads that node, and stays equal to it.
+# A term none of these covers (a havocked heap `heap_<k>@ep<n>`, an opaque
+# call's result, a pointer of unknown origin) gets no fact: it may well hold
+# an allocation, so leaving it free is the sound side. Every fact is true of
+# every real execution (the entry state predates the walk), so asserting it in
+# every query prunes no real input. `@pre(nil)` may hold (an entry ref may be
+# nil); an allocation is never nil (`assertFreshness`).
+#
+# Only the `new` arm's address is an allocation here: `walkAddrCell` /
+# `walkElemCell` mint a `ptr` to a frame local or an element with the same
+# `freshRef`, and such an address may lie inside the entry state (`addr s[i]`
+# of a parameter's seq), so it is not claimed apart from it.
+
+var allocatedNames {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-82. The names of the addresses `new` minted (`noteAllocation`).
+  ## A name in both sets is in neither. Reset per run.
+var preDecls {.threadvar.}: tuple[ctx: pointer; decls: Table[string, RawZ3FuncDecl]]
+  ## RFC-0016 INT-82. `@pre_<typeId>`, per ref sort, of the run's context.
+var provKinds {.threadvar.}:
+    tuple[ready: bool, select, store, ite, uninterp: int]
+  ## RFC-0016 INT-82. The linked Z3's decl kinds `refProvenanceRoots` reads,
+  ## off probe terms (`heapChainKinds`' discipline). Process-stable.
+
+proc ensureProvKinds() =
+  if provKinds.ready: return
+  let pc = probeContext()
+  let b = mkBoolVar(pc, "__int82_kind_probe_b")
+  let x = mkIntVar(pc, "__int82_kind_probe_x")
+  let arr = mkArrayVar[Z3Int, Z3Int](pc, "__int82_kind_probe_arr")
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(pc.raw, Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, a))))
+  provKinds = (ready: true, select: kindOf(select(arr, x).raw),
+               store: kindOf(checkedStore(pc, arr.raw, x.raw, x.raw)),
+               ite: kindOf(ite(b, x, x + mkInt(pc, 1)).raw),
+               uninterp: kindOf(x.raw))
+
+proc notePreExistingTerms*(ctx: Z3Context; asts: openArray[RawZ3Ast]) =
+  ## RFC-0016 INT-82. Record every uninterpreted constant in `asts` (an
+  ## entry value's terms: a parameter's, a global's entry value) as part of
+  ## the walk's entry state.
+  ensureProvKinds()
+  var seen: HashSet[int]
+  var stack = @asts
+  while stack.len > 0:
+    let t = stack.pop()
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    let app = Z3_to_app(ctx.raw, t)
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    let d = Z3_get_app_decl(ctx.raw, app)
+    if n == 0:
+      if ord(Z3_get_decl_kind(ctx.raw, d)) == provKinds.uninterp:
+        preExistingNames.incl declName(ctx, d)
+      continue
+    for i in 0 ..< n: stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+
+proc noteAllocation*(ctx: Z3Context; newRef: Z3AnyAst) =
+  ## RFC-0016 INT-82. Record the address a `new` minted.
+  allocatedNames.incl declName(ctx, getAppDecl(newRef))
+
+proc refProvenanceRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0016 INT-82. The provenance facts of every `Ref` term `base`
+  ## reaches (the section comment above). Empty when the run allocated
+  ## nothing: no term then needs telling apart from the entry state.
+  if allocatedNames.len == 0: return
+  ensureProvKinds()
+  let kinds = provKinds
+  if preDecls.ctx != cast[pointer](ctx.raw):
+    preDecls = (ctx: cast[pointer](ctx.raw),
+                decls: initTable[string, RawZ3FuncDecl]())
+  var refSortOf: Table[int, string]          # sort id -> typeId
+  for typeId, s in currentRefSorts: refSortOf[sortId(ctx, s)] = typeId
+  proc refTypeOf(t: RawZ3Ast): string =
+    refSortOf.getOrDefault(sortId(ctx, sortOfRaw(ctx, t)), "")
+  proc pre(typeId: string; t: RawZ3Ast): Z3Bool =
+    if not preDecls.decls.hasKey(typeId):
+      preDecls.decls[typeId] = mkPinnedUnaryDecl(ctx, "@pre_" & typeId,
+        currentRefSorts[typeId], ctx.checkErr Z3_mk_bool_sort(ctx.raw))
+    var args = @[t]     # a HEAP seq (`rawApp1`'s Z3 4.15 hazard)
+    wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_app(ctx.raw, preDecls.decls[typeId], 1,
+      cast[ptr UncheckedArray[RawZ3Ast]](addr args[0])))
+  proc entryConst(name: string): bool =
+    name in preExistingNames and name notin allocatedNames
+  # An entry-state array reached by a term: the array term over entry
+  # constants only, and the indices (`Ref`-sorted) that must be entry
+  # addresses for its cells to be entry values.
+  type Root = tuple[arr: Z3AnyAst, guards: seq[Z3AnyAst]]
+  const maxRoots = 64   # a term past it keeps the first 64 (fewer facts: sound)
+  var memo: Table[int, seq[Root]]
+  proc roots(t: RawZ3Ast; level: int): seq[Root] =
+    if level > termWalkMaxDepth: return
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return
+    let id = astId(ctx, t)
+    if id in memo: return memo[id]
+    let app = Z3_to_app(ctx.raw, t)
+    let d = Z3_get_app_decl(ctx.raw, app)
+    let k = ord(Z3_get_decl_kind(ctx.raw, d))
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    template arg(i: int): RawZ3Ast = Z3_get_app_arg(ctx.raw, app, cuint(i))
+    if n == 0 and k == kinds.uninterp:
+      if entryConst(declName(ctx, d)):
+        result = @[(arr: wrap[Z3AnyAst](ctx, t), guards: newSeq[Z3AnyAst]())]
+    elif n == 3 and k == kinds.store:
+      result = roots(arg(0), level + 1)
+    elif n == 3 and k == kinds.ite:
+      result = roots(arg(1), level + 1)
+      for r in roots(arg(2), level + 1):
+        if result.len < maxRoots: result.add r
+    elif n == 2 and k == kinds.select and
+         getSortKind(ctx, sortOfRaw(ctx, t)) == skArray:
+      let idx = arg(1)
+      let idxRef = refTypeOf(idx).len > 0
+      for r in roots(arg(0), level + 1):
+        var g = r.guards
+        if idxRef: g.add wrap[Z3AnyAst](ctx, idx)
+        result.add (arr: wrap[Z3AnyAst](ctx, checkedSelect(ctx, r.arr.raw, idx)),
+                    guards: g)
+    memo[id] = result
+  var seen, emitted: HashSet[int]
+  var facts: seq[Z3Bool]
+  proc emit(f: Z3Bool) =
+    let id = astId(ctx, f.raw)
+    if id notin emitted:
+      emitted.incl id
+      facts.add f
+  var stack: seq[RawZ3Ast]
+  for r in base: stack.add r.raw
+  while stack.len > 0:
+    let t = stack.pop()
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    let app = Z3_to_app(ctx.raw, t)
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    let tid = refTypeOf(t)
+    if tid.len > 0:
+      let d = Z3_get_app_decl(ctx.raw, app)
+      let k = ord(Z3_get_decl_kind(ctx.raw, d))
+      if n == 0 and k == kinds.uninterp:
+        let name = declName(ctx, d)
+        if name in allocatedNames and name notin preExistingNames:
+          emit(not pre(tid, t))
+        elif entryConst(name):
+          emit(pre(tid, t))
+      elif n == 1 and k == kinds.uninterp:
+        # RFC-0016 INT-83: a cast between `pointer` and a typed sort names
+        # the object its operand does.
+        let name = declName(ctx, d)
+        if name.startsWith("@toAddr_") or name.startsWith("@fromAddr_"):
+          let a = Z3_get_app_arg(ctx.raw, app, 0)
+          let aTid = refTypeOf(a)
+          if aTid.len > 0:
+            let held = wrap[Z3AnyAst](ctx, t)
+            let ph = pre(tid, held.raw)
+            let pa = pre(aTid, a)
+            emit(implies(ph, pa) and implies(pa, ph))
+      elif n == 2 and k == kinds.select:
+        let idx = Z3_get_app_arg(ctx.raw, app, 1)
+        let idxRef = refTypeOf(idx)
+        for r in roots(Z3_get_app_arg(ctx.raw, app, 0), 0):
+          var g = mkBool(ctx, true)
+          for gi in r.guards: g = g and pre(refTypeOf(gi.raw), gi.raw)
+          if idxRef.len > 0: g = g and pre(idxRef, idx)
+          # wrapped (inc-ref'd) before `pre` may make the decl: an unheld
+          # result lives only until Z3's next call (`mkPinnedUnaryDecl`)
+          let cell = wrap[Z3AnyAst](ctx, checkedSelect(ctx, r.arr.raw, idx))
+          emit(implies(g, pre(tid, cell.raw)))
+    for i in 0 ..< n: stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+  facts
+
+
+# ---- RFC-0016 INT-83: Nim's untyped `pointer` -------------------------------
+#
+# A `pointer` is an address of its own sort, `Ref_pointer` (`pointerTypeId`;
+# a `pointer` is `tPtr(pointerPointeeTy())`, so a parameter, a field and an
+# element of one allocate as any `ptr` does, and nil is `nil_pointer`). The
+# per-sort heap model keys every cell on a typed `Ref_T`, so the address
+# space is related to each typed sort by a pair of unary functions per sort,
+# minted on first use:
+#   * `@toAddr_T: Ref_T -> Ref_pointer`, a typed address seen as a `pointer`
+#     (`cast[pointer](r)`, `pointer(q)`, a typed address passed where a
+#     `pointer` is expected), and
+#   * `@fromAddr_T: Ref_pointer -> Ref_T`, a `pointer` read as a `ptr T` /
+#     `ref T` (`cast[ptr T](p)`).
+# The reinterpretation keeps the bits both ways, so each application gets its
+# round trip as a ground fact (`@fromAddr_T(@toAddr_T(x)) = x` and
+# `@toAddr_T(@fromAddr_T(p)) = p`; both are native for every value), and nil
+# maps to nil. No quantifier: one fact per term the walk built. A cell read
+# through `cast[ptr T](p)` is a cell of `T`'s heap at `@fromAddr_T(p)`, which
+# is free where nothing relates it to another address, as a `ptr T`
+# parameter's cell is.
+#
+# Two non-nil addresses of different sorts: an object of `ref A` and one of
+# `ref B` (two hierarchies; one hierarchy is one sort) are two allocations,
+# so `cast[pointer](a) == cast[pointer](b)` is false unless both are nil.
+# That is a kind tag, `@addrKind: Ref_pointer -> Int`, fixed for the image of
+# a non-nil `ref` that is a whole object (not itself read out of a `pointer`,
+# `pointerWholeObject`): the walk's `ref` values are always whole objects. A
+# `ptr` is not tagged: `addr o.f` of a first field is `o`'s own address.
+#
+# What the model does not follow is a location read at two types (a `float`
+# cell read back as an `int`): the walk declines (`heUnsafeCast`) once
+# pointers of one run are cast to one sort and converted from or to another
+# (`pointerSortsUsed`, `pointerReadSorts`, checked by `lowerPtrCast`), so a
+# read through a `pointer` is always in the one heap every view of it uses.
+
+var pointerFacts* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0016 INT-83. The round-trip, nil and kind facts of every
+  ## `@toAddr_T`/`@fromAddr_T` application the run built: true of every
+  ## value, so asserted into every check (`globalRoots`).
+var pointerViews* {.threadvar.}:
+    seq[tuple[addrAst, typedAst: Z3AnyAst; pointee: IRType]]
+  ## RFC-0016 INT-83. Each application: the `Ref_pointer` address and the
+  ## typed address it is (the witness renders a `pointer` position as the
+  ## typed cell of a view whose address the model gives it).
+var pointerSortsUsed* {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-83. The sorts the run converted a pointer from or to.
+var pointerReadSorts* {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-83. The sorts the run read a `pointer` as.
+var pointerDecls {.threadvar.}: tuple[ctx: pointer; decls: Table[string, RawZ3FuncDecl]]
+  ## RFC-0016 INT-83. `@toAddr_<T>` / `@fromAddr_<T>` / `@addrKind` of the
+  ## run's context.
+
+proc pointerDecl(ctx: Z3Context; name: string; dom, rng: RawZ3Sort): RawZ3FuncDecl =
+  if pointerDecls.ctx != cast[pointer](ctx.raw):
+    pointerDecls = (ctx: cast[pointer](ctx.raw),
+                    decls: initTable[string, RawZ3FuncDecl]())
+  if not pointerDecls.decls.hasKey(name):
+    pointerDecls.decls[name] = mkPinnedUnaryDecl(ctx, name, dom, rng)
+  pointerDecls.decls[name]
+
+proc pointerApp(ctx: Z3Context; fd: RawZ3FuncDecl; arg: RawZ3Ast): Z3AnyAst =
+  var args = @[arg]   # a HEAP seq (`rawApp1`'s Z3 4.15 hazard)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_app(ctx.raw, fd, 1,
+    cast[ptr UncheckedArray[RawZ3Ast]](addr args[0])))
+
+proc pointerSortPair(ctx: Z3Context; pointee: IRType):
+    tuple[toF, fromF: RawZ3FuncDecl; tNil, pNil: Z3AnyAst] =
+  ## The two functions of `pointee`'s sort, and the two nils, with the nil
+  ## facts on first use.
+  let pSort = allocRefSort(ctx, pointerPointeeTy())
+  let tSort = allocRefSort(ctx, pointee)
+  let tid = refPointeeTypeId(pointee)
+  let fresh = pointerDecls.ctx != cast[pointer](ctx.raw) or
+              not pointerDecls.decls.hasKey("@toAddr_" & tid)
+  result.toF = pointerDecl(ctx, "@toAddr_" & tid, tSort, pSort)
+  result.fromF = pointerDecl(ctx, "@fromAddr_" & tid, pSort, tSort)
+  result.tNil = currentNilConsts[tid]
+  result.pNil = currentNilConsts[pointerTypeId]
+  if fresh:
+    let a = pointerApp(ctx, result.toF, result.tNil.raw)
+    pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, result.pNil.raw))
+    let b = pointerApp(ctx, result.fromF, result.pNil.raw)
+    pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, b.raw, result.tNil.raw))
+
+proc pointerWholeObject*(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0016 INT-83. No `@fromAddr_` application in `t` (bounded: past the
+  ## bound, false, which only drops a kind fact).
+  var stack = @[(t, 0)]
+  var seen: HashSet[int]
+  while stack.len > 0:
+    let (x, lvl) = stack.pop()
+    if lvl > termWalkMaxDepth: return false
+    if Z3_get_ast_kind(ctx.raw, x) != Z3_APP_AST: continue
+    let id = astId(ctx, x)
+    if id in seen: continue
+    seen.incl id
+    let app = Z3_to_app(ctx.raw, x)
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    if n == 1 and declName(ctx, Z3_get_app_decl(ctx.raw, app)).startsWith(
+        "@fromAddr_"):
+      return false
+    for i in 0 ..< n: stack.add (Z3_get_app_arg(ctx.raw, app, cuint(i)), lvl + 1)
+  true
+
+proc pointerAddrOf*(ctx: Z3Context; x: Z3AnyAst; pointee: IRType;
+                    wholeObject: bool): Z3AnyAst =
+  ## RFC-0016 INT-83. The typed address `x` (of `pointee`'s sort) as a
+  ## `pointer`. `wholeObject`: `x` is a `ref`'s whole object
+  ## (`pointerWholeObject`), whose address no other sort's object has.
+  let tid = refPointeeTypeId(pointee)
+  if tid == pointerTypeId: return x
+  let sp = pointerSortPair(ctx, pointee)
+  result = pointerApp(ctx, sp.toF, x.raw)
+  let back = pointerApp(ctx, sp.fromF, result.raw)
+  pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, back.raw, x.raw))
+  if wholeObject:
+    let kindF = pointerDecl(ctx, "@addrKind",
+      allocRefSort(ctx, pointerPointeeTy()),
+      ctx.checkErr Z3_mk_int_sort(ctx.raw))
+    let k = pointerApp(ctx, kindF, result.raw)
+    let code = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw,
+      int64(hash(tid)), sortOfRaw(ctx, k.raw)))
+    let isNil = wrap[Z3Bool](ctx, checkedEq(ctx, x.raw, sp.tNil.raw))
+    pointerFacts.add(isNil or wrap[Z3Bool](ctx, checkedEq(ctx, k.raw, code.raw)))
+  pointerViews.add (addrAst: result, typedAst: x, pointee: pointee)
+
+proc pointerAsTyped*(ctx: Z3Context; p: Z3AnyAst; pointee: IRType): Z3AnyAst =
+  ## RFC-0016 INT-83. The `pointer` `p` read as an address of `pointee`'s
+  ## sort.
+  let tid = refPointeeTypeId(pointee)
+  if tid == pointerTypeId: return p
+  let sp = pointerSortPair(ctx, pointee)
+  result = pointerApp(ctx, sp.fromF, p.raw)
+  let back = pointerApp(ctx, sp.toF, result.raw)
+  pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, back.raw, p.raw))
+  pointerViews.add (addrAst: p, typedAst: result, pointee: pointee)
+
+
 # ---- the per-run reset ------------------------------------------------------
 
 proc resetHeapModel*() =
   ## RFC-0016 review D3c-6. The per-run reset of the run-state threadvars of
   ## this module, called by `resetSymexRunState`. `storeDeclKind`,
-  ## `selectDeclKind`, `constArrayDeclKind`, `iteDeclKind` and `heapChainKinds`
-  ## are the linked Z3's decl kinds, the same in every run and read in a probe
+  ## `selectDeclKind`, `constArrayDeclKind`, `iteDeclKind`, `heapChainKinds`, `provKinds` and
+  ## `madeKinds` are the linked Z3's decl kinds, the same in every run and read in a probe
   ## context, so they are process-stable and not reset (`probeContext`).
   allocEnumZeroLegal = false
+  allocInputDomain = false               # RFC-0016 INT-84
+  enumHolesMade = false
   distinctBijectivityHints = @[]
   distinctSortNames = @[]
   containerCard = ContainerCardRegistry()
   globalEntryFacts = @[]
+  pointerFacts = @[]                     # RFC-0016 INT-83
+  pointerViews = @[]
+  pointerSortsUsed = initHashSet[string]()
+  pointerReadSorts = initHashSet[string]()
+  pointerDecls = (ctx: nil, decls: initTable[string, RawZ3FuncDecl]())
   currentBorrowReboxCounter = 0
   heapKeyShapes = initTable[string, HeapKeyShape]()
+  heapFieldOwners = initTable[string, tuple[code: int64; depth: int]]()   ## RFC-0016 INT-81
   intHeapIsInt = false
   intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()
   intCellFactSeen = initHashSet[uint]()
+  preExistingNames = initHashSet[string]()     ## RFC-0016 INT-82
+  allocatedNames = initHashSet[string]()
+  preDecls = (ctx: nil, decls: initTable[string, RawZ3FuncDecl]())
 
 # ---- the value merge (RFC-0016 review R2-4) ---------------------------------
 # `iteSV` and what it rests on moved down from `runtime.nim`: it needs the
@@ -3033,8 +3578,17 @@ proc allocateSym*(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       SymVal(kind: svRef, refAst: refAny, refPointee: pointee)
     else:
       SymVal(kind: svPtr, ptrAst: refAny, ptrFamily: true, ptrPointee: pointee)
-  of itFloat32: SymVal(kind: svFloat32, fp32: mkFloat32Var(baseName))
-  of itFloat64: SymVal(kind: svFloat64, fp64: mkFloat64Var(baseName))
+  of itFloat32, itFloat64:
+    let v =
+      if ty.kind == itFloat32:
+        SymVal(kind: svFloat32, fp32: mkFloat32Var(baseName))
+      else:
+        SymVal(kind: svFloat64, fp64: mkFloat64Var(baseName))
+    # RFC-0016 INT-77: a float range's interval, wherever the type lands (a
+    # parameter, a field, an element), as the `itInt` arm above.
+    for c in rangeCondsIfNeeded(v, ty):
+      pcOut.add c
+    v
   of itDistinct:   ## Phase 15 G4 (ADR-0008 D4): fresh uninterpreted sort.
     allocDistinctSym(ty, baseName, pcOut)
   of itVariant:
@@ -3396,11 +3950,26 @@ proc allocateSym*(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     # per value of `T`; every value of it is a legal set. Allocation cost
     # mirrored in allocCostOf (types.nim).
     let ctx = requireCurrentContext()
-    let srt = ctx.checkErr Z3_mk_bv_sort(ctx.raw,
-                                         cuint(bitSetDomain(ty.bsElemTy).size))
-    SymVal(kind: svBitSet,
-           bsRaw: wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt, baseName)),
-           bsElemTy: ty.bsElemTy)
+    let dom = bitSetDomain(ty.bsElemTy)
+    let srt = ctx.checkErr Z3_mk_bv_sort(ctx.raw, cuint(dom.size))
+    let bs = wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt, baseName))
+    # RFC-0016 INT-84: an input set of a holey enum holds declared values
+    # only: each run of hole bits is zero.
+    if allocInputDomain and ty.bsElemTy.kind == itInt and
+       ty.bsElemTy.enumOrds.len > 0:
+      var holeRuns: seq[(int64, int64)]   # bit indices, inclusive
+      var next = dom.lo   # the first value not yet seen declared
+      for o in ty.bsElemTy.enumOrds:
+        if o > next: holeRuns.add (next - dom.lo, o - 1 - dom.lo)
+        next = o + 1
+      for (ia, ib) in holeRuns:
+        if ia < 0 or ib >= int64(dom.size) or ia > ib: continue
+        let bits = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw,
+                                    cuint(ib), cuint(ia), bs.raw))
+        let zsrt = ctx.checkErr Z3_mk_bv_sort(ctx.raw, cuint(ib - ia + 1))
+        let zero = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw, 0, zsrt))
+        pcOut.add wrap[Z3Bool](ctx, checkedEq(ctx, bits.raw, zero.raw))
+    SymVal(kind: svBitSet, bsRaw: bs, bsElemTy: ty.bsElemTy)
   of itSet:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # RFC-0005 S8z: any fixed-width int element type (`isBackedSetElemTy`),
@@ -3963,6 +4532,14 @@ func containerZeroBacked(t: IRType): bool =
   of itSet:   isBackedSetElemTy(t.setElemTy)            # RFC-0005 S8z
   else: false
 
+func discHoldsZero(t: IRType): bool =
+  ## RFC-0016 INT-85. A discriminator's type holds 0: no `range` excluding
+  ## it (an enum's ordinal 0 is checked against its tags by the caller). A
+  ## `range` excluding 0 is `defaultZeroTotal` as a value, but its zero is
+  ## no discriminator value (as before INT-85).
+  t == nil or t.kind != itInt or not t.hasRange or t.enumName.len > 0 or
+    (t.rangeLo <= 0 and 0 <= t.rangeHi)
+
 func variantZeroTotal(t: IRType): bool =
   ## RFC-0005 S8n: true when the all-zero memory of variant `t` is a value
   ## of the type -- the discriminator's type holds 0 and 0 is a legal tag
@@ -3971,7 +4548,8 @@ func variantZeroTotal(t: IRType): bool =
   ## discriminator's own range is the domain) -- and every field has a zero
   ## value. An enum whose first ordinal is not 0 fails the first test.
   doAssert t.kind == itVariant
-  if not defaultZeroTotal(t.vDiscTy): return false
+  if not defaultZeroTotal(t.vDiscTy) or not discHoldsZero(t.vDiscTy):
+    return false
   let (_, _, ordSet) = discriminatorDomain(t)
   if ordSet.len > 0 and 0 notin ordSet: return false
   for ft in t.vPlainFieldTypes:
@@ -3991,7 +4569,8 @@ func multiVariantZeroTotal(t: IRType): bool =
   ## admitted).
   doAssert t.kind == itMultiVariant
   for ax in t.mvAxes:
-    if not defaultZeroTotal(ax.discTy): return false
+    if not defaultZeroTotal(ax.discTy) or not discHoldsZero(ax.discTy):
+      return false
     let (_, _, ordSet) = axisDiscriminatorDomain(ax)
     if ordSet.len > 0 and 0 notin ordSet: return false
     for arm in ax.arms:
@@ -4015,12 +4594,15 @@ func defaultZeroTotal*(t: IRType): bool =
     # result field, result and local all read `ord == 0`). It was not total,
     # so the untouched result became a free `retSym` constrained to the
     # enum's ordinals -- excluding the value Nim returns (a false `sxUnsat`
-    # for a label reading it). A `range` excluding 0 stays non-total: Nim
-    # rejects its implicit zero at compile time ("requires explicit
-    # initialization"), and a variant discriminator must start at 0.
-    t.width in {8, 16, 32, 64} and
-      (not t.hasRange or (t.rangeLo <= 0 and 0 <= t.rangeHi) or
-       t.enumName.len > 0)
+    # for a label reading it). RFC-0016 INT-85: a `range` excluding 0 is
+    # total too. Nim rejects its implicit zero only for an untouched
+    # `result` and an object constructor that leaves the field out
+    # ("requires explicit initialization"); `newSeq`, `setLen` growth,
+    # `new`, `default(T)`, a local and an array of one compile (warnings
+    # `UnsafeDefault`, `UnsafeSetLen`, `ProveInit`) and hold 0 (probed). The
+    # zero is the value the program made, which a read site leaves
+    # unbounded (`readRangeConds`).
+    t.width in {8, 16, 32, 64}
   of itTuple:
     for ft in t.fields:
       if not defaultZeroTotal(ft): return false

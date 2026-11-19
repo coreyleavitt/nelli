@@ -9,6 +9,7 @@
 ## The test must not hang (exit 137) and must produce correct verdicts.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex CR-9(c) — integer representation ergonomics canary":
 
@@ -17,7 +18,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
     proc f64Cmp(x: int64) =
       if x > 100:
         symexTarget("big")
-    let r = symexFind(f64Cmp, tLabel("big"))
+    let r = pinFind(f64Cmp, tLabel("big"))
     check r.status == sxSat
     check int64(r.witness[0]) > 100
 
@@ -25,7 +26,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
     proc f64Eq(x: int64) =
       if x == 42'i64:
         symexTarget("found")
-    let r = symexFind(f64Eq, tLabel("found"))
+    let r = pinFind(f64Eq, tLabel("found"))
     check r.status == sxSat
     check int64(r.witness[0]) == 42
 
@@ -33,7 +34,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
     proc f64Arith(x: int64) =
       if x + 1 == 100'i64:
         symexTarget("arith")
-    let r = symexFind(f64Arith, tLabel("arith"))
+    let r = pinFind(f64Arith, tLabel("arith"))
     check r.status == sxSat
     check int64(r.witness[0]) == 99
 
@@ -42,7 +43,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
     proc f32Cmp(x: int32) =
       if x > 200'i32:
         symexTarget("big32")
-    let r = symexFind(f32Cmp, tLabel("big32"))
+    let r = pinFind(f32Cmp, tLabel("big32"))
     check r.status == sxSat
     check int32(r.witness[0]) > 200
 
@@ -50,7 +51,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
     proc f32Arith(x: int32) =
       if x * 2 == 50'i32:
         symexTarget("mul32")
-    let r = symexFind(f32Arith, tLabel("mul32"))
+    let r = pinFind(f32Arith, tLabel("mul32"))
     check r.status == sxSat
     check int32(r.witness[0]) == 25
 
@@ -60,7 +61,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
     proc floatToIntOrd(f: float) =
       if int(f) > 5:
         symexTarget("gtLit")
-    let r = symexFind(floatToIntOrd, tLabel("gtLit"))
+    let r = pinFind(floatToIntOrd, tLabel("gtLit"))
     check r.status == sxSat
     check int(r.witness[0]) > 5
 
@@ -68,7 +69,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
     proc floatToIntEq(f: float) =
       if int(f) == 99:
         symexTarget("eqLit")
-    let r = symexFind(floatToIntEq, tLabel("eqLit"))
+    let r = pinFind(floatToIntEq, tLabel("eqLit"))
     check r.status == sxSat
     check int(r.witness[0]) == 99
 
@@ -77,7 +78,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
       let k = int(f) + 5
       if k == 20:
         symexTarget("arithLit")
-    let r = symexFind(floatToIntArith, tLabel("arithLit"))
+    let r = pinFind(floatToIntArith, tLabel("arithLit"))
     check r.status == sxSat
     check int(r.witness[0]) + 5 == 20
 
@@ -87,7 +88,7 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
     proc float32ToIntOrd(f: float) =
       if int32(f) > 5'i32:
         symexTarget("gt32Lit")
-    let r = symexFind(float32ToIntOrd, tLabel("gt32Lit"))
+    let r = pinFind(float32ToIntOrd, tLabel("gt32Lit"))
     check r.status == sxSat
     check int32(r.witness[0]) > 5
 
@@ -96,6 +97,6 @@ suite "symex CR-9(c) — integer representation ergonomics canary":
       let k = int32(f) + 5'i32
       if k == 20'i32:
         symexTarget("arith32Lit")
-    let r = symexFind(float32ToIntArith, tLabel("arith32Lit"))
+    let r = pinFind(float32ToIntArith, tLabel("arith32Lit"))
     check r.status == sxSat
     check int32(r.witness[0]) + 5 == 20

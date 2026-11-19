@@ -23,6 +23,7 @@
 ## (CR-8), which runs it under BOTH `c` and `cpp` backends via dt-bounded.sh.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # =============================================================================
 # SUT definitions — textually identical to the original E-cluster SUTs so the
@@ -98,7 +99,7 @@ suite "symex Phase 15 E-cluster — exception-witness runtime replay (CR-8 Part 
   # CONTRAST: condRaise(0) must NOT raise (x==0 does not trigger the condition).
   # ---------------------------------------------------------------------------
   test "E-roundtrip: condRaise ValueError witness reproduces raise at runtime":
-    let r = symexFind(condRaise, tRaisedExn("ValueError"))
+    let r = pinFind(condRaise, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     # Numeric constraint established by E2b — witness must be on the raise path.
@@ -117,7 +118,7 @@ suite "symex Phase 15 E-cluster — exception-witness runtime replay (CR-8 Part 
   # CONTRAST: finallyReplaces(0) raises ValueError (not IOError).
   # ---------------------------------------------------------------------------
   test "E-roundtrip: finallyReplaces IOError witness reproduces raise at runtime":
-    let r = symexFind(finallyReplaces, tRaisedExn("IOError"))
+    let r = pinFind(finallyReplaces, tRaisedExn("IOError"))
     check r.status == sxRaised
     check r.raisedTypeId == "IOError"
     check r.raisedWitness[0] > 100
@@ -135,7 +136,7 @@ suite "symex Phase 15 E-cluster — exception-witness runtime replay (CR-8 Part 
   # REPLAY: call finallyReplaces(raisedWitness[0]); it MUST raise ValueError.
   # ---------------------------------------------------------------------------
   test "E-roundtrip: finallyReplaces ValueError witness reproduces raise at runtime":
-    let r = symexFind(finallyReplaces, tRaisedExn("ValueError"))
+    let r = pinFind(finallyReplaces, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] <= 100
@@ -149,7 +150,7 @@ suite "symex Phase 15 E-cluster — exception-witness runtime replay (CR-8 Part 
   # CONTRAST: assertDefect(1) must NOT raise (x > 0 satisfies the assert).
   # ---------------------------------------------------------------------------
   test "E-roundtrip: assertDefect AssertionDefect witness reproduces raise at runtime":
-    let r = symexFind(assertDefect, tRaisedExn("AssertionDefect"))
+    let r = pinFind(assertDefect, tRaisedExn("AssertionDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
     check r.raisedWitness[0] <= 0

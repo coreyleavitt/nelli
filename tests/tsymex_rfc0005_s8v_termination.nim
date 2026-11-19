@@ -20,6 +20,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import z3
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -204,7 +205,7 @@ suite "S8v: the range-checked search declines without step 2":
     proc tight(): SymexSettings =
       result = defaultSymexSettings()
       result.budget.seqQueryRLimit = 200_000
-    let r = symexFind(callerRanged, tLabel("s8v_impossible"), tight())
+    let r = pinFind(callerRanged, tLabel("s8v_impossible"), tight())
     checkpoint show(r.errors)
     check r.status == sxUnknown
     var capped = false
@@ -234,7 +235,7 @@ proc scanPastLen(s: string) =
 suite "S8v: the facts' own refutation is UNSAT, not a cap decline":
 
   test "a scan index past s.len is sxUnsat":
-    let r = symexFind(scanPastLen, tLabel("s8v_past_len"))
+    let r = pinFind(scanPastLen, tLabel("s8v_past_len"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 

@@ -61,6 +61,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -99,7 +100,7 @@ proc sutN11OverloadCollision(a: seq[byte], b: seq[byte]) =
 suite "symex round-6 N11 -- cross-proc collector cycle guard, overload collision":
 
   test "N11-1: BOTH overloaded callees' offset traces compose -> sxSat (pre-fix RED: 2nd overload's cycle-guard entry collided with the 1st by bare name, its call trace never ran)":
-    let r = symexFind(sutN11OverloadCollision, tLabel("n11_overload_deep"))
+    let r = pinFind(sutN11OverloadCollision, tLabel("n11_overload_deep"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -135,7 +136,7 @@ proc sutN17LiteralSeededCallBoundary(data: seq[byte]) =
 suite "symex round-6 N17 -- literal-seeded local, one-level call trace":
 
   test "N17-1: a literal-seeded local threaded through a call boundary to the callee's offset-consuming formal -> sxSat (pre-fix RED: CR-17 Int-sortedness decline, sxUnknown)":
-    let r = symexFind(sutN17LiteralSeededCallBoundary, tLabel("n17_literal_call_boundary"))
+    let r = pinFind(sutN17LiteralSeededCallBoundary, tLabel("n17_literal_call_boundary"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -176,7 +177,7 @@ proc sutN25ShadowVetoFalsePositive(data: seq[byte], src: seq[byte]) =
 suite "symex round-6 N25 -- mutation-veto shadow-collision false positive":
 
   test "N25-1: the real (never-mutated) formal is not wrongly vetoed by a same-named shadow's mutation -> sxSat (pre-fix RED: bare strVal match wrongly vetoed string-backing, sxUnknown)":
-    let r = symexFind(sutN25ShadowVetoFalsePositive, tLabel("n25_shadow_veto_false_positive"))
+    let r = pinFind(sutN25ShadowVetoFalsePositive, tLabel("n25_shadow_veto_false_positive"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -206,7 +207,7 @@ suite "symex round-6 N25 -- regression: genuine (non-shadowed) mutation still ve
     ## proof is now the label reached with no kind-mismatch decline: a
     ## wrongly string-backed receiver reaches `iekSeqAdd`'s "expected
     ## svSeq" decline instead of the store.
-    let r = symexFind(sutN25GenuineMutationStillVetoed, tLabel("n25_genuine_veto_regression"))
+    let r = pinFind(sutN25GenuineMutationStillVetoed, tLabel("n25_genuine_veto_regression"))
     # RFC-0005 S8ar: `.add` stores at every backed element width
     # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
     # receiver staying ARRAY-modelled is now shown by the add succeeding: a

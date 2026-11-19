@@ -12,6 +12,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import audit_scan_utils
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -20,7 +21,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     for e in r.errors:

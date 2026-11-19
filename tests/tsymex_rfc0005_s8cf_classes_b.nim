@@ -11,6 +11,7 @@
 
 import std/[unittest, re, strutils, unicode]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
@@ -31,13 +32,13 @@ suite "S8cf: UTF classes":
   test "the walker reads [:punct:] as the running library does":
     let takes = "\xc2\xa2".matchLen(re"(*UTF)(*UCP)[[:punct:]]") == 2
     check takes == pcreOlderThan(8, 45)
-    check symexFind(punctCent, tLabel("cf_cls_cent")).status ==
+    check pinFind(punctCent, tLabel("cf_cls_cent")).status ==
       (if takes: sxSat else: sxUnsat)
-    check symexFind(punctCentNo, tLabel("cf_cls_cent_no")).status ==
+    check pinFind(punctCentNo, tLabel("cf_cls_cent_no")).status ==
       (if takes: sxUnsat else: sxSat)
 
   test "a special POSIX class beside another item declines on 8.37 only":
-    let st = symexFind(beside, tLabel("cf_cls_beside")).status
+    let st = pinFind(beside, tLabel("cf_cls_beside")).status
     if pcreOlderThan(8, 45):
       check st == sxUnknown
     else:

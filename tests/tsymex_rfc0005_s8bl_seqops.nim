@@ -9,6 +9,7 @@ import std/[unittest, strutils]
 import nelli
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -56,23 +57,23 @@ proc soCopy(x: int) =
 
 suite "S8bl (1): the rest of the var-parameter list":
   test "del, insert, delete on a seq":
-    for (d, lbl) in [(symexFind(soDel, tLabel("del_dead")), "del_dead"),
-                     (symexFind(soInsert, tLabel("ins_dead")), "ins_dead"),
-                     (symexFind(soDelete, tLabel("dlt_dead")), "dlt_dead")]:
+    for (d, lbl) in [(pinFind(soDel, tLabel("del_dead")), "del_dead"),
+                     (pinFind(soInsert, tLabel("ins_dead")), "ins_dead"),
+                     (pinFind(soDelete, tLabel("dlt_dead")), "dlt_dead")]:
       checkpoint lbl & " " & $d.status & " " & show(d.errors)
       check d.status == sxUnsat
 
   test "add on a string (a char, a string)":
-    let d = symexFind(soStrAdd, tLabel("sadd_dead"))
+    let d = pinFind(soStrAdd, tLabel("sadd_dead"))
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnsat
 
   test "inc / dec with a second argument":
-    let d = symexFind(soIncBy, tLabel("incby_dead"))
+    let d = pinFind(soIncBy, tLabel("incby_dead"))
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnsat
 
   test "an explicit `=copy`":
-    let d = symexFind(soCopy, tLabel("copy_dead"))
+    let d = pinFind(soCopy, tLabel("copy_dead"))
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnsat

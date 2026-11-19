@@ -66,7 +66,7 @@ suite "S8w (3): a B4 offset whose promotion is turned down, checks-off build":
 
   test "isExact, unchecked: the wrap is is no longer a witness":
     ## Rule (a): was a trusted sxSat at high(int). The overflow is undefined.
-    let r = symexFind(sutWrapB4, tLabel("s8w_wrap_b4"), exactUnchecked)
+    let r = pinFind(sutWrapB4, tLabel("s8w_wrap_b4"), exactUnchecked)
     checkpoint show(r.errors)
     ## The verdict may be the scan's own raise (trusted); it is not the label.
     check r.status != sxSat
@@ -74,7 +74,7 @@ suite "S8w (3): a B4 offset whose promotion is turned down, checks-off build":
 
   test "isOptimised, unchecked: the same":
     ## Rule (a): was a trusted sxSat at high(int).
-    let r = symexFind(sutWrapB4, tLabel("s8w_wrap_b4"), optUnchecked)
+    let r = pinFind(sutWrapB4, tLabel("s8w_wrap_b4"), optUnchecked)
     checkpoint show(r.errors)
     ## The verdict may be the scan's own raise (trusted); it is not the label.
     check r.status != sxSat
@@ -82,14 +82,14 @@ suite "S8w (3): a B4 offset whose promotion is turned down, checks-off build":
 
   test "isOptimised, unchecked: a multiplication's wrap is is no longer a witness":
     ## Rule (a): was a trusted sxSat with start * 4 < 0.
-    let r = symexFind(sutWrapMulB4, tLabel("s8w_wrapmul_b4"), optUnchecked)
+    let r = pinFind(sutWrapMulB4, tLabel("s8w_wrapmul_b4"), optUnchecked)
     checkpoint show(r.errors)
     ## The verdict may be the scan's own raise (trusted); it is not the label.
     check r.status != sxSat
     check r.errors.named(ubSignedOverflow)
 
   test "unchecked: the B4 hit is still reachable, and replays":
-    let r = symexFind(sutWrapB4, tLabel("s8w_wrap_b4_hit"), optUnchecked)
+    let r = pinFind(sutWrapB4, tLabel("s8w_wrap_b4_hit"), optUnchecked)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:

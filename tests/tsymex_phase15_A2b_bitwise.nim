@@ -20,6 +20,7 @@
 ## — this file is additive evidence, not a replacement for that net.
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 proc checkTwins[T](rInline, rHoisted: SymexResult[T]) =
   check rInline.status == rHoisted.status
@@ -117,31 +118,31 @@ suite "symex A2b — bAnd/bOr classify-first restructure demonstration (post-res
     check parseInt(symexWalkerVersion) >= 73
 
   test "cell 1 (nested pow2-mask index, inline mask): twin-identical, sxUnsat, post-restructure":
-    let rInline  = symexFind(bitPow2MaskIndex, tAssertionViolation())
-    let rHoisted = symexFind(bitPow2MaskIndexHoisted, tAssertionViolation())
+    let rInline  = pinFind(bitPow2MaskIndex, tAssertionViolation())
+    let rHoisted = pinFind(bitPow2MaskIndexHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 2 (nested pow2-mask index, call-result mask, depth 1): twin-identical, sxUnsat, post-restructure":
-    let rInline  = symexFind(bitPow2MaskIndexCallResult, tAssertionViolation())
-    let rHoisted = symexFind(bitPow2MaskIndexCallResultHoisted, tAssertionViolation())
+    let rInline  = pinFind(bitPow2MaskIndexCallResult, tAssertionViolation())
+    let rHoisted = pinFind(bitPow2MaskIndexCallResultHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "cell 3 (shl/or uint16 byte-merge): twin-identical, sxUnsat, post-restructure":
-    let rInline  = symexFind(bitShlOrByteMerge, tAssertionViolation())
-    let rHoisted = symexFind(bitShlOrByteMergeHoisted, tAssertionViolation())
+    let rInline  = pinFind(bitShlOrByteMerge, tAssertionViolation())
+    let rHoisted = pinFind(bitShlOrByteMergeHoisted, tAssertionViolation())
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
   test "D1c-decision pin: fork-free boolean and/or still takes the fast path (reachable, sxSat)":
-    let r = symexFind(boolFastPathForkFree, tLabel("fast-path-hit"))
+    let r = pinFind(boolFastPathForkFree, tLabel("fast-path-hit"))
     check r.status == sxSat
     check r.witness[0] == true
     check r.witness[1] == true
 
   test "D1c-decision pin: fork-bearing RHS under boolean and still takes the guarded path (reachable, sxSat, in-bounds witness)":
-    let r = symexFind(boolGuardedPathForkBearing, tLabel("guarded-path-hit"))
+    let r = pinFind(boolGuardedPathForkBearing, tLabel("guarded-path-hit"))
     check r.status == sxSat
     check r.witness[1] >= 0
     check r.witness[1] < r.witness[0].len

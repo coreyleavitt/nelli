@@ -12,6 +12,7 @@
 ## (no runtime errors from a stale Z3Int handle).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex Phase 2 — bit-twiddling declines promotion":
   test "plain int with no range info stays BV; audit log empty":
@@ -20,7 +21,7 @@ suite "symex Phase 2 — bit-twiddling declines promotion":
     proc plainArith(x: int) =
       if x == 42:
         symexTarget("hit")
-    let r = symexFind(plainArith, tLabel("hit"), optimisedSymexSettings())
+    let r = pinFind(plainArith, tLabel("hit"), optimisedSymexSettings())
     check r.status == sxSat
     check r.witness[0] == 42
     check r.abstractions.len == 0
@@ -29,7 +30,7 @@ suite "symex Phase 2 — bit-twiddling declines promotion":
     proc twiddle(x: range[0..100]) =
       if (x shr 1) == 25:
         symexTarget("hit")
-    let r = symexFind(twiddle, tLabel("hit"), optimisedSymexSettings())
+    let r = pinFind(twiddle, tLabel("hit"), optimisedSymexSettings())
     check r.status == sxSat
     # 2*25 = 50, 2*25+1 = 51; both in [0..100].
     check (r.witness[0] shr 1) == 25

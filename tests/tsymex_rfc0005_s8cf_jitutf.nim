@@ -150,8 +150,8 @@ else:
 
     test "the walker reads them":
       check "\xe2\x80\xa9b".find(re"(*UTF)\x{a9}b") == -1
-      check symexFind(litHit, tLabel("cf_ju_lit")).status == sxSat
-      check symexFind(litMid, tLabel("cf_ju_mid")).status == sxUnsat
+      check pinFind(litHit, tLabel("cf_ju_lit")).status == sxSat
+      check pinFind(litMid, tLabel("cf_ju_mid")).status == sxUnsat
       check "a b".find(re"(*UTF)(*ANY)\sb(*SKIP)") == 1
-      check symexFind(anyHit, tLabel("cf_ju_any")).status == sxSat
-      check symexFind(anyNo, tLabel("cf_ju_any_no")).status == sxUnsat
+      check pinFind(anyHit, tLabel("cf_ju_any")).status == sxSat
+      check pinFind(anyNo, tLabel("cf_ju_any_no")).status == sxUnsat

@@ -26,6 +26,7 @@
 ##      proc instantiations symex to the right witnesses simultaneously.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # --- 1. T=int, U=string: int arith on `a`, string eq on `b` (not conflated) ---
 proc foo[T, U](a: T, b: U): bool = a > 0 and b == "ok"
@@ -71,19 +72,19 @@ proc useBothOrders(p: int, q: string, r: string, s: int) =
 
 suite "symex Phase 15 G8 — multi-parameter generics":
   test "T=int, U=string resolve independently (int arith + string eq)":
-    let r = symexFind(useFoo, tLabel("hit"))
+    let r = pinFind(useFoo, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] > 0        ## a : int, > 0
     check r.witness[1] == "ok"    ## b : string, == "ok"
 
   test "T=bool, U=int works (no param-order dependency)":
-    let r = symexFind(useBar, tLabel("hit2"))
+    let r = pinFind(useBar, tLabel("hit2"))
     check r.status == sxSat
     check r.witness[0] == true    ## a : bool
     check r.witness[1] > 5        ## b : int, > 5
 
   test "reversed type tuples dispatch to distinct, correctly-typed bodies":
-    let r = symexFind(useBothOrders, tLabel("hit3"))
+    let r = pinFind(useBothOrders, tLabel("hit3"))
     check r.status == sxSat
     check r.witness[0] == 7       ## p : int   (pick[int,string] arg a)
     check r.witness[1] == "x"     ## q : string(pick[int,string] arg b)

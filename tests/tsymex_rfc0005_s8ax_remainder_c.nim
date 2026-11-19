@@ -14,6 +14,7 @@
 
 import std/[unittest, strutils, sequtils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/types
 import nelli/smt/canonicalize
 
@@ -29,7 +30,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -37,7 +38,7 @@ template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
 template verdictS(fn: typed, lbl: string, want: SymexStatusKind,
                   s: SymexSettings) =
   block:
-    let r = symexFind(fn, tLabel(lbl), s)
+    let r = pinFind(fn, tLabel(lbl), s)
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -45,7 +46,7 @@ template verdictS(fn: typed, lbl: string, want: SymexStatusKind,
 template clean(fn: typed, lbl: string, want: SymexStatusKind) =
   ## The verdict, with nothing recorded at all.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0

@@ -43,6 +43,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -56,7 +57,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -150,7 +151,7 @@ suite "S8an (1): a routine declared inside the code under test":
     verdict(sutNested, "n_dead", sxUnsat)
     verdict(sutNestedFunc, "nf", sxSat)
     verdict(sutNestedFunc, "nf_dead", sxUnsat)
-    let r = symexFind(sutNested, tLabel("n"))
+    let r = pinFind(sutNested, tLabel("n"))
     if r.status == sxSat: check r.witness[0] == 5
 
   test "a capture reads the enclosing variable as it stands at the call":
@@ -163,7 +164,7 @@ suite "S8an (1): a routine declared inside the code under test":
     verdict(sutCapLater, "cr_dead", sxUnsat)
     verdict(sutCapShadow, "cs", sxSat)
     verdict(sutCapShadow, "cs_dead", sxUnsat)
-    let r = symexFind(sutCapParam, tLabel("cp"))
+    let r = pinFind(sutCapParam, tLabel("cp"))
     if r.status == sxSat:
       let (x, k) = r.witness
       check x == 7 and k == 3
@@ -177,7 +178,7 @@ suite "S8an (1): a routine declared inside the code under test":
     verdict(sutCapChain, "cc_dead", sxUnsat)
     verdict(sutCapRaise, "cx", sxSat)
     verdict(sutCapRaise, "cx_dead", sxUnsat)
-    let r = symexFind(sutCapMut, tLabel("cm"))
+    let r = pinFind(sutCapMut, tLabel("cm"))
     if r.status == sxSat: check r.witness[0] == 5
 
 # ---- (2) the address of a local passed as a `ptr T` --------------------------

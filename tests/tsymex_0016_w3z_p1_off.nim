@@ -35,14 +35,14 @@ suite "W3-z P1: opaque scan, checks-off build":
     check parseInt(symexWalkerVersion) >= 312
 
   test "an opaque Nim body that may overflow: the sat is untrusted":
-    let r = symexFind(sutOpaqueTail, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(sutOpaqueTail, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check not r.trusted
     check UbKind(ubSignedOverflow) in r.soundness.undefinedKinds
 
   test "the same callee pushed overflowChecks:on is checked: no ubSignedOverflow":
-    let r = symexFind(sutOpaquePushedOn, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(sutOpaquePushedOn, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors) & " " & $r.soundness
     check r.status == sxSat
     check UbKind(ubSignedOverflow) notin r.soundness.undefinedKinds

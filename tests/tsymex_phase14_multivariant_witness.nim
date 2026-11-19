@@ -18,6 +18,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/choice
 import nelli/int128
+import ./s8cu_helpers
 
 type
   KindA = enum kaX, kaY
@@ -42,7 +43,7 @@ proc gatedTwoAxis(obj: TwoAxis) =
 
 suite "symex Phase 14 cycle A1d — multi-axis witness emitter":
   test "witness reflects per-axis tags + arm fields chosen by Z3":
-    let r = symexFind(gatedTwoAxis, tLabel("pinned-witness"))
+    let r = pinFind(gatedTwoAxis, tLabel("pinned-witness"))
     check r.status == sxSat
     let w = r.witness[0]
     check w.axis1 == kaX
@@ -59,7 +60,7 @@ suite "symex Phase 14 cycle A1d — multi-axis witness emitter":
     # active-arm fields(w) order is: axis1, a1, axis2, b2 — 4
     # choices total, with the disc choices at positions 0 and 2
     # holding their enum ordinals.
-    let r = symexFind(gatedTwoAxis, tLabel("pinned-witness"))
+    let r = pinFind(gatedTwoAxis, tLabel("pinned-witness"))
     check r.status == sxSat
     let choices = renderAsChoices(r.witness[0])
     check choices.len == 4

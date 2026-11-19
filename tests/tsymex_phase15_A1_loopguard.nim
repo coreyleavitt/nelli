@@ -55,6 +55,7 @@
 from ./s8cu_helpers import named
 import std/[unittest]
 import nelli/symex
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # (a)/(b) — compound fault-free guard operand (`i < n + 1`), with vs without
@@ -154,7 +155,7 @@ proc loopGuardQ1CompoundBound(s: string) =
 suite "symex A1 — loop-guard operand-shape characterization corpus":
 
   test "(a) compound fault-free guard, no continue: acc==3 reachable, sxSat":
-    let r = symexFind(loopGuardCompoundNoContinue, tLabel("hit"))
+    let r = pinFind(loopGuardCompoundNoContinue, tLabel("hit"))
     check r.status == sxSat
 
   test "(b) DEMONSTRATIVE: SAME guard + continue in body — BLOCKER: does NOT match (a) today":
@@ -173,8 +174,8 @@ suite "symex A1 — loop-guard operand-shape characterization corpus":
     ## RFC text this is explicitly a blocker-class discovery, not a silent
     ## accept: a future slice that makes this prove is a fix, not a
     ## regression, and this test's expectation should flip forward with it.
-    let rNoContinue   = symexFind(loopGuardCompoundNoContinue, tLabel("hit"))
-    let rWithContinue = symexFind(loopGuardCompoundWithContinue, tLabel("hit"))
+    let rNoContinue   = pinFind(loopGuardCompoundNoContinue, tLabel("hit"))
+    let rWithContinue = pinFind(loopGuardCompoundWithContinue, tLabel("hit"))
     check rNoContinue.status == sxSat
     check rWithContinue.status == sxUnknown
     check rWithContinue.errors.named(beBudgetExhaustedAssumedBound)
@@ -182,12 +183,12 @@ suite "symex A1 — loop-guard operand-shape characterization corpus":
       check rWithContinue.errors.len > 0
 
   test "(c) and-split guard fault, no continue: baseline recorded":
-    let r = symexFind(loopGuardAndSplitFaultNoContinue, tLabel("hit"))
+    let r = pinFind(loopGuardAndSplitFaultNoContinue, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len >= 3
 
   test "(d) and-split guard fault, WITH continue: baseline recorded":
-    let r = symexFind(loopGuardAndSplitFaultWithContinue, tLabel("hit"))
+    let r = pinFind(loopGuardAndSplitFaultWithContinue, tLabel("hit"))
     # Baseline pin: whatever HEAD does today, no crash and no un-classified
     # degrade.
     check r.status in {sxSat, sxUnsat, sxRaised, sxUnknown}
@@ -195,9 +196,9 @@ suite "symex A1 — loop-guard operand-shape characterization corpus":
       check r.errors.len > 0
 
   test "(e) Q1 recognizer, canonical bound: i > s.len is UNSAT (closed-form clamp fires)":
-    let r = symexFind(loopGuardQ1CanonicalBound, tLabel("impossible"))
+    let r = pinFind(loopGuardQ1CanonicalBound, tLabel("impossible"))
     check r.status == sxUnsat
 
   test "(f) Q1 recognizer, compound bound (s.len - 1): baseline recorded — NOT recognized (sxSat)":
-    let r = symexFind(loopGuardQ1CompoundBound, tLabel("impossible"))
+    let r = pinFind(loopGuardQ1CompoundBound, tLabel("impossible"))
     check r.status == sxSat

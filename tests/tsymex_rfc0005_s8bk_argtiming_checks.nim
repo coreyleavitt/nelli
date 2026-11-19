@@ -9,6 +9,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import s8ct_platform   ## RFC-0005 S8ct
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8bk_argtiming")
@@ -52,7 +53,7 @@ suite "S8bk: address checks, forwarded formals, proc values":
     pinDecline(sutSeqShrunk, declKey, feEvalOrderUnmodelled, tLabel("ss"), "never checked")
     pinDecline(sutRefElemMoved, declKey, feEvalOrderUnmodelled, tLabel("rm"), "never checked")
     block:
-      let r = symexFind(sutHeapIdx, tLabel("hx"))
+      let r = pinFind(sutHeapIdx, tLabel("hx"))
       checkpoint $r.status & " " & show(r.errors)
       check r.status == sxUnknown
       check r.errors.hasKind(feEvalOrderUnmodelled)

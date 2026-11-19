@@ -26,6 +26,7 @@ import std/strutils
 import std/strformat
 import std/options   ## RFC-0005 S8bv: `classifyEnumSubrange`
 import std/sequtils
+import std/algorithm   ## RFC-0016 INT-84: `sort` of a holey enum's ordinals
 import std/tables     ## RFC-0005 S8e: the witness type-symbol registry
 import std/compilesettings   ## RFC-0005 S8c: `libPath` for `isStdlibDecl`
 import std/macrocache   ## RFC-0016 W3-z R10 follow-up: `stdlibFileMemo`
@@ -186,7 +187,7 @@ proc typeSpelling*(t: NimNode): string =
 
 proc isStdlibRuneSym*(sym: NimNode): bool =
   ## RFC-0005 S8d. True iff `sym` is `std/unicode.Rune` itself. The A7
-  ## intercept (a Rune is an int pinned to [0, 0x10FFFF]) matched the name
+  ## intercept (a Rune is an int over int32, RFC-0016 INT-72) matched the name
   ## pair `Rune`/`RuneImpl`, so a user `type RuneImpl = int32; Rune =
   ## distinct RuneImpl` -- any int32, negatives included -- was pinned too.
   ## Shared by `classifyType` and the parser's `isRuneTyped`, so the two
@@ -382,6 +383,26 @@ proc witnessTypeSym*(ty: IRType): NimNode =
   if ty.typeKey.len == 0: nil
   else: witnessTypeSyms.getOrDefault(ty.typeKey)
 
+var hierPointees {.compileTime.}: Table[string, seq[IRType]]
+  ## RFC-0016 INT-81. Every object type of an inheritance hierarchy whose
+  ## run-type tag a walk tests (`of`, a down-conversion, a method dispatch),
+  ## by the hierarchy's root id: the dynamic types a witness cell may need
+  ## to be built as (`emitWitnessTuple` registers them with the
+  ## `RefWitness`). Never cleared: an entry is a fact about a type.
+
+proc registerHierPointee*(t: IRType) =
+  ## RFC-0016 INT-81. Record the hierarchy object type `t` (a no-op for a
+  ## type outside a hierarchy, or one already recorded).
+  let c = hierChain(t)
+  if c.len == 0: return
+  for x in hierPointees.getOrDefault(c[0]):
+    if hierChain(x) == c: return
+  hierPointees.mgetOrPut(c[0], @[]).add t
+
+proc hierFamily*(root: string): seq[IRType] =
+  ## RFC-0016 INT-81. The types `registerHierPointee` recorded under `root`.
+  hierPointees.getOrDefault(root)
+
 type
   ClassifiedType* = object
     ty*:    IRType
@@ -410,6 +431,37 @@ proc parseRangeBracket(rangeNode: NimNode): tuple[lo, hi: int64] =
     error("symex (Phase 2): expected `..` in range bound", body)
   result.lo = body[1].intVal
   result.hi = body[2].intVal
+
+proc floatBound(n: NimNode): Option[tuple[v: float64, f32: bool]] =
+  ## RFC-0016 INT-77. A float range bound as semcheck leaves it: a float
+  ## literal (its node kind names the width), a negated one, or one under a
+  ## conversion node. none for anything else (an int or char bound).
+  case n.kind
+  of nnkFloatLit, nnkFloat64Lit: some((n.floatVal.float64, false))
+  of nnkFloat32Lit: some((n.floatVal.float64, true))
+  of nnkPrefix:
+    if n.len == 2 and n[0].kind in {nnkIdent, nnkSym} and n[0].strVal == "-":
+      let b = floatBound(n[1])
+      if b.isSome: return some((-b.get.v, b.get.f32))
+    none(tuple[v: float64, f32: bool])
+  of nnkHiddenStdConv, nnkConv, nnkPar, nnkStmtListExpr:
+    if n.len > 0: floatBound(n[^1]) else: none(tuple[v: float64, f32: bool])
+  else: none(tuple[v: float64, f32: bool])
+
+proc classifyFloatRange(rangeNode: NimNode): Option[ClassifiedType] =
+  ## RFC-0016 INT-77. `range[lo .. hi]` over a float: the base float type
+  ## refined with the closed interval (`withFloatRange`). `parseRangeBracket`
+  ## read every bound as an integer, so a float range did not compile. The
+  ## width is the bounds' (`range[-1.5'f32 .. 2.5'f32]` is a float32 range);
+  ## the int `range` tuple stays unset, which feeds integer machinery only.
+  if rangeNode.len != 2 or rangeNode[1].kind != nnkInfix or
+     rangeNode[1].len != 3:
+    return none(ClassifiedType)
+  let lo = floatBound(rangeNode[1][1])
+  let hi = floatBound(rangeNode[1][2])
+  if lo.isNone or hi.isNone: return none(ClassifiedType)
+  let base = if lo.get.f32 and hi.get.f32: tFloat32() else: tFloat64()
+  some(unranged(base.withFloatRange(lo.get.v, hi.get.v)))
 
 proc rangeBaseType(bound: NimNode): IRType =
   ## Issue #162. A `range[lo .. hi]` is a SUBTYPE — of `int32` in
@@ -1493,6 +1545,8 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   if resolved.kind == nnkBracketExpr and
      resolved.len == 2 and
      isBuiltinTypeHead(resolved[0], ["range"]):   ## RFC-0005 S8d
+    let fr = classifyFloatRange(resolved)   ## RFC-0016 INT-77
+    if fr.isSome: return fr.get
     let sub = classifyEnumSubrange(resolved)   ## RFC-0005 S8bv
     if sub.isSome: return sub.get
     let (lo, hi) = parseRangeBracket(resolved)
@@ -1585,15 +1639,18 @@ proc classifyType*(ty: NimNode): ClassifiedType =
         return unranged(tBitSet(ety))
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkDistinctTy and impl[2].len == 1:
-      # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt pinned [0, 0x10FFFF].
+      # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt over int32.
       # Rune = distinct RuneImpl = distinct int32. RFC-0005 S8d: intercepted
-      # by SYMBOL (`isStdlibRuneSym`); the old `Rune`/`RuneImpl` name pair
-      # also matched a user's own pair, pinning any-int32 values into
-      # [0, 0x10FFFF] (a false `sxUnsat` for a negative). A user `Rune` falls
-      # through to the ordinary distinct arm below.
+      # by SYMBOL (`isStdlibRuneSym`); a user `Rune` falls through to the
+      # ordinary distinct arm below.
+      # RFC-0016 INT-72: the range is int32, Rune's native domain. It was
+      # [0, 0x10FFFF], and no Rune constructor checks a code point: a caller
+      # passes any int32, so a free Rune pinned to code points made
+      # `r.ord > 0x10FFFF` (and `r.ord < 0`) a false `sxUnsat`.
       # Path B is ADDITIVE: the byte-faithful string model (ADR-0006 S-cluster) is untouched.
       if isStdlibRuneSym(resolved):
-        return ranged(tInt(64, signed = true), 0'i64, 0x10FFFF'i64)
+        return ranged(tInt(64, signed = true), int64(low(int32)),
+                      int64(high(int32)))
       let baseCls = classifyType(impl[2][0])
       return unranged(tDistinct(s, baseCls.ty).keyedBySym(resolved))
     # Phase 14 cycle A3. Named-alias for `range[lo..hi]` with int
@@ -1636,6 +1693,8 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       let ti = resolved.getTypeImpl
       if ti.kind == nnkBracketExpr and ti.len == 2 and
          isBuiltinTypeHead(ti[0], ["range"]):
+        let fr = classifyFloatRange(ti)   ## RFC-0016 INT-77
+        if fr.isSome: return fr.get
         let sub = classifyEnumSubrange(ti)
         if sub.isSome: return sub.get
     if impl.kind == nnkTypeDef and impl.len >= 3 and
@@ -1742,6 +1801,13 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # could not even reach `symexFind`: the generated witness constructor
       # failed to COMPILE).
       cls.ty = cls.ty.withEnumName(s).keyedBySym(resolved)
+      # RFC-0016 INT-84: a holey enum's declared ordinals. The range above
+      # spans its holes, which no caller can pass (`IRType.enumOrds`).
+      if int64(fields.len) <= maxOrd - minOrd:
+        var ords: seq[int64]
+        for (_, o) in fields: ords.add o
+        ords.sort()
+        cls.ty = cls.ty.withEnumOrds(ords)
       return cls
     # #136 FLIPPED (Cluster H Step C, ADR-0022): a NAMED `ref T`/`ptr T` alias
     # whose pointee is a plain (non-variant) object now classifies as
@@ -1936,6 +2002,10 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # behaviour, reconciliation §A:128). The walker STUBS these via
   # `allocateSym(itRef/itPtr)` → `heUnresolvedRef` (sxUnknown) until R1+ land the
   # logical-heap semantics.
+  # RFC-0016 INT-83: Nim's untyped `pointer` is an address of its own sort
+  # (`pointerPointeeTy`), related to every typed one by the casts.
+  if isBuiltinTypeHead(resolved, ["pointer"]):
+    return unranged(tPtr(pointerPointeeTy()))
   if resolved.kind == nnkRefTy and resolved.len == 1:
     return unranged(tRef(classifyType(resolved[0]).ty))
   if resolved.kind == nnkPtrTy and resolved.len == 1:

@@ -13,6 +13,7 @@
 ## `s == "lit"`) still solves normally (sxSat).
 import std/[unittest, strutils, unicode]
 import nelli/symex
+import ./s8cu_helpers
 
 # --- toLower → classified unsupported (sxUnknown, not crash, not silent UNSAT) ---
 proc toLowerEq(s: string) =
@@ -41,7 +42,7 @@ proc plainEq(s: string) =
 
 suite "symex Phase 15 S9 — toLower/toUpper classified seUnsupportedStringOp":
   test "toLower: classified seUnsupportedStringOp → sxUnknown (no crash/UNSAT)":
-    let r = symexFind(toLowerEq, tLabel("low"))
+    let r = pinFind(toLowerEq, tLabel("low"))
     check r.status == sxUnknown
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedStringOp
@@ -49,12 +50,12 @@ suite "symex Phase 15 S9 — toLower/toUpper classified seUnsupportedStringOp":
   test "toLowerAscii: now modeled (A9) → sxSat with correct witness":
     ## Phase 16 A9 (ADR-0015): toLowerAscii now lowers via seqMapBody BV18-ITE.
     ## The witness must satisfy `s.toLowerAscii == "abc"`.
-    let r = symexFind(toLowerAsciiEq, tLabel("lowA"))
+    let r = pinFind(toLowerAsciiEq, tLabel("lowA"))
     check r.status == sxSat
     check r.witness[0].toLowerAscii == "abc"
 
   test "toUpper: classified seUnsupportedStringOp → sxUnknown":
-    let r = symexFind(toUpperEq, tLabel("up"))
+    let r = pinFind(toUpperEq, tLabel("up"))
     check r.status == sxUnknown
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedStringOp
@@ -62,11 +63,11 @@ suite "symex Phase 15 S9 — toLower/toUpper classified seUnsupportedStringOp":
   test "toUpperAscii: now modeled (A9) → sxSat with correct witness":
     ## Phase 16 A9 (ADR-0015): toUpperAscii now lowers via seqMapBody BV18-ITE.
     ## The witness must satisfy `s.toUpperAscii == "ABC"`.
-    let r = symexFind(toUpperAsciiEq, tLabel("upA"))
+    let r = pinFind(toUpperAsciiEq, tLabel("upA"))
     check r.status == sxSat
     check r.witness[0].toUpperAscii == "ABC"
 
   test "surrounding string path unaffected: plain s == \"abc\" is SAT":
-    let r = symexFind(plainEq, tLabel("plain"))
+    let r = pinFind(plainEq, tLabel("plain"))
     check r.status == sxSat
     check r.witness[0] == "abc"

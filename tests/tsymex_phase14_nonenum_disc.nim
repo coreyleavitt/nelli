@@ -13,6 +13,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 type
   # Nim requires `low(T) == 0` for discriminator types; plain `int`
@@ -34,7 +35,7 @@ proc gatedIntDisc(v: IntDisc) =
 
 suite "symex Phase 14 cycle A3 — non-enum discriminator types":
   test "variant with `case kind: int` parses + walker finds witness":
-    let r = symexFind(gatedIntDisc, tLabel("int-arm"))
+    let r = pinFind(gatedIntDisc, tLabel("int-arm"))
     check r.status == sxSat
     check r.witness[0].kind == 1
     check r.witness[0].a == 7

@@ -25,6 +25,7 @@
 from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # RFC-0010 B3 — regression pins for the deprecated merge.
@@ -100,9 +101,9 @@ proc b4ClosureInline(x: int) =
 suite "RFC-0010 B4 — explicit zero means unlimited (the fixed field)":
 
   test "maxClosureInlineCount: 0 must not block the first closure application":
-    let viaDefault = symexFind(b4ClosureInline, tLabel("closure_inline_hit"))
+    let viaDefault = pinFind(b4ClosureInline, tLabel("closure_inline_hit"))
     check viaDefault.status == sxSat
-    let viaZero = symexFind(b4ClosureInline, tLabel("closure_inline_hit"),
+    let viaZero = pinFind(b4ClosureInline, tLabel("closure_inline_hit"),
         SymexSettings(budget: ResourceBudget(maxClosureInlineCount: 0)))
     check viaZero.status == sxSat
 
@@ -136,11 +137,11 @@ proc boundedRecursionSut(n: int) =
 suite "RFC-0010 B4 round 2 — maxCallDepth is a documented exception, not unlimited":
 
   test "the default budget reaches a definite verdict for a shallow call":
-    let r = symexFind(b4CallDepth, tLabel("call_depth_hit"))
+    let r = pinFind(b4CallDepth, tLabel("call_depth_hit"))
     check r.status == sxSat
 
   test "an explicit 0 is NOT unlimited -- it exhausts immediately, by design":
-    let r = symexFind(b4CallDepth, tLabel("call_depth_hit"),
+    let r = pinFind(b4CallDepth, tLabel("call_depth_hit"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 0)))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)
@@ -151,9 +152,9 @@ suite "RFC-0010 B4 round 2 — maxCallDepth is a documented exception, not unlim
     # descend that far and find the real witness. RFC-0005 S8ax: `n < 10`
     # bounds the recursion, so the adaptive depth follows it past the
     # default cap and the default now finds the witness too (`n == 7`).
-    let viaDefault = symexFind(boundedRecursionSut, tLabel("bounded_recursion_hit"))
+    let viaDefault = pinFind(boundedRecursionSut, tLabel("bounded_recursion_hit"))
     check viaDefault.status == sxSat
-    let viaLargeBound = symexFind(boundedRecursionSut,
+    let viaLargeBound = pinFind(boundedRecursionSut,
         tLabel("bounded_recursion_hit"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 20)))
     check viaLargeBound.status == sxSat
@@ -206,11 +207,11 @@ proc boundedLoopZero(n: int) =
 suite "RFC-0010 B4 — maxLoopUnwind, a documented exception (see also maxCallDepth above)":
 
   test "the default budget reaches a definite verdict":
-    let r = symexFind(boundedLoopZero, tLabel("loop_zero_hit"))
+    let r = pinFind(boundedLoopZero, tLabel("loop_zero_hit"))
     check r.status == sxSat
 
   test "an explicit 0 is NOT unlimited -- it exhausts immediately, by design":
-    let r = symexFind(boundedLoopZero, tLabel("loop_zero_hit"),
+    let r = pinFind(boundedLoopZero, tLabel("loop_zero_hit"),
         SymexSettings(budget: ResourceBudget(maxLoopUnwind: 0)))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedAssumedBound)
@@ -244,12 +245,12 @@ proc runawayRecursionSut(n: int) =
 suite "RFC-0010 B4 — the default budget actually bounds a runaway search":
 
   test "an unbounded while loop declines under the default maxLoopUnwind":
-    let r = symexFind(runawayLoop, tLabel("runaway_loop_never"))
+    let r = pinFind(runawayLoop, tLabel("runaway_loop_never"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
   test "unbounded recursion declines under the default maxCallDepth":
-    let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"))
+    let r = pinFind(runawayRecursionSut, tLabel("runaway_recursion_never"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)
 

@@ -124,14 +124,44 @@ proc symexAssert*(cond: bool) {.inline.} =
   ## `tAssertionViolation` searches.
   doAssert cond, "symexAssert violated"
 
+type
+  SymexAssumeRejected* = object of Defect
+    ## Raised by a false `symexAssume` while the assume gate is armed. A
+    ## `Defect`, so the `except CatchableError` clauses a SUT writes do not
+    ## see it; and the gate's `rejected` flag is sticky, so a SUT that does
+    ## catch it (`except Exception`, a bare `except`) still has its run
+    ## judged rejected.
+
+  SymexAssumeGate* = object
+    armed*: bool     ## a pin's native replay is running the SUT
+    rejected*: bool  ## a false `symexAssume` was reached since the gate armed
+
+var symexAssumeGate* {.threadvar.}: SymexAssumeGate
+
+proc symexAssumeGateOpen*(): SymexAssumeGate =
+  ## Arms the gate for one native run, returning the enclosing state for
+  ## `symexAssumeGateClose`. Only a pin's native replay calls this.
+  result = symexAssumeGate
+  symexAssumeGate = SymexAssumeGate(armed: true)
+
+proc symexAssumeGateClose*(saved: SymexAssumeGate): bool =
+  ## Disarms the gate, restores the enclosing state, and says whether the run
+  ## that just ended reached a false `symexAssume`.
+  result = symexAssumeGate.rejected
+  symexAssumeGate = saved
+
 proc symexAssume*(cond: bool) {.inline.} =
-  ## Marker: a precondition restricting the input domain. Phase 1
-  ## ships with no-op outside symex (the richer "early-return on
-  ## violation" semantics is deferred until needed — `symexAssume`'s
-  ## body markers in Phase 1 are recognized by the parser but don't
-  ## yet affect the SUT's normal-run behavior). Inside symex, the
-  ## walker conjoins `cond` into the path condition.
-  discard cond
+  ## Marker: a precondition restricting the input domain. Inside symex, the
+  ## walker conjoins `cond` into the path condition. Outside symex it is a
+  ## no-op, with one opt-in exception: while a pin's native replay has armed
+  ## the assume gate (`symexAssumeGateOpen`), a false `cond` marks the run
+  ## rejected and aborts it, so the replay never credits a run the walker
+  ## excluded. Ordinary callers never arm the gate and see no change.
+  if not cond:
+    {.cast(noSideEffect), cast(gcsafe).}:
+      if symexAssumeGate.armed:
+        symexAssumeGate.rejected = true
+        raise newException(SymexAssumeRejected, "symexAssume violated")
 
 # RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
 # default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
@@ -140,6 +170,6 @@ proc symexAssume*(cond: bool) {.inline.} =
 import ../thread_state
 
 proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
-  releaseToDefault(symexCapture)
+  releaseToDefault(symexCapture, symexAssumeGate)
 
 registerThreadStateRelease(releaseThreadState)

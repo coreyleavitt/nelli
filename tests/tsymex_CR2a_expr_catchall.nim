@@ -58,6 +58,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs
@@ -118,11 +119,11 @@ suite "symex RFC-chapulin-hardening CR-2a/M5 — if-expr sub-expr now real (migr
   test "CR-2a-1: if-expr nested as sub-expr is now a REAL sxUnsat (M5 models it)":
     ## Pre-M5 this was a dummy-tainted `sxUnknown`; post-M5 (walker v51) the
     ## if-expression is genuinely modeled and `y` (2 or 3) can never equal 1.
-    let r = symexFind(sutIfExprSubExpr, tLabel("if_expr_subexpr"))
+    let r = pinFind(sutIfExprSubExpr, tLabel("if_expr_subexpr"))
     check r.status == sxUnsat
 
   test "CR-2a-2: if-expr as direct let-rhs is now a REAL sxSat with x>0 witness (M5)":
-    let r = symexFind(sutIfExprDirectLet, tLabel("direct_let_if"))
+    let r = pinFind(sutIfExprDirectLet, tLabel("direct_let_if"))
     check r.status == sxSat
     check r.witness[0] > 0
 
@@ -130,7 +131,7 @@ suite "symex RFC-chapulin-hardening CR-2a — catch-all MECHANISM still degrades
 
   test "CR-2a-3: cast[int32](x) nested as sub-expr still compiles and degrades to sxUnknown + feUnsupportedExprKind":
     ## Strong form: assert the classified KIND, not just the verdict.
-    let r = symexFind(sutCastSubExpr, tLabel("dummy_would_sat"))
+    let r = pinFind(sutCastSubExpr, tLabel("dummy_would_sat"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -142,18 +143,18 @@ suite "symex RFC-chapulin-hardening CR-2a — catch-all MECHANISM still degrades
     ## Even though the synthesized dummy (0) would make `y == 1` look
     ## trivially reachable for every x if it were actually read, the SND-1
     ## taint forces sxUnknown — never a false sxSat.
-    let r = symexFind(sutCastSubExpr, tLabel("dummy_would_sat"))
+    let r = pinFind(sutCastSubExpr, tLabel("dummy_would_sat"))
     check r.status != sxSat
 
 suite "symex RFC-chapulin-hardening CR-2a — regression guard":
 
   test "CR-2a-5: plain if-statement (unbound, statement position) unaffected — sxSat":
-    let r = symexFind(sutPlainIfStmt, tLabel("plain_if_stmt"))
+    let r = pinFind(sutPlainIfStmt, tLabel("plain_if_stmt"))
     check r.status == sxSat
     check r.witness[0] > 0
 
   test "CR-2a-6: plain arithmetic unaffected — sxSat with exact witness":
-    let r = symexFind(sutPlainArith, tLabel("plain_arith"))
+    let r = pinFind(sutPlainArith, tLabel("plain_arith"))
     check r.status == sxSat
     check r.witness[0] == 4
 

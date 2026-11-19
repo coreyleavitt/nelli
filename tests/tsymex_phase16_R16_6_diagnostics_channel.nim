@@ -7,6 +7,7 @@
 
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc satWithSiblingOverflow(n: int) =
   ## SUT: `n+1` always forks an overflow path (max_int overflows).
@@ -27,7 +28,7 @@ proc directOverflow(a, b: int) =
 suite "symex Phase 16 R16-6 — diagnostics channel (ADR-0012 Slice 2)":
 
   test "R16-6-1: sxSat with sibling overflow → diagnostics populated":
-    let r = symexFind(satWithSiblingOverflow, tLabel("hit"))
+    let r = pinFind(satWithSiblingOverflow, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == 5
     check r.diagnostics.len >= 1
@@ -35,7 +36,7 @@ suite "symex Phase 16 R16-6 — diagnostics channel (ADR-0012 Slice 2)":
     check r.diagnostics[0].defectKind == dkOverflowDefect
 
   test "R16-6-2: allRaiseFindings on sxRaised winner unions winning + diagnostics":
-    let r = symexFind(directOverflow, tRaisedExn("OverflowDefect"))
+    let r = pinFind(directOverflow, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     let all = allRaiseFindings(r)
     check all.len >= 1

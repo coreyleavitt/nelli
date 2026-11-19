@@ -33,19 +33,34 @@ Two boundaries the probes pinned down, both load-bearing:
 ## Decision
 
 Add a parallel codepoint path with three modeled sub-parts and explicit degrades.
-A `Rune` value is modeled as **`svInt` (Z3Int) pinned to [0, 0x10FFFF]** — NOT a
-BV32 — so `ord`, comparisons, and the `$r` byte arithmetic stay in linear integer
-arithmetic with no `bv2int` cross-theory mixing.
+A `Rune` value is modeled as **`svInt` (Z3Int)** — NOT a BV32 — so `ord`,
+comparisons, and the `$r` byte arithmetic stay in linear integer arithmetic with
+no `bv2int` cross-theory mixing.
+
+**Amended (RFC-0016 INT-72, walker 426): a free `Rune` ranges over int32, not
+[0, 0x10FFFF].** This ADR first pinned every `Rune` to [0, 0x10FFFF]. That range
+holds only for a rune the walker decodes from valid UTF-8; no `Rune` constructor
+checks a code point, so a caller passes any int32 (negatives included), and a
+parameter, a parameter object's field or a havoc'd global pinned to code points
+made `r.ord > 0x10FFFF` a false `sxUnsat` (native `Rune(2147483646)` reaches
+it). The pin was a model encoding, never a documented contract over valid code
+points; the table below states the corrected domain and what each modelled op
+does outside [0, 0x10FFFF], as std/unicode 2.2.10 does. A decoded rune is what
+Nim's own decoder returns: a valid UTF-8 literal yields code points, an
+invalid one whatever `fastRuneAt` builds (`"\xF7\xBF\xBF\xBF"` is 0x1FFFFF,
+a truncated lead is `replRune` 0xFFFD, a lone `\xFF` is 0xFF).
 
 ### MODEL (TRACTABLE-HANG-FREE)
 
 | Op | Encoding | Probe |
 |---|---|---|
-| free `Rune` SUT param | `svInt` pinned `0 ≤ r ≤ 0x10FFFF` at allocation (mirrors the ADR-0006 ≤0xFF char pin at `runtime.nim:1533`) | P1a–d sat/unsat correct |
+| free `Rune` SUT param | `svInt` ranged over int32 at allocation (INT-72; it was `0 ≤ r ≤ 0x10FFFF`) | P1a–d sat/unsat correct; INT-72 pins |
 | `ord(r)` / `int(r)` | identity on the `svInt` term | trivial |
 | `r == Rune(lit)`, `!=`, `<`,`<=`,`>`,`>=` | Z3Int (in)equality / comparison | P1a–c |
-| `Rune(intExpr)` | coerce the int term + range-pin [0,0x10FFFF] | P1 |
-| `$r` (symbolic rune → UTF-8 `string`) | `runeToUtf8Sym`: a 4-branch ITE over codepoint range; each branch `concat`s `fromCode(byteVal)` for byteVals derived by linear div/mod. Output chars all ≤ 0xFF ⇒ **byte-faithful `svString`, ADR-0006-compatible** | P5a–d, P7a–c (incl. r>0x3FFFF) |
+| `Rune(intExpr)` | the int value, `RangeDefect` outside int32 (INT-72; it was an unchecked pass-through) | P1; INT-72 |
+| `uint32(r)`, `int8(r)`, … | the int conversion of the int32 value (INT-72; it was the identity) | INT-72 |
+| `$r` / `toUTF8(r)` (symbolic rune → UTF-8 `string`) | `runeToUtf8Sym`: an ITE over the value as `fastToUTF8Copy` (1–6 bytes up to 0x7F/0x7FF/0xFFFF/0x1FFFFF/0x3FFFFFF/0x7FFFFFFF; a negative Rune is `""`); each branch `concat`s `fromCode(byteVal)` for byteVals derived by linear div/mod. Output chars all ≤ 0xFF ⇒ **byte-faithful `svString`, ADR-0006-compatible** | P5a–d, P7a–c (incl. r>0x3FFFF); INT-72 (5/6 bytes, negative) |
+| `size(r)` | the same thresholds over `r.uint32` (a negative Rune is 1) | INT-72 |
 | `runes(lit)`, `runeLen(lit)`, `lit.runeAt(i)` over a **concrete/literal** string | decode in Nim at parse time → emit concrete Z3Int codepoint literals / numeral | P4a (pure Nim) |
 
 ### DEGRADE (sound `sxUnknown`, classified — no new error kind)
@@ -76,7 +91,8 @@ The walker bump fires at **S1** (first verdict change: a `Rune` SUT that was
 Later slices that add new modeled ops bump again (v36, v37) per
 [[symex-version-bump-cr2]].
 
-- **A7-S1 (foundation):** `Rune` type classification → `svInt` pinned [0,0x10FFFF];
+- **A7-S1 (foundation):** `Rune` type classification → `svInt` pinned [0,0x10FFFF]
+  (INT-72: int32);
   `ord(r)`/`int(r)`; `Rune(intExpr)`; comparisons + equality vs `Rune(lit)`.
   New `tests/tsymex_a7_rune.nim` (free-param sat, comparison, ord-arith, the
   high-bound unsat soundness direction). **v34→v35 + 4 pins.**

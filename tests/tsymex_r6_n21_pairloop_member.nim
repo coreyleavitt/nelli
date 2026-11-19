@@ -93,6 +93,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -142,7 +143,7 @@ suite "symex round-6 N21 -- odd-segment member-branch false-SAT (confirmed bug r
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tRaisedExn("ScanError"))
+    let r = pinFind(sut, tRaisedExn("ScanError"))
     check r.status == sxRaised
 
   test "N21-1-replay: concrete replay of the pinned literal raises ScanError (ground truth, container-verified)":
@@ -172,7 +173,7 @@ suite "symex round-6 N21 -- odd-segment member-branch false-SAT (confirmed bug r
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -188,7 +189,7 @@ suite "symex round-6 N21 -- even-pair no-terminator (counter lands exactly on bo
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
   test "N21-2-replay: concrete replay of the pinned literal completes without raising":
@@ -219,7 +220,7 @@ suite "symex round-6 N21 -- even-pair no-terminator (counter lands exactly on bo
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tRaisedExn("ScanError"))
+    let r = pinFind(sut, tRaisedExn("ScanError"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -235,7 +236,7 @@ suite "symex round-6 N21 -- properly terminated (PAIR* + terminator)":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
   test "N21-3-replay: concrete replay of the pinned literal completes without raising":
@@ -248,7 +249,7 @@ suite "symex round-6 N21 -- properly terminated (PAIR* + terminator)":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tRaisedExn("ScanError"))
+    let r = pinFind(sut, tRaisedExn("ScanError"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -263,7 +264,7 @@ suite "symex round-6 N21 -- empty-region edge (regression lock, not a behavior c
     proc sut(s: string) =
       symexAssume(s == "" and s.len == 0)
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
   test "N21-4a-replay: concrete replay of the empty literal completes without raising":
@@ -273,7 +274,7 @@ suite "symex round-6 N21 -- empty-region edge (regression lock, not a behavior c
     proc sut(s: string) =
       symexAssume(s == "\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
   test "N21-4b-replay: concrete replay of the immediate-NUL literal completes without raising":

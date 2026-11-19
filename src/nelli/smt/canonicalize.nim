@@ -1168,8 +1168,62 @@ const renderAsChoicesVersion* = "12"
   ##   longer takes a non-final U+0085 / U+2028 / U+2029 lead after it: the
   ##   marked languages (`lkMark`, `skFirst`) had `$` hold before
   ##   `\r\xC2\x85\n`.
+  ## - RFC-0016 INT-85 float (445->446, provisional): a zero-initialised
+  ##   slot of a float `range` excluding 0.0 (`newSeq`, `setLen` growth,
+  ##   `new`'s fields) holds +0.0: a float read site goes through
+  ##   `readRangeConds` as an ordinal one does, so INT-77's interval bounds
+  ##   only a caller's value. "It holds 0.0" was a false `sxUnsat`. No key
+  ## - RFC-0016 INT-85 (444->445, provisional): a zero-initialised slot of
+  ##   an enum or `range` whose declared values exclude 0 (`newSeq`,
+  ##   `setLen` growth, `new`'s cells, a read through a container) holds 0:
+  ##   a read site bounds a value to the declared domain only where it is
+  ##   not a value the program made (`readRangeConds`, `madeValueCond`,
+  ##   heap_model.nim), and a `range` excluding 0 has a zero
+  ##   (`defaultZeroTotal`; `newSeq` of one declined). "It holds 0" was a
+  ##   false `sxUnsat`; a caller's value still lies in the domain. No key
+  ## - RFC-0016 INT-84 (443->444, provisional): a holey enum input (a
+  ##   parameter, its fields, elements, table values, set members, a ref
+  ##   cell's fields) ranges over its declared ordinals, not `[low, high]`:
+  ##   a target only a hole reaches was a trusted `sxSat` whose witness no
+  ##   caller can pass. A read site asserts the declared ordinals and 0 (a
+  ##   zero-initialised slot) until the walk lowers a hole it does not see
+  ##   made (a conversion to a holey enum, an opaque call;
+  ##   `enumHolesMade`). A holey enum's ordinals enter a type's key
+  ##   (`Ty<I:..:eo@[..]>`), a conversion to one `Ex<CIW:..h:..>`.
+  ## - RFC-0016 INT-83 (440->443, provisional; 441-442 are reserved for
+  ##   in-flight work): Nim's `pointer` is modelled (a parameter, a field,
+  ##   a local: it was `feUnsupportedParamType`): an address of its own sort
+  ##   (`Ref_pointer`), related to each typed sort by the casts
+  ##   (`iekPtrCast`: `cast[pointer](r)`, `pointer(q)`, `cast[ptr T](p)`),
+  ##   which keep the address both ways; objects of two types are two
+  ##   addresses; a location read at two types declines
+  ##   (`heUnresolvedRef`). A `pointer` enters a type's key as `ptr` of its
+  ##   placeholder pointee, and a cast as `Ex<PtrCast:..>`.
+  ## - RFC-0016 INT-82 (436->440, provisional; 437-439 are reserved for
+  ##   in-flight work): an allocation (`new`, `T(...)`) is distinct from
+  ##   every object of the walk's entry state -- a ref parameter, a ref
+  ##   reached through one's fields or seq / table elements, a global's
+  ##   entry value -- (`refProvenanceRoots`, heap_model.nim). `p == n` for a
+  ##   caller's `p` and a fresh `n` was a false `sxSat`. No key bytes change.
+  ## - RFC-0016 INT-77 (426->436; 427-435 are reserved for in-flight
+  ##   work): a float `range` (`range[0.0 .. 1.0]`, `range[-1.5'f32 ..
+  ##   2.5'f32]`, anonymous or named) is classified (it did not compile:
+  ##   `parseRangeBracket` read its bounds as integers) and modelled as the
+  ##   closed IEEE interval in its width wherever the type lands, NaN
+  ##   excluded, -0.0 admitted with 0.0, as Nim's range check is. Its bounds
+  ##   enter a type's key (`Ty<F64:r[..]>`, by bits); a key without a float
+  ##   range is unchanged.
+  ## - RFC-0016 INT-72 (412->426; 413-425 are reserved for in-flight W4
+  ##   work): a free `Rune` ranges over int32, its native domain, not
+  ##   [0, 0x10FFFF]: `r.ord > 0x10FFFF` and `r.ord < 0` on a Rune parameter
+  ##   were a false `sxUnsat`. `$r` and `toUTF8(r)` encode as std/unicode
+  ##   does out of range (4/5/6 bytes up to 0x1FFFFF/0x3FFFFFF/0x7FFFFFFF, a
+  ##   negative Rune ""); `size(r)` is modelled (it declined); `Rune(n)`
+  ##   checks int32 (`RangeDefect`, it was a false `sxSat`); an int
+  ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
+  ##   the identity). No key bytes change.
 
-const symexWalkerVersion* = "441"
+const symexWalkerVersion* = "446"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -6896,7 +6950,8 @@ proc canonicalize*(t: IRType): string =
       (if t.hasRange: ":r[" & $t.rangeLo & "," & $t.rangeHi & "]" else: "") &
       (if t.enumName.len > 0: ":e[" & t.enumName & "]" else: "") &
       (if t.isChar: ":c" else: "") &
-      (if t.enumRange: ":er" else: "") & ">"   # RFC-0005 S8bv: as `isChar`
+      (if t.enumRange: ":er" else: "") &   # RFC-0005 S8bv: as `isChar`
+      (if t.enumOrds.len > 0: ":eo" & $t.enumOrds else: "") & ">"   # INT-84
   of itBool:
     "Ty<B>"
   of itString:
@@ -6904,8 +6959,15 @@ proc canonicalize*(t: IRType): string =
   of itUninterp:
     "Ty<U:" & t.uninterpName &
       (if t.uninterpRefKey.len > 0: ":rk=" & t.uninterpRefKey else: "") & ">"
-  of itFloat32: "Ty<F32>"
-  of itFloat64: "Ty<F64>"
+  # RFC-0016 INT-77: a float range's bounds by their bits (a decimal
+  # rendering need not read back as the same float). Absent, nothing: every
+  # earlier float key is unchanged.
+  of itFloat32, itFloat64:
+    "Ty<F" & (if t.kind == itFloat32: "32" else: "64") &
+      (if t.floatRange:
+         ":r[" & toHex(cast[uint64](t.floatLo)) & "," &
+           toHex(cast[uint64](t.floatHi)) & "]"
+       else: "") & ">"
   of itDistinct:
     # Phase 15 G4: nominal distinct-name + recursive base encoding. The
     # name is the type wall identity; the base recurses (nested chains).
@@ -7095,6 +7157,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<CIW:" & $e.ciwSrcWidth & ":" & $e.ciwSrcSigned & ":" &
       $e.ciwTgtWidth & ":" & $e.ciwTgtSigned & ":" &
       (if e.ciwHasRange: $e.ciwLo & ".." & $e.ciwHi & ":" else: "") &
+      (if e.ciwHoley: "h:" else: "") &   # RFC-0016 INT-84
       canonicalize(e.ciwOperand, env) & ">"
   of iekConvIntReinterpret:
     # A1 adjudication: width + target signedness are both part of the key
@@ -7267,6 +7330,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<SeqNew:" & canonicalize(e.snElemTy) & ":" &
       (if e.snZeroed: "zero" else: "uninit") &
       (if e.snOfCap: ":cap:" else: ":len:") & canonicalize(e.snArg, env) & ">"
+  of iekPtrCast:                         ## RFC-0016 INT-83
+    "Ex<PtrCast:" & canonicalize(e.pcTy) & ":" & canonicalize(e.pcArg, env) & ">"
   of iekBitSet:                          ## RFC-0005 S8bq
     var parts: seq[string]
     for a in e.bsArgs: parts.add canonicalize(a, env)

@@ -8,6 +8,7 @@
 ## this file compiling is the assertion.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 {.warningAsError[Deprecated]: on.}
 
@@ -16,7 +17,7 @@ proc trivial(x: int) =
 
 suite "symexFind expansion is deprecation-clean":
   test "sat, and a no-target decline, both expand without a deprecated name":
-    let r = symexFind(trivial, tLabel("seven"))
+    let r = pinFind(trivial, tLabel("seven"))
     check r.status == sxSat
-    let u = symexFind(trivial, tLabel("not-a-marker"))
+    let u = pinFind(trivial, tLabel("not-a-marker"))
     check u.status != sxSat

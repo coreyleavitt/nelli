@@ -16,6 +16,7 @@
 ## no cache-key input change — see ADR-0016 §Scope).
 import std/[unittest, sequtils]
 import nelli/symex
+import ./s8cu_helpers
 
 # --- capture-free symbolic-length map (DECIDABLE, mapArray) ------------------
 # `x + 1` closes over nothing; the symbolic map takes the decidable Z3_mk_map
@@ -45,12 +46,12 @@ proc sutFilterSymbolic(xs: seq[int]) =
 suite "symex Phase 16 A6 — symbolic-length filter/map scope (ADR-0016)":
 
   test "A6-1: capture-free symbolic-length map TERMINATES (no Z3Error / hang)":
-    let r = symexFind(sutMapCaptureFree, tLabel("a6mapfree"))
+    let r = pinFind(sutMapCaptureFree, tLabel("a6mapfree"))
     # Decidable array-map path: verdict may be sat or unknown, never a crash.
     check r.status in {sxSat, sxUnknown}
 
   test "A6-2: capturing symbolic-length map degrades to ceUnsupportedHof, sxUnknown":
-    let r = symexFind(sutMapCapturing, tLabel("a6mapcap"))
+    let r = pinFind(sutMapCapturing, tLabel("a6mapcap"))
     check r.status == sxUnknown
     var sawHof = false
     for e in r.errors:
@@ -59,7 +60,7 @@ suite "symex Phase 16 A6 — symbolic-length filter/map scope (ADR-0016)":
     check sawHof
 
   test "A6-3: symbolic-length filter degrades to ceUnsupportedHof, sxUnknown (no seqFoldl hang)":
-    let r = symexFind(sutFilterSymbolic, tLabel("a6filter"))
+    let r = pinFind(sutFilterSymbolic, tLabel("a6filter"))
     check r.status == sxUnknown
     var sawHof = false
     for e in r.errors:

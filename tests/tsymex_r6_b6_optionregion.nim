@@ -105,6 +105,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -153,7 +154,7 @@ suite "symex round-6 B6 -- main option-region defect proof":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc\x00dd\x00ee\x00ff\x00gg\x00hh\x00\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
   test "B6-1-red: the SAME property, RECOGNIZER SHAPE BROKEN (non-.len bound), k-unrolls -- sxSat (was sxUnknown)":
@@ -190,7 +191,7 @@ suite "symex round-6 B6 -- main option-region defect proof":
     # `beBudgetExhausted` survivor; the pinned string is now ground, the
     # survivor's path is refuted and dropped, and the walk is under a
     # second.
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     checkpoint $r.status & " " & $r.soundness & " " & $r.errors
     check r.status == sxSat
 
@@ -215,7 +216,7 @@ suite "symex round-6 B6 -- star-segment pins":
       symexAssume(s == "a1\x00b1\x00a2\x00b2\x00a3\x00b3\x00" &
                         "a4\x00b4\x00a5\x00b5\x00a6\x00b6\x00\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
   test "B6-3 empty-value pin: a genuinely empty VALUE segment mid-region, past the unroll horizon":
@@ -227,7 +228,7 @@ suite "symex round-6 B6 -- star-segment pins":
       symexAssume(s == "k1\x00v1\x00k2\x00v2\x00k3\x00\x00" &
                         "k4\x00v4\x00k5\x00v5\x00k6\x00v6\x00\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
   test "B6-4 double-NUL-terminator pin: the last value's terminator immediately followed by the empty-key terminator":
@@ -239,7 +240,7 @@ suite "symex round-6 B6 -- star-segment pins":
       symexAssume(s == "k1\x00v1\x00k2\x00v2\x00k3\x00v3\x00" &
                         "k4\x00v4\x00k5\x00v5\x00k6\x00v6\x00\x00")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     check r.status == sxSat
 
 # ---------------------------------------------------------------------------
@@ -257,7 +258,7 @@ suite "symex round-6 B6 -- truncated-region fallback":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc")
       readOptionsSut(s, 0)
-    let r = symexFind(sut, tRaisedExn("ScanError"))
+    let r = pinFind(sut, tRaisedExn("ScanError"))
     check r.status == sxRaised
 
 # ---------------------------------------------------------------------------
@@ -292,7 +293,7 @@ suite "symex round-6 B6 -- trip wire (recognizer stays narrow)":
         i = p2
       symexTarget("done")
     # RFC-0005 S8bl moved this pin (see B6-1-red).
-    let r = symexFind(sut, tLabel("done"))
+    let r = pinFind(sut, tLabel("done"))
     checkpoint $r.status & " " & $r.soundness & " " & $r.errors
     check r.status == sxSat
 

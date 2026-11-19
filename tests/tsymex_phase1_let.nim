@@ -1,6 +1,7 @@
 ## Phase 1 — `let`-bound locals flow symbolically across branches.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex Phase 1 — let bindings":
   test "let-bound local flows into branch condition":
@@ -8,6 +9,6 @@ suite "symex Phase 1 — let bindings":
       let y = x * 2
       if y > 10:
         symexTarget("doubled-big")
-    let r = symexFind(doubleThenCheck, tLabel("doubled-big"))
+    let r = pinFind(doubleThenCheck, tLabel("doubled-big"))
     check r.status == sxSat
     check r.witness[0] * 2 > 10

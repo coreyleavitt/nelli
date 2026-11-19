@@ -18,7 +18,7 @@ suite "K10d: removed surface":
     check not compiles(SymexSettings(arithChecks: {}))
 
   test "SymexResult has no fromCache":
-    check not compiles(symexFind(addOne, tLabel("wrapped")).fromCache)
+    check not compiles(pinFind(addOne, tLabel("wrapped")).fromCache)
 
   test "no setting can disagree with the build":
     check not compiles(arithChecksDisagree(defaultSymexSettings()))
@@ -35,7 +35,7 @@ suite "K10d: removed surface":
 
 suite "K10d: behaviour follows the build":
   test "the default build models the checks it compiles in":
-    let r = symexFind(addOne, tLabel("wrapped"))
+    let r = pinFind(addOne, tLabel("wrapped"))
     check r.status != sxSat
     check not r.errors.named(feCheckOption)
 

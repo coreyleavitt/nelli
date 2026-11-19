@@ -4,6 +4,7 @@
 ## reuses the existing isIf semantics.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 type Color = enum red, green, blue
 
@@ -15,7 +16,7 @@ proc colorReach(c: Color) =
 
 suite "symex Phase 6 — case":
   test "case over enum reaches matching arm":
-    let r = symexFind(colorReach, tLabel("g"))
+    let r = pinFind(colorReach, tLabel("g"))
     check r.status == sxSat
     # Issue #163: the witness reader now emits a correctly-typed `Color`
     # value directly (see `IRType.enumName`), so `r.witness[0]` is already
@@ -28,7 +29,7 @@ suite "symex Phase 6 — case":
       case n
       of 1, 2, 3: symexTarget("small")
       else: discard
-    let r = symexFind(small, tLabel("small"))
+    let r = pinFind(small, tLabel("small"))
     check r.status == sxSat
     check r.witness[0] in {1, 2, 3}
 
@@ -37,6 +38,6 @@ suite "symex Phase 6 — case":
       case n
       of 1: symexTarget("one")
       else: symexTarget("other")
-    let r = symexFind(anyOther, tLabel("other"))
+    let r = pinFind(anyOther, tLabel("other"))
     check r.status == sxSat
     check r.witness[0] != 1

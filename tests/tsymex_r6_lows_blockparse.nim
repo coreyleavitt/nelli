@@ -40,6 +40,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # N34 -- single-statement `block:` body mis-parse, vs. a two-statement
@@ -67,14 +68,14 @@ suite "symex round-6 N34 -- single-statement block:body mis-itemization":
   test "N34-1: single-statement block reassignment is visible post-block -> sxSat " &
        "(pre-fix RED: block's lone `v = 42` mis-itemized into two bogus top-level " &
        "statements, decline to sxUnknown)":
-    let r = symexFind(sutN34SingleStmtBlock, tLabel("n34_single_stmt_block_v42"))
+    let r = pinFind(sutN34SingleStmtBlock, tLabel("n34_single_stmt_block_v42"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
 
   test "N34-2 (companion, proves the asymmetry): the two-statement block version " &
        "already reaches its target -> sxSat, both before and after the fix":
-    let r = symexFind(sutN34TwoStmtBlock, tLabel("n34_two_stmt_block_v42"))
+    let r = pinFind(sutN34TwoStmtBlock, tLabel("n34_two_stmt_block_v42"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -118,13 +119,13 @@ suite "symex round-6 N38 -- block-wrapped discriminator reassignment, fully-back
 
   test "N38-1: the block-wrapped reassignment itself is observed post-call -> sxSat " &
        "(pre-fix RED: spurious sxUnknown, zero degrade machinery involved)":
-    let r = symexFind(sutN38ReachedSat, tLabel("n38_reassign_reached"))
+    let r = pinFind(sutN38ReachedSat, tLabel("n38_reassign_reached"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
 
   test "N38-2a: the fully-backed field is zero after reassignment -> sxSat":
-    let r = symexFind(sutN38FieldZeroSat, tLabel("n38_field_zero_sat"))
+    let r = pinFind(sutN38FieldZeroSat, tLabel("n38_field_zero_sat"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -134,7 +135,7 @@ suite "symex round-6 N38 -- block-wrapped discriminator reassignment, fully-back
     ## Walker <= 153 zero-initialised the field on every reassignment. In
     ## Nim `dkA -> dkB` raises FieldDefect and `dkB -> dkB` keeps `b`, so a
     ## `dkB` input with `b != 0` reaches the target: checked on the SUT.
-    let r = symexFind(sutN38FieldNonzeroUnreachable, tLabel("n38_field_nonzero_unreachable"))
+    let r = pinFind(sutN38FieldNonzeroUnreachable, tLabel("n38_field_nonzero_unreachable"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat

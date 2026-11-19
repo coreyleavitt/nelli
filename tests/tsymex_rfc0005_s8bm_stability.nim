@@ -19,6 +19,7 @@ import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+import ./s8cu_helpers
 
 proc opDataStyleSlice(data: seq[byte]) =
   ## S8ag's B1-1 probe (`tsymex_r6_b1_stringbacked`).
@@ -43,7 +44,7 @@ proc walkB11(factsFirst: bool): tuple[status: SymexStatusKind,
   ## B1-1's walk, recorded, with or without the facts-first check.
   symexQueryStats = @[]
   symexFactsFirstOff = not factsFirst
-  let r = symexFind(opDataStyleSlice, tLabel("opdata_slice_sat"))
+  let r = pinFind(opDataStyleSlice, tLabel("opdata_slice_sat"))
   symexFactsFirstOff = false
   checkpoint (if factsFirst: "with" else: "without") &
     " facts-first:\n" & symexQueryStatsSummary()

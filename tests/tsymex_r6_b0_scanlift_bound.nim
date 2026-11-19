@@ -17,6 +17,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc overLenBound(s: string, bound: int) =
   ## (a): unconstrained bound — bound > s.len is satisfiable, and then the
@@ -41,15 +42,15 @@ proc canonicalScan(s: string) =
 suite "symex round-6 B0 — scan-lift bound soundness":
 
   test "bound > s.len: the IndexDefect is FOUND (was false sxUnsat)":
-    let r = symexFind(overLenBound, tIndexError())
+    let r = pinFind(overLenBound, tIndexError())
     check r.status == sxRaised
 
   test "negative start: the IndexDefect is FOUND (was false sxUnsat)":
-    let r = symexFind(negStart, tIndexError())
+    let r = pinFind(negStart, tIndexError())
     check r.status == sxRaised
 
   test "canonical zero-start s.len-bound scan still proves (sxUnsat)":
-    let r = symexFind(canonicalScan, tIndexError())
+    let r = pinFind(canonicalScan, tIndexError())
     check r.status == sxUnsat
 
 proc chainedNotFound(s: string) =
@@ -73,7 +74,7 @@ suite "symex round-6 B0 — zero-iteration value preservation":
   test "second scan seeded past the bound preserves its index (SAT)":
     ## Reachable whenever ':' is absent: i lands at s.len, j starts and
     ## stays at s.len + 1. The unguarded clamp made this falsely UNSAT.
-    let r = symexFind(chainedNotFound, tLabel("j-preserved"))
+    let r = pinFind(chainedNotFound, tLabel("j-preserved"))
     check r.status == sxSat
 
 suite "symex round-6 B0 — walker version pin":

@@ -43,6 +43,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8an_remainder_d")
@@ -59,7 +60,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -153,7 +154,7 @@ suite "S8an (3): a module-level var reached from a callee":
     ## RFC-0005 S8as a fresh value of its type (`feGlobalHavoc`, a replay-
     ## gated SAT), where S8an declined (`feGlobalReadUnmodelled`).
     block:
-      let r = symexFind(sutGlobalFirstRead, tLabel("gfr"))
+      let r = pinFind(sutGlobalFirstRead, tLabel("gfr"))
       checkpoint show(r.errors)
       check r.status in {sxSat, sxUnknown}
       check r.errors.hasKind(feGlobalHavoc)

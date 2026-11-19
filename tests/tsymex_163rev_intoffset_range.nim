@@ -42,6 +42,7 @@ import std/strutils
 import nelli/smt/canonicalize
 import nelli/smt/types
 import nelli/symex
+import ./s8cu_helpers
 
 # RFC-0005 S8i: `return i` into a `range[0..1000]` result is a checked
 # conversion, as in Nim: it forks RangeDefect (the oracles below show Nim
@@ -131,11 +132,11 @@ suite "#163 review W8 -- bare scan-offset return: the placeholder keeps the call
     ## callee's declared `range[0..1000]` return type makes that impossible
     ## (Nim itself would have raised `RangeDefect` first, per the oracle
     ## above) -- a false `sxSat` witness.
-    let r = symexFind(callerBareEarly, tLabel("impossible_bare_early"), noRangeChecks())
+    let r = pinFind(callerBareEarly, tLabel("impossible_bare_early"), noRangeChecks())
     check unreachableModuloExcluded(r)
 
   test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
-    let r = symexFind(callerBareEarly, tLabel("impossible_bare_early"))
+    let r = pinFind(callerBareEarly, tLabel("impossible_bare_early"))
     for e in r.errors: checkpoint $e.kind & ": " & e.msg
     check r.capDeclineOnly
 
@@ -183,11 +184,11 @@ suite "#163 review W8 -- traced tuple position: the placeholder keeps the callee
     ## the field as a bare `svInt` with no range assertion -- same false
     ## `sxSat` mechanism as the bare arm above, at the OTHER call-return
     ## site the fix touches.
-    let r = symexFind(callerTuple, tLabel("impossible_tuple"), noRangeChecks())
+    let r = pinFind(callerTuple, tLabel("impossible_tuple"), noRangeChecks())
     check unreachableModuloExcluded(r)
 
   test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
-    let r = symexFind(callerTuple, tLabel("impossible_tuple"))
+    let r = pinFind(callerTuple, tLabel("impossible_tuple"))
     for e in r.errors: checkpoint $e.kind & ": " & e.msg
     check r.capDeclineOnly
 
@@ -213,11 +214,11 @@ proc callerBareSkipWhile(s: string) =
 suite "#163 review W8 -- non-regression: Q1/B0 never reaches these arms":
 
   test "the skip-while shape still terminates and still respects the range (ordinary BV route)":
-    let r = symexFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"), noRangeChecks())
+    let r = pinFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"), noRangeChecks())
     check unreachableModuloExcluded(r)
 
   test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
-    let r = symexFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"))
+    let r = pinFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"))
     for e in r.errors: checkpoint $e.kind & ": " & e.msg
     check r.capDeclineOnly
 

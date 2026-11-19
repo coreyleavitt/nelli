@@ -2,6 +2,7 @@ import std/unittest
 import std/math
 import std/strutils
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster F cycle F8: F-cluster regression smoke + arbitrary
 # float64 SUT round-trip property + withSymexSettings wiring + walker-version
@@ -110,101 +111,101 @@ suite "symex Phase 15 — F8 F-cluster regression smoke + round-trip":
     # assert the predicate returns true (the witness genuinely satisfies the
     # SUT body).
     block:
-      let r = symexFind(s01, tLabel("t01"))
+      let r = pinFind(s01, tLabel("t01"))
       check r.status == sxSat
       check p01(r.witness[0])
     block:
-      let r = symexFind(s02, tLabel("t02"))
+      let r = pinFind(s02, tLabel("t02"))
       check r.status == sxSat
       check p02(r.witness[0])
     block:
-      let r = symexFind(s03, tLabel("t03"))
+      let r = pinFind(s03, tLabel("t03"))
       check r.status == sxSat
       check p03(r.witness[0])
     block:
-      let r = symexFind(s04, tLabel("t04"))
+      let r = pinFind(s04, tLabel("t04"))
       check r.status == sxSat
       check p04(r.witness[0])
     block:
-      let r = symexFind(s05, tLabel("t05"))
+      let r = pinFind(s05, tLabel("t05"))
       check r.status == sxSat
       check p05(r.witness[0])
     block:
-      let r = symexFind(s06, tLabel("t06"))
+      let r = pinFind(s06, tLabel("t06"))
       check r.status == sxSat
       check p06(r.witness[0])
     block:
-      let r = symexFind(s07, tLabel("t07"))
+      let r = pinFind(s07, tLabel("t07"))
       check r.status == sxSat
       check p07(r.witness[0])
     block:
-      let r = symexFind(s08, tLabel("t08"))
+      let r = pinFind(s08, tLabel("t08"))
       check r.status == sxSat
       check p08(r.witness[0])
     block:
-      let r = symexFind(s09, tLabel("t09"))
+      let r = pinFind(s09, tLabel("t09"))
       check r.status == sxSat
       check p09(r.witness[0])
     block:
-      let r = symexFind(s10, tLabel("t10"))
+      let r = pinFind(s10, tLabel("t10"))
       check r.status == sxSat
       check p10(r.witness[0])
     block:
-      let r = symexFind(s11, tLabel("t11"))
+      let r = pinFind(s11, tLabel("t11"))
       check r.status == sxSat
       check p11(r.witness[0])
     block:
-      let r = symexFind(s12, tLabel("t12"))
+      let r = pinFind(s12, tLabel("t12"))
       check r.status == sxSat
       check p12(r.witness[0])
     block:
-      let r = symexFind(s13, tLabel("t13"))
+      let r = pinFind(s13, tLabel("t13"))
       check r.status == sxSat
       check p13(r.witness[0])
     block:
-      let r = symexFind(s14, tLabel("t14"))
+      let r = pinFind(s14, tLabel("t14"))
       check r.status == sxSat
       check p14(r.witness[0])
     block:
-      let r = symexFind(s15, tLabel("t15"))
+      let r = pinFind(s15, tLabel("t15"))
       check r.status == sxSat
       check p15(r.witness[0])
     block:
-      let r = symexFind(s16, tLabel("t16"))
+      let r = pinFind(s16, tLabel("t16"))
       check r.status == sxSat
       check p16(r.witness[0])
     block:
-      let r = symexFind(s17, tLabel("t17"))
+      let r = pinFind(s17, tLabel("t17"))
       check r.status == sxSat
       check p17(r.witness[0])
     block:
-      let r = symexFind(s18, tLabel("t18"))
+      let r = pinFind(s18, tLabel("t18"))
       check r.status == sxSat
       check p18(r.witness[0])
     block:
-      let r = symexFind(s19, tLabel("t19"))
+      let r = pinFind(s19, tLabel("t19"))
       check r.status == sxSat
       check p19(r.witness[0])
     block:
-      let r = symexFind(s20, tLabel("t20"))
+      let r = pinFind(s20, tLabel("t20"))
       check r.status == sxSat
       check p20(r.witness[0], r.witness[1])
     block:
-      let r = symexFind(s21, tLabel("t21"))
+      let r = pinFind(s21, tLabel("t21"))
       check r.status == sxSat
       check p21(r.witness[0], r.witness[1])
     block:
-      let r = symexFind(s22, tLabel("t22"))
+      let r = pinFind(s22, tLabel("t22"))
       check r.status == sxSat
       check p22(r.witness[0])
     block:
-      let r = symexFind(s23, tLabel("t23"))
+      let r = pinFind(s23, tLabel("t23"))
       check r.status == sxSat
       check p23(r.witness[0])
 
   test "withSymexSettings wiring: ipAlwaysAxiomatize threads through to sxSat":
     # The settings builder compiles + threads through runSymex on a float SUT.
-    let r = symexFind(sCfg, tLabel("cfg"), axiomSettings)
+    let r = pinFind(sCfg, tLabel("cfg"), axiomSettings)
     check r.status == sxSat
     check p01(r.witness[0])      # witness still satisfies the body
 
@@ -213,7 +214,7 @@ suite "symex Phase 15 — F8 F-cluster regression smoke + round-trip":
 
   test "intentionally-broken SUT: ln(x) yields sxUnknown with ONLY feUnsupportedOpAborted":
     ## RFC-0005 S6b: the runSymex boundary abort is `feUnsupportedOpAborted`.
-    let r = symexFind(sBroken, tLabel("broken"))
+    let r = pinFind(sBroken, tLabel("broken"))
     check r.status == sxUnknown
     check r.errors.len > 0                       # no silent empty-errors sxUnknown
     for e in r.errors:

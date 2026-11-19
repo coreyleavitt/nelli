@@ -15,6 +15,7 @@ import nelli/smt/dsl_parser
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/symex
+import ./s8cu_helpers
 
 # --- SUTs ------------------------------------------------------------------
 
@@ -76,7 +77,7 @@ suite "symex Phase 15 C1 — closure IR (iekLambda/iekClosureCall) + svClosure s
     # axiom), so the unconditionally-reached `symexTarget("after")` is now SAT —
     # no longer a classified stub. (Behaviour superseded by C2b; the structural
     # IR/canonicalize/PoC assertions in this file are unchanged.)
-    let res = symexFind(lambdaSut, tLabel("after"))
+    let res = pinFind(lambdaSut, tLabel("after"))
     check res.status == sxSat
 
   test "C1 PoC: Z3_mk_app with runtime-constructed sorts (Feas-H2; de-risks C2b)":

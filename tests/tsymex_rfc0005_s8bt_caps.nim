@@ -18,6 +18,7 @@ import z3
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/[pcre_syntax, regex_parser]
+import ./s8cu_helpers
 
 # Split three ways between this file and its `_b` / `_c` twins (which
 # include it with `s8btCapsPart` = 1 / 2), so each runs under 60 s on the
@@ -191,7 +192,7 @@ suite "S8bt: UTF mode's plain patterns, through the walker (item 6)":
 
   template verdict(sut: untyped; label: string; want = sxSat) =
     let t1 = epochTime()
-    let r = symexFind(sut, tLabel(label))
+    let r = pinFind(sut, tLabel(label))
     echo "  ", label, ": ", r.status, " ", formatFloat(epochTime() - t1,
                                                        ffDecimal, 1), " s"
     check r.status == want

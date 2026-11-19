@@ -21,6 +21,7 @@
 ## verdicts, mirroring `parseInt` exactly (S10a/S10b precedent).
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 proc nimVPBI(s: string): string =
   ## Ground truth: what Nim's parseBiggestInt actually does with `s`.
@@ -61,13 +62,13 @@ proc sutDiscardValidPBI(n: int) =
 suite "symex RFC-chapulin-hardening M2 — parseBiggestInt via iekStrToInt":
 
   test "M2-1: parseBiggestInt(s) == 42 is SAT with witness s parsing to 42":
-    let r = symexFind(pbiEq, tLabel("pbi"))
+    let r = pinFind(pbiEq, tLabel("pbi"))
     check r.status == sxSat
     check r.witness[0] == "42"
     check nimVPBI(r.witness[0]) == "=42"   # SOUND: witness truly parses to 42
 
   test "M2-2: parseBiggestInt(\"-42\") produces sxSat with int value -42":
-    let r = symexFind(pbiNeg, tLabel("pbiNeg"))
+    let r = pinFind(pbiNeg, tLabel("pbiNeg"))
     check r.status == sxSat
     check r.witness[0] == "-42"
 
@@ -75,7 +76,7 @@ suite "symex RFC-chapulin-hardening M2 — parseBiggestInt via iekStrToInt":
     ## Mirrors parseInt's S10b: parseBiggestInt("abc") raises ValueError
     ## identically to parseInt — proving the shared iekStrToInt raise-path is
     ## NOT just the happy path.
-    let r = symexFind(pbiNonDigit, tRaisedExn("ValueError"))
+    let r = pinFind(pbiNonDigit, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check nimVPBI(r.raisedWitness[0]) == "RAISES"
@@ -83,22 +84,22 @@ suite "symex RFC-chapulin-hardening M2 — parseBiggestInt via iekStrToInt":
   test "M2-4 (UNSAT soundness): s pinned to \"100\" contradicts ==42":
     ## Proves REAL modeling (not a trivial always-SAT/always-unknown stub):
     ## parseBiggestInt("100") is forced to 100, contradicting ==42.
-    let r = symexFind(pbiUnsat, tLabel("pbiUnsat"))
+    let r = pinFind(pbiUnsat, tLabel("pbiUnsat"))
     check r.status == sxUnsat
 
   test "M2-5 (discard parity): discarded parseBiggestInt RAISES for non-numeric input":
-    let r = symexFind(sutDiscardThenAfterPBI, tRaisedExn("ValueError"))
+    let r = pinFind(sutDiscardThenAfterPBI, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check nimVPBI(r.raisedWitness[0]) == "RAISES"
 
   test "M2-6 (discard parity): SOUND — afterPBI reachable only via parseable string":
-    let r = symexFind(sutDiscardThenAfterPBI, tLabel("afterPBI"))
+    let r = pinFind(sutDiscardThenAfterPBI, tLabel("afterPBI"))
     check r.status == sxSat
     check nimVPBI(r.witness[0]) != "RAISES"
 
   test "M2-7: regression — concrete valid discard does not spuriously raise":
-    let r = symexFind(sutDiscardValidPBI, tLabel("okPBI"))
+    let r = pinFind(sutDiscardValidPBI, tLabel("okPBI"))
     check r.status == sxSat
     check r.witness[0] == 5
 

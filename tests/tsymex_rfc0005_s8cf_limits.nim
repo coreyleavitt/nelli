@@ -83,14 +83,14 @@ suite "S8cf: PCRE's own limits":
       check a2000.find(re"(a|b)*c") == -27
 
   test "a call past MATCH_LIMIT is not refuted":
-    check symexFind(matchHit, tLabel("cf_match_hit")).status != sxUnsat
-    check symexFind(findCode, tLabel("cf_find_code")).status != sxUnsat
-    check symexFind(matchLenCode, tLabel("cf_matchlen_code")).status != sxUnsat
-    check symexFind(boundsCode, tLabel("cf_bounds_code")).status != sxUnsat
-    check symexFind(replaceStops, tLabel("cf_replace_stops")).status != sxUnsat
+    check pinFind(matchHit, tLabel("cf_match_hit")).status != sxUnsat
+    check pinFind(findCode, tLabel("cf_find_code")).status != sxUnsat
+    check pinFind(matchLenCode, tLabel("cf_matchlen_code")).status != sxUnsat
+    check pinFind(boundsCode, tLabel("cf_bounds_code")).status != sxUnsat
+    check pinFind(replaceStops, tLabel("cf_replace_stops")).status != sxUnsat
 
   test "a miss past MATCH_LIMIT is not a witness":
-    check symexFind(missOnLong, tLabel("cf_miss_long")).status != sxSat
+    check pinFind(missOnLong, tLabel("cf_miss_long")).status != sxSat
 
   test "the stopped calls are K9 decline pins":
     # RFC-0016 SND-10, SND-11: the walker neither refutes the stopped match nor
@@ -103,15 +103,15 @@ suite "S8cf: PCRE's own limits":
       pinDecline(missOnLong, k, beSolverUndef, tLabel("cf_miss_long"))
 
   test "within the safe length both outcomes stand":
-    check symexFind(shortMatch, tLabel("cf_short_match")).status == sxUnsat
-    check symexFind(shortMiss, tLabel("cf_short_miss")).status == sxSat
+    check pinFind(shortMatch, tLabel("cf_short_match")).status == sxUnsat
+    check pinFind(shortMiss, tLabel("cf_short_miss")).status == sxSat
 
   test "a stopped call reads false: the refutation stands":
-    check symexFind(hitImpliesByte, tLabel("cf_hit_needs_c")).status == sxUnsat
+    check pinFind(hitImpliesByte, tLabel("cf_hit_needs_c")).status == sxUnsat
 
   test "a miss over an unbounded subject is not refuted":
-    let r = symexFind(missImpliesNoByte, tLabel("cf_miss_no_c"))
+    let r = pinFind(missImpliesNoByte, tLabel("cf_miss_no_c"))
     check r.status != sxUnsat
 
   test "the JIT's stack limit is not refuted":
-    check symexFind(jitStack, tLabel("cf_jit_stack")).status != sxUnsat
+    check pinFind(jitStack, tLabel("cf_jit_stack")).status != sxUnsat

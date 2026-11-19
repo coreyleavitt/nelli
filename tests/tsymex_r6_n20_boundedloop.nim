@@ -57,6 +57,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc boundedLoopSat(n: int) =
   symexAssume(n >= 0 and n < 3)
@@ -102,13 +103,13 @@ suite "N20 — k-unroll decline misclassification":
   test "an assumed-bounded loop (n < 3, maxLoopUnwind = 5) still proves sxSat":
     ## The STATUS is correct regardless of the classification bug — the
     ## target is genuinely reachable within the explored depth.
-    let r = symexFind(boundedLoopSat, tLabel("bounded_hit"))
+    let r = pinFind(boundedLoopSat, tLabel("bounded_hit"))
     check r.status == sxSat
     let n = r.witness[0]
     check n >= 0 and n < 3
 
   test "an assume that really bounds the loop exhausts nothing (RFC-0005 S8k)":
-    let r = symexFind(boundedLoopSat, tLabel("bounded_hit"))
+    let r = pinFind(boundedLoopSat, tLabel("bounded_hit"))
     check r.status == sxSat
     # Re-pinned by RFC-0005 S8k. This pinned the ASSUMED-BOUND-aware kind
     # firing here: the k-unroll forked the "guard still true" arm on every
@@ -127,7 +128,7 @@ suite "N20 — k-unroll decline misclassification":
     check not sawPlainKind
 
   test "a genuinely unbounded loop keeps the OLD plain classification (no regression)":
-    let r = symexFind(unboundedLoop, tLabel("unbounded_never"))
+    let r = pinFind(unboundedLoop, tLabel("unbounded_never"))
     check r.status == sxUnknown
     var sawPlainKind = false
     var sawAssumedBoundKind = false
@@ -145,7 +146,7 @@ suite "N20 — k-unroll decline misclassification":
     ## only the diagnostic kind is affected, and it stays the assumed-bound
     ## one here even though the assumption does nothing to shrink the
     ## explored trip-count space.
-    let r = symexFind(magnitudeUselessAssumeLoop, tLabel("magnitude_useless_never"))
+    let r = pinFind(magnitudeUselessAssumeLoop, tLabel("magnitude_useless_never"))
     check r.status == sxUnknown
     var sawAssumedBoundKind = false
     var sawPlainKind = false

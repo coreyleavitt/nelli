@@ -11,6 +11,7 @@
 
 import std/[unittest, re, strutils, unicode]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
@@ -73,5 +74,5 @@ suite "S8cf: UTF classes":
 
   test "the walker reads a negated escape on every library":
     check "\xc3\xa9".matchLen(re"(*UTF)[\S\x{100}]") == 2
-    check symexFind(negEscape, tLabel("cf_cls_neg")).status == sxSat
-    check symexFind(negEscapeNo, tLabel("cf_cls_neg_no")).status == sxUnsat
+    check pinFind(negEscape, tLabel("cf_cls_neg")).status == sxSat
+    check pinFind(negEscapeNo, tLabel("cf_cls_neg_no")).status == sxUnsat

@@ -50,21 +50,21 @@ suite "W1-d1c cached prunes":
     check parseInt(symexWalkerVersion) >= 280
 
   test "div: the second call admitting zero is not a trusted sxUnsat":
-    let r = symexFind(sutUDivTwice, tLabel("hit"))
+    let r = pinFind(sutUDivTwice, tLabel("hit"))
     checkpoint show(r.errors)
     check not r.trusted
     check r.status != sxSat
     check r.errors.named(ubUnsignedDivZero)
 
   test "mod: the same":
-    let r = symexFind(sutModTwice, tLabel("hit"))
+    let r = pinFind(sutModTwice, tLabel("hit"))
     checkpoint show(r.errors)
     check not r.trusted
     check r.status != sxSat
     check r.errors.named(ubIntMinModMinusOne)
 
   test "control: both calls guarded reuse the summary, verdict stays trusted":
-    let r = symexFind(sutUDivTwiceGuarded, tLabel("hit"))
+    let r = pinFind(sutUDivTwiceGuarded, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check r.trusted
@@ -72,7 +72,7 @@ suite "W1-d1c cached prunes":
     check r.hitsOf("udivCallee") >= 1
 
   test "control: mod, both guarded":
-    let r = symexFind(sutModTwiceGuarded, tLabel("hit"))
+    let r = pinFind(sutModTwiceGuarded, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
     check r.trusted
@@ -85,6 +85,6 @@ suite "W1-d1c cached prunes":
   test "the failing div shape also walks the callee and reuses the guarded summary":
     ## The k != 0 path replays the first summary (prune holds there); the
     ## k == 0 path re-walks, which is what halts it.
-    let r = symexFind(sutUDivTwice, tLabel("hit"))
+    let r = pinFind(sutUDivTwice, tLabel("hit"))
     check r.hitsOf("udivCallee") >= 1
     check r.callStats.anyIt(it.name == "udivCallee" and it.walked >= 2)

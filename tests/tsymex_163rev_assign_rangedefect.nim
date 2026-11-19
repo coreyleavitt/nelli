@@ -31,6 +31,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 # ---- Part 1: the headline -- a genuinely out-of-range assignment raises ----
 
@@ -92,7 +93,7 @@ suite "#163 review R22 -- an out-of-range assignment raises instead of vanishing
     ## Before the fix: sxUnsat (the walker modeled no RangeDefect fork at
     ## all -- there is genuinely nothing in the path space matching the
     ## search, since the raise itself was never built).
-    let r = symexFind(assignOutOfRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(assignOutOfRange, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
@@ -100,27 +101,27 @@ suite "#163 review R22 -- an out-of-range assignment raises instead of vanishing
   test "the same program still reports sxSat reaching the label (the survivor path)":
     ## The in-range branch survives -- `x=0,y=0..100` (or any in-range
     ## sum) still reaches "t" normally.
-    let r = symexFind(assignOutOfRange, tLabel("t"))
+    let r = pinFind(assignOutOfRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 -- a provably-in-range assignment does not fork":
 
   test "no RangeDefect is found when the sum cannot leave the declared range":
-    let r = symexFind(assignProvablyInRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(assignProvablyInRange, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached normally":
-    let r = symexFind(assignProvablyInRange, tLabel("t"))
+    let r = pinFind(assignProvablyInRange, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 review R22 non-regression -- an ordinary unranged local is unaffected":
 
   test "no RangeDefect fork on a plain int local":
-    let r = symexFind(assignPlainInt, tRaisedExn("RangeDefect"))
+    let r = pinFind(assignPlainInt, tRaisedExn("RangeDefect"))
     check r.status != sxRaised
 
   test "the label is still reached":
-    let r = symexFind(assignPlainInt, tLabel("t"))
+    let r = pinFind(assignPlainInt, tLabel("t"))
     check r.status == sxSat
 
 

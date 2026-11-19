@@ -40,6 +40,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import nelli/smt/[symval]   ## R2-3: the leaves are no longer re-exported by the facade
+import ./s8cu_helpers
 
 proc kindNames(errs: seq[SymexErrorInfo]): seq[string] =
   for e in errs: result.add $e.kind
@@ -176,7 +177,7 @@ proc s1cRegionBlock(s: string) =
 suite "RFC-0005 S1c (a) -- isTargetLabel/routeRaise SOLVE a tainted path":
 
   test "a tainted path reaching the label is solved: its solver resource-out is recorded (beSolverUndef)":
-    let r = symexFind(s1cTaintedRareLabel, tLabel("s1c_rare"), tightRLimit)
+    let r = pinFind(s1cTaintedRareLabel, tLabel("s1c_rare"), tightRLimit)
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(feOpaqueCallUnmodelled)
@@ -184,7 +185,7 @@ suite "RFC-0005 S1c (a) -- isTargetLabel/routeRaise SOLVE a tainted path":
     check not r.errors.hasKind(weInternalWalkerFault)
 
   test "a tainted raise at the SUT boundary is solved: its solver resource-out is recorded (beSolverUndef)":
-    let r = symexFind(s1cTaintedRareRaise, tRaisedExn(), tightRLimit)
+    let r = pinFind(s1cTaintedRareRaise, tRaisedExn(), tightRLimit)
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(beSolverUndef)
@@ -193,7 +194,7 @@ suite "RFC-0005 S1c (a) -- isTargetLabel/routeRaise SOLVE a tainted path":
 suite "RFC-0005 S1c (b) -- routeRaise routes a tainted raise instead of killing the path (§2.6)":
 
   test "the handler of a tainted raise is walked (its body's own decline is reached and recorded)":
-    let r = symexFind(s1cTaintedCaught, tLabel("s1c_after_catch"))
+    let r = pinFind(s1cTaintedCaught, tLabel("s1c_after_catch"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedStmtKind)
@@ -202,7 +203,7 @@ suite "RFC-0005 S1c (b) -- routeRaise routes a tainted raise instead of killing 
 suite "RFC-0005 S1c (c) -- witness monotonicity, tainted arm discovered first (§4.1 family 1)":
 
   test "a clean witness found AFTER a tainted SAT still wins -- the candidate never halts the walk":
-    let r = symexFind(s1cTaintedFirst, tLabel("s1c_mono"))
+    let r = pinFind(s1cTaintedFirst, tLabel("s1c_mono"))
     checkpoint($kindNames(r.errors))
     check r.status == sxSat
     check r.witness[0] == 42
@@ -210,7 +211,7 @@ suite "RFC-0005 S1c (c) -- witness monotonicity, tainted arm discovered first (�
 suite "RFC-0005 S1c (d) -- the lowering pending-taint leak (S1b's N40-4 finding)":
 
   test "a heap field write of an unallocatable value drains its pending taint onto its path (no leak stamp)":
-    let r = symexFind(s1cHeapWriteBlock, tLabel("s1c_heap_write"))
+    let r = pinFind(s1cHeapWriteBlock, tLabel("s1c_heap_write"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedTableKeyType)
@@ -218,7 +219,7 @@ suite "RFC-0005 S1c (d) -- the lowering pending-taint leak (S1b's N40-4 finding)
     check loweringPendingTaint == {}
 
   test "a walk-level call-return allocation drains its pending taint onto its path (no leak stamp)":
-    let r = symexFind(s1cOpaqueBadRet, tLabel("s1c_bad_ret"))
+    let r = pinFind(s1cOpaqueBadRet, tLabel("s1c_bad_ret"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedTableKeyType)
@@ -368,7 +369,7 @@ suite "RFC-0005 S1c (g) -- a tainted path's solve is bounded (never a new non-te
     ## the sweep). Post-bound: the tainted solves finish (sat, unsat or a
     ## bounded `beSolverUndef`) and the verdict is the pre-S1c sxUnknown.
     symexTargetSolveStats = default(typeof(symexTargetSolveStats))
-    let r = symexFind(s1cRegionBlock, tLabel("s1c_region_block"))
+    let r = pinFind(s1cRegionBlock, tLabel("s1c_region_block"))
     # RFC-0005 S8y: this test's runtime floor, by count (never wall time).
     checkpoint "S8y budgetOut=" & $symexTargetSolveStats.budgetOut &
                " declined=" & $symexTargetSolveStats.declined &

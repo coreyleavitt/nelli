@@ -34,6 +34,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs
@@ -106,31 +107,31 @@ proc sutNegativeIndex(s: string, i: int) =
 suite "symex RFC-chapulin-hardening SND-4 — string-index OOB IndexError (c==cpp)":
 
   test "SND-4-1 (tracer): s[5] on unconstrained s -> sxRaised IndexDefect (was sxUnsat)":
-    let r = symexFind(sutBareOobIndex, tIndexError())
+    let r = pinFind(sutBareOobIndex, tIndexError())
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
 
   test "SND-4-2 (Q1-spike repro): find(\":\") then s[i+1] -> sxRaised (scan-then-OOB reachable)":
-    let r = symexFind(sutScanThenOob, tIndexError())
+    let r = pinFind(sutScanThenOob, tIndexError())
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
 
   test "SND-4-3 (load-bearing precision): s.len>5 guard makes s[2] provably in-bounds -> sxUnsat":
-    let r = symexFind(sutBoundsSafe, tIndexError())
+    let r = pinFind(sutBoundsSafe, tIndexError())
     check r.status == sxUnsat
 
   test "SND-4-4a: continuing path keeps real sxSat semantics (len>3 and s[3]=='x')":
-    let r = symexFind(sutReachableInBounds, tLabel("hit"))
+    let r = pinFind(sutReachableInBounds, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len > 3
     check r.witness[0][3] == 'x'
 
   test "SND-4-4b: continuing path keeps real sxUnsat semantics (s[3] can't be 'x' and 'y')":
-    let r = symexFind(sutUnreachableContradiction, tLabel("contradiction_hit"))
+    let r = pinFind(sutUnreachableContradiction, tLabel("contradiction_hit"))
     check r.status == sxUnsat
 
   test "SND-4-5: negative index also forks IndexDefect -> sxRaised":
-    let r = symexFind(sutNegativeIndex, tIndexError())
+    let r = pinFind(sutNegativeIndex, tIndexError())
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
     check r.raisedWitness[1] < 0

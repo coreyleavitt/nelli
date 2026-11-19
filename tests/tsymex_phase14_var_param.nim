@@ -16,6 +16,7 @@
 ## sxSat, (c) the witness reflects pre-mutation state.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc incThenCheck(x: var int) =
   x = x + 1
@@ -24,7 +25,7 @@ proc incThenCheck(x: var int) =
 
 suite "symex Phase 14 cycle A7a — var T parameter support":
   test "var int SUT: witness is the INITIAL value (pre-mutation)":
-    let r = symexFind(incThenCheck, tLabel("incremented-to-42"))
+    let r = pinFind(incThenCheck, tLabel("incremented-to-42"))
     check r.status == sxSat
     # The walker reaches the target only when x+1 == 42, so the
     # initial-value witness must be x == 41.

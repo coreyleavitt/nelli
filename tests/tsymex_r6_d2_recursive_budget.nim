@@ -49,6 +49,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # D2-1 (RED pin): composite (array-typed) arm fields. FLAT field count
@@ -169,7 +170,7 @@ const d2WiderBudget = withSymexSettings() do (s: var SymexSettings):
 suite "symex round-6 D2 — recursive field-allocation budget (composite arm fields)":
 
   test "D2-1: array-typed arm fields (flat=4 clears old budget, recursive=160 exceeds it) declines":
-    let res = symexFind(sutCompositeArmBudget, tLabel("d2_composite_budget_reached"))
+    let res = pinFind(sutCompositeArmBudget, tLabel("d2_composite_budget_reached"))
     check res.status == sxUnknown
     check res.status != sxSat
     var hasClassified = false
@@ -187,21 +188,21 @@ suite "symex round-6 D2 — recursive field-allocation budget (composite arm fie
 suite "symex round-6 D2 — scalar-fields companion keeps the exact prior verdict":
 
   test "D2-2: scalar int arm fields at the same flat count as D2-1 still construct":
-    let res = symexFind(sutScalarArmBudget, tLabel("d2_scalar_budget_reached"))
+    let res = pinFind(sutScalarArmBudget, tLabel("d2_scalar_budget_reached"))
     check res.status == sxSat
     check res.witness[1] == 5
 
 suite "symex round-6 D2 — itSeq-fielded arms stay O(1), no over-decline":
 
   test "D2-3: seq[int]-fielded arms (recursive cost lands exactly at the default budget) still construct":
-    let res = symexFind(sutSeqArmBudget, tLabel("d2_seq_budget_reached"))
+    let res = pinFind(sutSeqArmBudget, tLabel("d2_seq_budget_reached"))
     check res.status == sxSat
     check res.witness[1] == 5
 
 suite "symex round-6 D2 — nested-tuple arm field exercises two-level recursion":
 
   test "D2-4: array nested inside a tuple inside an arm field (flat=2, recursive=82) declines":
-    let res = symexFind(sutNestedTupleArmBudget, tLabel("d2_nested_tuple_budget_reached"))
+    let res = pinFind(sutNestedTupleArmBudget, tLabel("d2_nested_tuple_budget_reached"))
     check res.status == sxUnknown
     check res.status != sxSat
     var hasClassified = false
@@ -214,7 +215,7 @@ suite "symex round-6 D2 — nested-tuple arm field exercises two-level recursion
 suite "symex round-6 D2 — budget override still lifts the recursive ceiling":
 
   test "D2-5: raising maxVariantConstructorFieldAllocs past 160 lets the D2-1 shape construct":
-    let res = symexFind(sutCompositeArmBudget, tLabel("d2_composite_budget_reached"), d2WiderBudget)
+    let res = pinFind(sutCompositeArmBudget, tLabel("d2_composite_budget_reached"), d2WiderBudget)
     check res.status == sxSat
     check res.witness[1] == 5
 

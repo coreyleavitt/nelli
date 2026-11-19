@@ -44,6 +44,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUT 1 — the opData-style shape: a scan loop (triggers string-backing) plus
@@ -155,15 +156,15 @@ proc noConsumingLoop(data: seq[byte]) =
 suite "symex round-6 B1 — string-backed seq[byte] params":
 
   test "B1-1: data[4 .. ^1] on a string-backed param proves SAT (was a crash pre-B1)":
-    let r = symexFind(opDataStyleSlice, tLabel("opdata_slice_sat"))
+    let r = pinFind(opDataStyleSlice, tLabel("opdata_slice_sat"))
     check r.status == sxSat
 
   test "B1-2: an unguarded payload[0] read finds a real IndexDefect (isIndex svString backstop is sound)":
-    let r = symexFind(opDataStyleSliceIndexUnsafe, tIndexError())
+    let r = pinFind(opDataStyleSliceIndexUnsafe, tIndexError())
     check r.status == sxRaised
 
   test "B1-3: data.len on a string-backed param proves SAT (iekStrLen parser dispatch)":
-    let r = symexFind(dataLenStringBacked, tLabel("data_len_sat"))
+    let r = pinFind(dataLenStringBacked, tLabel("data_len_sat"))
     check r.status == sxSat
 
   test "B1-4: a mutated seq[byte] param stays array-modeled (its add is modelled since RFC-0005 S8ar; not the string-mismatch fault)":
@@ -190,7 +191,7 @@ suite "symex round-6 B1 — string-backed seq[byte] params":
     ## The receiver staying array-modelled is still what is checked: a
     ## wrongly string-backed one reaches `iekSeqAdd`'s kind-mismatch decline
     ## ("expected svSeq") instead of the store.
-    let r = symexFind(mutatedByteSeqStaysArray, tLabel("mutated_stays_array"))
+    let r = pinFind(mutatedByteSeqStaysArray, tLabel("mutated_stays_array"))
     # RFC-0005 S8ar: `.add` stores at every backed element width
     # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
     # receiver staying ARRAY-modelled is now shown by the add succeeding: a
@@ -204,7 +205,7 @@ suite "symex round-6 B1 — string-backed seq[byte] params":
       check "expected svSeq" notin e.msg
 
   test "B1-4 diagnostic: the no-loop ground truth is sxSat (the add-width gap closed in RFC-0005 S8ar)":
-    let r = symexFind(addMutationNoLoopDiagnostic, tLabel("add_no_loop_sat"))
+    let r = pinFind(addMutationNoLoopDiagnostic, tLabel("add_no_loop_sat"))
     # RFC-0005 S8ar: `.add` stores at every backed element width
     # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
     # receiver staying ARRAY-modelled is now shown by the add succeeding: a
@@ -218,7 +219,7 @@ suite "symex round-6 B1 — string-backed seq[byte] params":
       check "expected svSeq" notin e.msg
 
   test "B1-5: a seq[byte] param with no consuming loop is unaffected (regression sweep)":
-    let r = symexFind(noConsumingLoop, tLabel("no_consuming_loop_sat"))
+    let r = pinFind(noConsumingLoop, tLabel("no_consuming_loop_sat"))
     check r.status == sxSat
 
 suite "symex round-6 B1 — walker version pin":

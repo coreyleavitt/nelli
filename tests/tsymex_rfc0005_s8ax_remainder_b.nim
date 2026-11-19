@@ -16,6 +16,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8ax_remainder_b")
@@ -32,7 +33,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -151,13 +152,13 @@ suite "RFC-0005 S8ax (5): an opaque routine's effects":
   test "a target past a call that always raises is not reached":
     ## RED before S8ax: sxSat, `errors` empty. The returning path is a
     ## replayed candidate now, and the replay raises.
-    let r = symexFind(sutOpaqueAlways, tLabel("oa"))
+    let r = pinFind(sutOpaqueAlways, tLabel("oa"))
     checkpoint show(r.errors)
     check r.status != sxSat
     check r.errors.hasKind(feOpaqueEffectHavoc)
   test "a raise reaches the boundary":
     ## RED before S8ax: sxUnsat, `errors` empty.
-    let r = symexFind(sutOpaqueRaiseBoundary, tRaisedExn("ValueError"))
+    let r = pinFind(sutOpaqueRaiseBoundary, tRaisedExn("ValueError"))
     checkpoint show(r.errors)
     check r.status == sxRaised
   test "a routine that may not return declines":
@@ -174,7 +175,7 @@ suite "RFC-0005 S8ax (5): an opaque routine's effects":
     ## S8be splits the raise into `S8axErr`, a candidate the replay settles:
     ## confirmed on the witness `4`, refuted on any other (the model the
     ## Z3 build picks decides which).
-    let r = symexFind(sutOpaqueSubtype, tLabel("osub"))
+    let r = pinFind(sutOpaqueSubtype, tLabel("osub"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status != sxUnsat
     check not r.errors.hasKind(feOpaqueCallUnmodelled)

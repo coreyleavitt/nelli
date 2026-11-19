@@ -14,6 +14,7 @@
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # The canonical R1 SUT: a `ref int` param, dereferenced and compared. The deref
 # `p[]` is the first real heap read. The heap is a free `Z3Array[Ref_T, BV64]`,
@@ -29,7 +30,7 @@ suite "symex Phase 15 R1 — ref sort + heap deref (Z3Array[Ref_T,T] select)":
   test "R1: SUT with ref int param materialises ref sort and deref returns sat witness":
     # The deref must NOT crash and must NOT degrade to sxUnknown — the ground
     # array select over the uninterpreted Ref_T sort is decidable.
-    let r = symexFind(derefIs42, tLabel("sat"))
+    let r = pinFind(derefIs42, tLabel("sat"))
     check r.status == sxSat
     # The witness reader (emitTyAndReader itRef) reconstructs a `ref int` whose
     # deref equals the value `p[]` took in the model — exactly the satisfying
@@ -47,5 +48,5 @@ suite "symex Phase 15 R1 — ref sort + heap deref (Z3Array[Ref_T,T] select)":
         if p[] == 42 and p[] == 43:
           symexTarget("both")
       result = true
-    let r = symexFind(contradiction, tLabel("both"))
+    let r = pinFind(contradiction, tLabel("both"))
     check r.status == sxUnsat

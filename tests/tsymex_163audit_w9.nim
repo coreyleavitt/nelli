@@ -25,6 +25,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # A named `int`-typed bound, so the range's base type unifies with `.len`'s
 # own `int` -- an un-annotated literal this large would default to `int64`
@@ -68,7 +69,7 @@ suite "#163 W9 -- overflow guard must key on EITHER operand's stamp":
   test "unstamped .len on the LEFT of a stamped param still finds the overflow":
     ## The load-bearing property. Was `sxUnsat` (false negative): the guard
     ## never even built the fork because `a` (`s.len`) carried no stamp.
-    let r = symexFind(lenTimesParam, tRaisedExn("OverflowDefect"))
+    let r = pinFind(lenTimesParam, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
@@ -77,7 +78,7 @@ suite "#163 W9 -- overflow guard must key on EITHER operand's stamp":
     ## Same values, operands swapped. This shape already worked before the
     ## fix (the guard reads `a`'s stamp, and `a` here is the promoted `x`);
     ## it must keep working identically after.
-    let r = symexFind(paramTimesLen, tRaisedExn("OverflowDefect"))
+    let r = pinFind(paramTimesLen, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
@@ -86,13 +87,13 @@ suite "#163 W9 -- overflow guard must key on EITHER operand's stamp":
     ## `x` is narrow enough that no achievable `.len` (capped at 1024) can
     ## push the product outside int64. The fix borrows a stamp; it must not
     ## invent a reachable defect that was never real.
-    let r = symexFind(lenTimesSmallParam, tRaisedExn("OverflowDefect"))
+    let r = pinFind(lenTimesSmallParam, tRaisedExn("OverflowDefect"))
     check r.status == sxUnsat
 
   test "the in-range case still reaches its ordinary target":
     ## Complement of the above -- the fix must not suppress the ordinary
     ## (non-defect) path either.
-    let r = symexFind(lenTimesSmallParam, tLabel("t"))
+    let r = pinFind(lenTimesSmallParam, tLabel("t"))
     check r.status == sxSat
 
 suite "#163 audit W9 -- walker version pin":

@@ -18,6 +18,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc findingFor(fs: seq[SymexFinding]; desc: string): SymexFinding =
   for f in fs:
@@ -60,7 +61,7 @@ suite "WA-1 -- symexFindAllWitnesses sees the user exception hierarchy":
     check raised == 1
 
   test "symexFind decides the assert behind a named except: sxUnsat":
-    let r = symexFind(w1Guarded, tRaisedExn("AssertionDefect"))
+    let r = pinFind(w1Guarded, tRaisedExn("AssertionDefect"))
     check r.status == sxUnsat
 
   test "symexFindAllWitnesses agrees: sfUnsat, not sfUnknown":
@@ -78,7 +79,7 @@ suite "WA-1 -- symexFindAllWitnesses sees the user exception hierarchy":
       check f.status == sfUnsat
 
   test "symexFind: an escaping user exception is a clean sxRaised":
-    let r = symexFind(w1Escapes, tRaisedExn("W1Err"))
+    let r = pinFind(w1Escapes, tRaisedExn("W1Err"))
     check r.status == sxRaised
     check r.raisedTypeId == "W1Err"
     check trusted(r)
@@ -146,6 +147,8 @@ const replayHintKinds = [feReplayCrashed, feReplayDeclined]
 suite "WA-6 -- symexFindAllWitnesses carries hints and diagnostics":
 
   test "symexFind: the replay hint is on the result":
+    # not pinned: w1QuitFirst calls quit (pinFind refuses it; the verdict is
+    # sxUnknown anyway)
     let r = symexFind(w1QuitFirst, tLabel("w1_quit"))
     check r.status == sxUnknown
     check r.errors.named(feGlobalHavoc)
@@ -190,7 +193,7 @@ suite "WA-6 -- symexFindAllWitnesses carries hints and diagnostics":
     check "feReplayRefuted" in renderReport(rep, ofText)
 
   test "cold and warm: the non-winning diagnostic is on the finding and rendered":
-    let r = symexFind(w1SiblingOverflow, tLabel("w1_hit"))
+    let r = pinFind(w1SiblingOverflow, tLabel("w1_hit"))
     check r.status == sxSat
     check r.diagnostics.len >= 1
     let db = inMemoryDatabase()
@@ -250,7 +253,7 @@ suite "WA-10 -- a cached sfRaised hit matches the cold finding":
   test "a SUT that also raises a user exception: the cached raise is the cold one":
     ## WA-1 and WA-10 together: the W1Err path neither taints the run (the
     ## hierarchy is known) nor survives the cache differently.
-    let r = symexFind(w1RaisesThenAsserts, tRaisedExn("AssertionDefect"))
+    let r = pinFind(w1RaisesThenAsserts, tRaisedExn("AssertionDefect"))
     check r.status == sxRaised
     check trusted(r)
     let db = inMemoryDatabase()

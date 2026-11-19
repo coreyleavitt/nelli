@@ -21,6 +21,7 @@ import nelli/symex
 import nelli/db
 import nelli/smt/[types, dsl, runtime]
 import nelli/engine/types
+import ./s8cu_helpers
 
 # --- CR-22: proc with BOTH a label and a doAssert ----------------------------
 proc withLabelAndAssert(x: int) =
@@ -54,7 +55,7 @@ suite "CR-22 regression — symexTarget label + doAssert coexistence":
     check raisedFindings.len >= 1
 
   test "symexFind tLabel still locates the label with a co-present doAssert":
-    let r = symexFind(withLabelAndAssert, tLabel("zero"))
+    let r = pinFind(withLabelAndAssert, tLabel("zero"))
     check r.status == sxSat
     check r.witness[0] == 0
 
@@ -68,7 +69,7 @@ suite "CR-22 regression — symexTarget label + doAssert coexistence":
     check raised.len >= 1
 
   test "symexFind tRaisedExn on standalone doAssert: sxRaised — E6 baseline":
-    let r = symexFind(standaloneAssert, tRaisedExn("AssertionDefect"))
+    let r = pinFind(standaloneAssert, tRaisedExn("AssertionDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
     check r.raisedWitness[0] <= 0

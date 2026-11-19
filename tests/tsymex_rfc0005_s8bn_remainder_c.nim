@@ -18,6 +18,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/dsl_parser
+import ./s8cu_helpers
 from ./s8cu_helpers import pinDecline, cellKey, faGeneric
 
 const declKey = cellKey(faGeneric, "s8bn_remainder_c")
@@ -30,7 +31,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 template clean(fn: typed, lbl: string, want: SymexStatusKind,
                st: SymexSettings = SymexSettings()): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl), st)
+    let r = pinFind(fn, tLabel(lbl), st)
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
@@ -97,7 +98,7 @@ suite "S8bn (5): an always-raising closure is a raise":
     discard clean(sutCloRaiseVal, "clv", sxSat)
     discard clean(sutCloRaiseVal, "clk", sxSat)
     discard clean(sutCloRaiseVal, "clv_dead", sxUnsat)
-    let r = symexFind(sutCloEscape, tRaisedExn("ValueError"))
+    let r = pinFind(sutCloEscape, tRaisedExn("ValueError"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxRaised
     for e in r.errors: check e.severity == sevHint

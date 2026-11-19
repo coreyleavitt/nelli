@@ -55,6 +55,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # Shared scan helper (B4-shaped accumulating scan over a seq[byte] receiver —
@@ -104,7 +105,7 @@ proc sutW1CrossProcLeak(data: seq[byte], other: seq[byte]) =
 suite "symex round-6 R4 -- W1 cross-proc leak closed":
 
   test "R4-W1: an unrelated callee param sharing the entry's receiver name gets its OWN honest classification -> sxSat":
-    let r = symexFind(sutW1CrossProcLeak, tLabel("w1_cross_proc_leak"))
+    let r = pinFind(sutW1CrossProcLeak, tLabel("w1_cross_proc_leak"))
     check r.status == sxSat
     check r.witness[1][0] == 42'u8   ## `other[0] == 42`, read honestly as an array
 
@@ -154,7 +155,7 @@ proc sutN2NameCollision(data: seq[byte]) =
 suite "symex round-6 R4 -- N2 same-proc name-collision closed":
 
   test "R4-N2: an unrelated same-named local literal does not inherit svInt promotion -> sxSat (real value 7 survives .add)":
-    let r = symexFind(sutN2NameCollision, tLabel("n2_collision_add"))
+    let r = pinFind(sutN2NameCollision, tLabel("n2_collision_add"))
     check r.status == sxSat
 
 # =============================================================================
@@ -180,7 +181,7 @@ proc sutW2aVarAliasedMutation(data: var seq[byte]) =
 suite "symex round-6 R4 -- W2a var-aliased mutation veto widened":
 
   test "R4-W2a: a var-aliased helper-call mutation excludes the receiver from string-backing -> array-modelled, no crash":
-    let r = symexFind(sutW2aVarAliasedMutation, tLabel("w2a_honest_verdict"))
+    let r = pinFind(sutW2aVarAliasedMutation, tLabel("w2a_honest_verdict"))
     # The receiver correctly stays ARRAY-modeled (not string-backed) post-fix
     # -- reaching `iekSeqAdd`'s PRE-EXISTING, width-8-unsupported degrade
     # (`.add` mutation lowering is width-64-only, a documented pre-existing
@@ -233,7 +234,7 @@ proc sutW2bTwoHopClosure(data: var seq[byte]) =
 suite "symex round-6 R4 -- W2b two-hop mutation closure":
 
   test "R4-W2b: a two-hop var-aliased mutation (through an intermediate proc) is still excluded -> array-modelled, no crash":
-    let r = symexFind(sutW2bTwoHopClosure, tLabel("w2b_two_hop_closure"))
+    let r = pinFind(sutW2bTwoHopClosure, tLabel("w2b_two_hop_closure"))
     # Same reasoning as R4-W2a: the width-8 decline (not a kind-mismatch
     # decline) is itself the proof `s` stayed array-modeled two hops out.
     # RFC-0005 S8ar: `.add` stores at every backed element width
@@ -292,7 +293,7 @@ proc sutW3ResolverRegression(data: seq[byte], flag: bool, n: int) =
 suite "symex round-6 R4 -- W3 resolveRoutineImpl regression":
 
   test "R4-W3: a generic (non-scan-shaped) callee reached via the one-level call trace resolves without crashing":
-    let r = symexFind(sutW3ResolverRegression, tLabel("w3_resolver_regression"))
+    let r = pinFind(sutW3ResolverRegression, tLabel("w3_resolver_regression"))
     check r.status == sxSat
 
 # =============================================================================
@@ -309,7 +310,7 @@ proc sutRegressionOneLevelTrace(data: seq[byte]) =
 suite "symex round-6 R4 -- regression: B7r one-level call trace still promotes":
 
   test "R4-REG: entry with no scan of its own, promoted via the callee's own qualifying loop -> sxSat":
-    let r = symexFind(sutRegressionOneLevelTrace, tLabel("regression_trace_sat"))
+    let r = pinFind(sutRegressionOneLevelTrace, tLabel("regression_trace_sat"))
     check r.status == sxSat
     check r.witness[0][0] == byte('A')
     check r.witness[0][1] == byte('B')

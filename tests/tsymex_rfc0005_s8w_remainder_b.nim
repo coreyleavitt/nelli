@@ -24,6 +24,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -109,7 +110,7 @@ suite "S8w (3): a B4 offset whose promotion is turned down stays faithful":
     try: sutBitB4(@[], high(int))
     except OverflowDefect: raised = true
     check raised
-    let r = symexFind(sutBitB4, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sutBitB4, tRaisedExn("OverflowDefect"))
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -120,7 +121,7 @@ suite "S8w (3): a B4 offset whose promotion is turned down stays faithful":
       check real == "OverflowDefect"
 
   test "a bit-banned offset's hit is reachable, and replays":
-    let r = symexFind(sutBitB4, tLabel("s8w_bit_b4"))
+    let r = pinFind(sutBitB4, tLabel("s8w_bit_b4"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -132,7 +133,7 @@ suite "S8w (3): a B4 offset whose promotion is turned down stays faithful":
   test "a mask on a signed offset keeps its sign":
     ## Probe: `(-1 and -2) < 0`.
     check (-1 and -2) < 0
-    let r = symexFind(sutSignBitB4, tLabel("s8w_signbit_b4"))
+    let r = pinFind(sutSignBitB4, tLabel("s8w_signbit_b4"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -140,7 +141,7 @@ suite "S8w (3): a B4 offset whose promotion is turned down stays faithful":
 
   test "a shift on a banned offset is modelled":
     ## RED: the walker's "shift on promoted Z3Int" assertion.
-    let r = symexFind(sutShiftB4, tLabel("s8w_shift_b4"))
+    let r = pinFind(sutShiftB4, tLabel("s8w_shift_b4"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -152,7 +153,7 @@ suite "S8w (3): a B4 offset whose promotion is turned down stays faithful":
   test "a mask on an unstamped int keeps its sign":
     ## Probe: `"b".find('a') == -1` and `(-1 and -2) < 0`.
     check "b".find('a') == -1
-    let r = symexFind(sutFindMask, tLabel("s8w_findmask"))
+    let r = pinFind(sutFindMask, tLabel("s8w_findmask"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -161,7 +162,7 @@ suite "S8w (3): a B4 offset whose promotion is turned down stays faithful":
   test "a shift on an unstamped int is modelled":
     ## Probe: `(-1 shr 1) == -1`.
     check (-1 shr 1) == -1
-    let r = symexFind(sutFindShift, tLabel("s8w_findshift"))
+    let r = pinFind(sutFindShift, tLabel("s8w_findshift"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -181,7 +182,7 @@ suite "S8w (4): the base's B4 OverflowDefect finding":
     check real == "IndexDefect"
     template checkB4(tgt: static SymexTarget) =
       block:
-        let r = symexFind(sutB4, tgt)
+        let r = pinFind(sutB4, tgt)
         checkpoint show(r.errors)
         check r.status == sxRaised
         if r.status == sxRaised:

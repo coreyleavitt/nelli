@@ -29,6 +29,7 @@ import std/[unittest, math, strutils, tables]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 const noReplay = SymexSettings(replay: false)
 const outOfReach = 123456
@@ -43,13 +44,13 @@ proc show(errs: seq[SymexErrorInfo]): string =
 
 template pinFree(sut: untyped; label: string; kind: SymexErrorKind) =
   ## The two-sided pin described in the header.
-  let off = symexFind(sut, tLabel(label), noReplay)
+  let off = pinFind(sut, tLabel(label), noReplay)
   checkpoint "replay off: " & $off.status & " " & show(off.errors)
   check off.status == sxUnknown
   check off.errors.hasKind(kind)
   check scIncomplete notin off.soundness.runTaint
   check unplacedDeclines(off.errors).len == 0
-  let on = symexFind(sut, tLabel(label))
+  let on = pinFind(sut, tLabel(label))
   checkpoint "replay on: " & $on.status & " " & show(on.errors)
   check on.status == sxUnknown
   check on.errors.hasKind(kind)
@@ -185,12 +186,12 @@ suite "introduction invariant: feTableIterOrder":
   test "the order is free: each key can come first, with no replay to choose":
     ## Nim visits exactly one of the two orders on this table. With replay
     ## off, both are candidates: the order's symbol has no constraint.
-    let a = symexFind(introTableFirst1, tLabel("intro_table_first_1"), noReplay)
+    let a = pinFind(introTableFirst1, tLabel("intro_table_first_1"), noReplay)
     checkpoint $a.status & " " & show(a.errors)
     check a.status == sxUnknown
     check a.errors.hasKind(feTableIterOrder)
     check scIncomplete notin a.soundness.runTaint
-    let b = symexFind(introTableFirst2, tLabel("intro_table_first_2"), noReplay)
+    let b = pinFind(introTableFirst2, tLabel("intro_table_first_2"), noReplay)
     checkpoint $b.status & " " & show(b.errors)
     check b.status == sxUnknown
     check b.errors.hasKind(feTableIterOrder)
@@ -199,8 +200,8 @@ suite "introduction invariant: feTableIterOrder":
   test "replay separates them: the order Nim uses is sxSat, the other refuted":
     let real = introTableOrder(1, 2)
     check real in [1, 2]
-    let a = symexFind(introTableFirst1, tLabel("intro_table_first_1"))
-    let b = symexFind(introTableFirst2, tLabel("intro_table_first_2"))
+    let a = pinFind(introTableFirst1, tLabel("intro_table_first_1"))
+    let b = pinFind(introTableFirst2, tLabel("intro_table_first_2"))
     checkpoint $a.status & " " & show(a.errors)
     checkpoint $b.status & " " & show(b.errors)
     let (yes, no) = if real == 1: (a, b) else: (b, a)

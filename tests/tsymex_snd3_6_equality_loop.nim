@@ -68,6 +68,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # Equality regression — `s[i] == 'a'` in a loop guard is NOT an ordering
 # comparison (CR-17(a) only guards `<`/`<=`/`>`/`>=`) and must keep resolving
@@ -82,7 +83,7 @@ proc sutEqualityLoopGuard(s: string) =
 suite "symex RFC-chapulin-hardening SND-3 — equality-guard regression (known hanger)":
 
   test "SND-3-6 (equality regression): s[i]=='a' loop guard still resolves to a real sxSat verdict":
-    let r = symexFind(sutEqualityLoopGuard, tLabel("equality_loop_hit"))
+    let r = pinFind(sutEqualityLoopGuard, tLabel("equality_loop_hit"))
     check r.status == sxSat
     check r.witness[0].len >= 3
     check r.witness[0][0] == 'a'

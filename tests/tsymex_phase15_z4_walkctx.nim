@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Z4: WalkCtx.found Option[RawResult] -> seq[RawResult]
 # (see docs/symex/RFC-phase15-reconciliation.md §F / Cluster Z, ADR-0007).
@@ -24,13 +25,13 @@ proc z4branchy(x: int) =
 suite "symex Phase 15 — Z4 found:seq migration (behavioral)":
 
   test "sat path: found accumulates an sxSat finding":
-    let r = symexFind(z4sat, tLabel("hit"))
+    let r = pinFind(z4sat, tLabel("hit"))
     check r.status == sxSat
 
   test "unreachable target: empty found -> sxUnsat":
-    let r = symexFind(z4unsat, tLabel("never"))
+    let r = pinFind(z4unsat, tLabel("never"))
     check r.status == sxUnsat
 
   test "branchy SUT: target on a later branch still found":
-    let r = symexFind(z4branchy, tLabel("deep"))
+    let r = pinFind(z4branchy, tLabel("deep"))
     check r.status == sxSat

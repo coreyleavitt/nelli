@@ -1,6 +1,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 # Phase 16 R16-3 — div/mod-by-zero DivByZeroDefect raise fork.
 #
@@ -34,7 +35,7 @@ suite "symex Phase 16 R16-3 — div DivByZeroDefect raise fork":
   test "R16-3-1: unconstrained a div b → sxRaised(DivByZeroDefect)":
     ## Before R16-3: tRaisedExn("DivByZeroDefect") yields sxUnsat.
     ## After R16-3: the raise fork is opened → sxRaised.
-    let r = symexFind(sd, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(sd, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
@@ -52,7 +53,7 @@ proc sm(a, b: int) =
 suite "symex Phase 16 R16-3 — mod DivByZeroDefect raise fork":
 
   test "R16-3-2: unconstrained a mod b → sxRaised(DivByZeroDefect)":
-    let r = symexFind(sm, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(sm, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
@@ -73,7 +74,7 @@ suite "symex Phase 16 R16-3 — DivByZeroDefect catchability":
 
   test "R16-3-3: div in try/except DivByZeroDefect is caught → sxSat":
     ## The raise-fork enters the except handler; handler body reaches the target.
-    let r = symexFind(sc_caught, tLabel("tcaught"))
+    let r = pinFind(sc_caught, tLabel("tcaught"))
     check r.status == sxSat
 
 # ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ suite "symex Phase 16 R16-3 — guarded short-circuit (primary acceptance gate)"
   test "R16-3-4: b != 0 and a div b > 5 → NO DivByZeroDefect (guard eliminates b==0)":
     ## Before step 5 (rhsHasInlineDefectFork fix): false-positive sxRaised.
     ## After step 5: b==0 is short-circuit-guarded → sxUnsat for tRaisedExn.
-    let r = symexFind(sg, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(sg, tRaisedExn("DivByZeroDefect"))
     ## RFC-0005 S8i: a defect always surfaces, whatever the target's type
     ## filter, and `low(int) div -1` now raises `OverflowDefect` (Nim's
     ## check; it was unmodelled). The guard's claim is that NO
@@ -118,7 +119,7 @@ suite "symex Phase 16 R16-3 — LHS div raises (not over-guarded)":
 
   test "R16-3-5: a div b > 5 and b != 0 → DivByZeroDefect still reachable (LHS div)":
     ## div is in the LHS — evaluated unconditionally → raise is reachable.
-    let r = symexFind(sl, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(sl, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
@@ -143,7 +144,7 @@ suite "symex Phase 16 R16-3 — acDivByZero gate":
       var x = defaultSymexSettings()
       x.defectExclusions.incl dkDivByZeroDefect
       x
-    let r = symexFind(sd_off, tRaisedExn("DivByZeroDefect"), s)
+    let r = pinFind(sd_off, tRaisedExn("DivByZeroDefect"), s)
     ## RFC-0005 S8i: acOverflow stays on, so `low(int) div -1`'s
     ## `OverflowDefect` (always surfaced) is the one finding left; no
     ## `DivByZeroDefect` is forked with the gate off.
@@ -166,5 +167,5 @@ suite "symex Phase 16 R16-3 — constant nonzero divisor":
 
   test "R16-3-7: a div 2 → NO DivByZeroDefect (2 == 0 is UNSAT)":
     ## The divisor==0 predicate is `2 == 0` which Z3 can immediately refute.
-    let r = symexFind(sc_const, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(sc_const, tRaisedExn("DivByZeroDefect"))
     check r.status == sxUnsat

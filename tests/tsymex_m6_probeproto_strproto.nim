@@ -46,6 +46,7 @@
 import std/[unittest, strutils, unicode]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---- individual literal-equality SUTs (one per newly-added kind) -----------
 
@@ -108,12 +109,12 @@ suite "symex RFC M6 — probeProto svString proto for toLower/toUpper/radixFmt/r
     check r.witness[0].toUpperAscii == "ABC"
 
   test "toHex(x: uint8) == \"FF\" -> sxSat, witness x == 255 (A8; regression)":
-    let r = symexFind(hexEqFF, tLabel("hex_eq"))
+    let r = pinFind(hexEqFF, tLabel("hex_eq"))
     check r.status == sxSat
     check r.witness[0] == 255
 
   test "$r == \"A\" -> sxSat, witness r == 0x41 (A7-S2; regression)":
-    let r = symexFind(runeEqA, tLabel("rune_eq"))
+    let r = pinFind(runeEqA, tLabel("rune_eq"))
     check r.status == sxSat
     check r.witness[0] == 0x41
 
@@ -123,7 +124,7 @@ suite "symex RFC M6 — probeProto svString proto for toLower/toUpper/radixFmt/r
     check r.witness[0].toLowerAscii != "xyz"
 
   test "toHex(x) != \"GG\" -> sxSat for any x (\"GG\" is not a valid hex-digit string)":
-    let r = symexFind(hexNeGG, tLabel("hex_ne"))
+    let r = pinFind(hexNeGG, tLabel("hex_ne"))
     check r.status == sxSat
     check toHex(r.witness[0]) != "GG"
 

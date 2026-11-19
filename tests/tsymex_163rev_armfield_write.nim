@@ -47,6 +47,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type
   # `nkB` declared FIRST so `low(NKind) == nkB`: `new(Node)`'s default
@@ -103,7 +104,7 @@ suite "#163 review R17 -- a write-only ranged arm field's witness stays inside i
     ## only `p.kind == nkA` is compared -- so the verdict is correctly
     ## `sxSat` (any x, y with x + y in [1, 100] reaches "hit"); only the
     ## WITNESS's `v` field was ever liable to fall outside [1, 100].
-    let r = symexFind(writeOnlyArmField, tLabel("hit"))
+    let r = pinFind(writeOnlyArmField, tLabel("hit"))
     check r.status == sxSat
     check not r.witness[0].isNil
     let node = r.witness[0][]
@@ -118,7 +119,7 @@ suite "#163 review R17 non-regression -- a field that IS read back still solves 
     ## the path, so the input `v` is any in-range value (this test used to
     ## pin the written 55). Replaying the SUT on the witness takes the
     ## `nkA` branch and performs the write, which is the observable proof.
-    let r = symexFind(writeThenReadSameRef, tLabel("readback"))
+    let r = pinFind(writeThenReadSameRef, tLabel("readback"))
     check r.status == sxSat
     check not r.witness[0].isNil
     let node = r.witness[0][]

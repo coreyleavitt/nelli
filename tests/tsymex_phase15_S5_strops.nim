@@ -21,6 +21,7 @@ import std/unittest
 import std/strutils  ## replace/split/join on strings
 import nelli/symex
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 # --- replace: every occurrence -- "foofoo" -> "barbar" ---
 proc replaceFoo(s: string) =
@@ -73,7 +74,7 @@ suite "symex Phase 15 S5 — string replace/split/join":
     ## RFC-0005 S8c: this pin asserted the first-occurrence value `"barfoo"`
     ## as sxSat -- a false verdict (Nim's `replace` replaces every
     ## occurrence). The all-occurrence model makes it unreachable.
-    let r = symexFind(replaceFirstOnly, tLabel("hit"))
+    let r = pinFind(replaceFirstOnly, tLabel("hit"))
     check r.status != sxSat
 
   test "replace: emits seZ3VersionMissing on this Z3 build (no crash)":
@@ -82,7 +83,7 @@ suite "symex Phase 15 S5 — string replace/split/join":
     ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
     ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
     ## the classified kind is still recorded.
-    let r = symexFind(replaceFoo, tLabel("hit"))
+    let r = pinFind(replaceFoo, tLabel("hit"))
     check r.status == sxSat
     check rfc0005RawStatus == sxUnknown
     check r.witness[0] == "foofoo"
@@ -90,27 +91,27 @@ suite "symex Phase 15 S5 — string replace/split/join":
     check r.errors[0].kind == seZ3VersionMissing
 
   test "split: split(\"a,b,c\",\",\") has len 3 (concrete-inline path)":
-    let r = symexFind(splitConcreteLen, tLabel("hit"))
+    let r = pinFind(splitConcreteLen, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "x"
 
   test "split: split(\"a,b,c\",\",\") parts are a,b,c (concrete-inline, no quantifier)":
-    let r = symexFind(splitConcreteElem, tLabel("hit"))
+    let r = pinFind(splitConcreteElem, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "x"
 
   test "split empty-sep: split(\"abc\",\"\") yields @[\"abc\"] (S8g)":
-    let r = symexFind(splitEmptySep, tLabel("hit"))
+    let r = pinFind(splitEmptySep, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "x"
 
   test "join: split(\"a,b,c\",\",\").join(\",\") == \"a,b,c\" round-trip":
-    let r = symexFind(splitJoinRoundtrip, tLabel("hit"))
+    let r = pinFind(splitJoinRoundtrip, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "x"
 
   test "split general symbolic: classified seZ3StringIncomplete → sxUnknown (no hang)":
-    let r = symexFind(splitSymbolic, tLabel("hit"))
+    let r = pinFind(splitSymbolic, tLabel("hit"))
     check r.status == sxUnknown
     check r.errors.len >= 1
     check r.errors[0].kind == seZ3StringIncomplete

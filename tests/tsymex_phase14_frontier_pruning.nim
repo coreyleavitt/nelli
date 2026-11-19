@@ -22,6 +22,7 @@ from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 proc multiBranchReachable(x: int) =
   # 4 nested ifs ⇒ frontier grows from 1 → up to 16 paths.
@@ -45,7 +46,7 @@ proc multiBranchUnreachable(x: int) =
 
 suite "symex Phase 14 cycle C3 — frontier pruning":
   test "default settings (maxFrontierSize=256): well under the cap, reaches deep target":
-    let r = symexFind(multiBranchReachable, tLabel("deep-hit"))
+    let r = pinFind(multiBranchReachable, tLabel("deep-hit"))
     check r.status == sxSat
 
   test "tight maxFrontierSize=1 on UNSAT target: walker prunes + sxUnknown":
@@ -53,10 +54,10 @@ suite "symex Phase 14 cycle C3 — frontier pruning":
       var s = defaultSymexSettings()
       s.budget.maxFrontierSize = 1
       s
-    let r = symexFind(multiBranchUnreachable, tLabel("never"), tightSettings)
+    let r = pinFind(multiBranchUnreachable, tLabel("never"), tightSettings)
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedPrune)
 
   test "unlimited frontier on UNSAT target: sxUnsat (control)":
-    let r = symexFind(multiBranchUnreachable, tLabel("never"))
+    let r = pinFind(multiBranchUnreachable, tLabel("never"))
     check r.status == sxUnsat

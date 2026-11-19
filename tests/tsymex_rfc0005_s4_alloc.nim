@@ -45,6 +45,7 @@ import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
 import audit_scan_utils
+import ./s8cu_helpers
 
 proc kindNames(errs: seq[SymexErrorInfo]): seq[string] =
   for e in errs: result.add $e.kind
@@ -216,25 +217,25 @@ suite "RFC-0005 S4 (a) -- the allocDegrade funnel's classOf rows":
 suite "RFC-0005 S4 (b) -- over-taint-only UNSAT (§0.3's recovered capability)":
 
   test "the exhibit shape flips sxUnknown -> sxUnsat, over-taint-only by checkUnsatOverTaintOnly":
-    let r = symexFind(s4DeadFreshSymbol, tLabel("s4_dead_fresh_symbol"))
+    let r = pinFind(s4DeadFreshSymbol, tLabel("s4_dead_fresh_symbol"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[heUnsupportedPointeeRead]
 
   test "a contradiction THROUGH the fresh value is still sxUnsat (the symbol is free, not pinned)":
-    let r = symexFind(s4DeadThroughValue, tLabel("s4_dead_through_value"))
+    let r = pinFind(s4DeadThroughValue, tLabel("s4_dead_through_value"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[heUnsupportedPointeeRead]
 
   test "two reads of one cell are two fresh symbols: the contradiction is a spurious candidate -> sxUnknown, never sxUnsat":
-    let r = symexFind(s4TwoReadsSpurious, tLabel("s4_two_reads_spurious"))
+    let r = pinFind(s4TwoReadsSpurious, tLabel("s4_two_reads_spurious"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "a target reachable ONLY through the fresh value is a candidate: sxUnknown, never sxSat or sxUnsat (§2.3 rule 4)":
-    let r = symexFind(s4LiveThroughValue, tLabel("s4_live_through_value"))
+    let r = pinFind(s4LiveThroughValue, tLabel("s4_live_through_value"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(heUnsupportedPointeeRead)
@@ -246,14 +247,14 @@ suite "RFC-0005 S4 (b) -- over-taint-only UNSAT (§0.3's recovered capability)":
 suite "RFC-0005 S4 (c) -- introduction invariant: the fresh symbol carries no constraint":
 
   test "two cells' reads are independent symbols -- never sxUnsat (RED before freshDegradeName)":
-    let r = symexFind(s4TwoCells, tLabel("s4_two_cells"))
+    let r = pinFind(s4TwoCells, tLabel("s4_two_cells"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
     check r.status == sxUnknown           ## a candidate (rule 4) until S10's replay
     check r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "repeat hits of the site across loop iterations are independent -- never sxUnsat":
-    let r = symexFind(s4TwoCellsLoop, tLabel("s4_two_cells_loop"))
+    let r = pinFind(s4TwoCellsLoop, tLabel("s4_two_cells_loop"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
 
@@ -329,7 +330,7 @@ suite "RFC-0005 S4 (d) -- the funnel's substituting arms stay ⊤":
     # axis), so the SUT's own FieldDefect -- `a1` read while `kindA` is
     # `s4KindA2`, which real Nim raises -- is the verdict, and it carries no
     # taint.
-    let r = symexFind(s4MultiVariantDead, tLabel("s4_multivariant_dead"))
+    let r = pinFind(s4MultiVariantDead, tLabel("s4_multivariant_dead"))
     checkpoint($kindNames(r.errors))
     check r.status == sxRaised
     check "FieldDefect" in r.raisedTypeId

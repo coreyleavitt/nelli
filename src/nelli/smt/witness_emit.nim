@@ -116,6 +116,11 @@ proc stdName(name: string): NimNode =
   of "newRefWitness": bindSym"newRefWitness"      # RFC-0005 S8h
   of "resolveRef": bindSym"resolveRef"            # RFC-0005 S8h
   of "refElemPos": bindSym"refElemPos"            # RFC-0005 S8h
+  of "registerCellType": bindSym"registerCellType"  # RFC-0016 INT-81
+  of "buildCellAs": bindSym"buildCellAs"            # RFC-0016 INT-81
+  of "WitnessCellBuild": bindSym"WitnessCellBuild"  # RFC-0016 INT-81
+  of "pointer": bindSym"pointer"                  # RFC-0016 INT-83
+  of "resolvePointer": bindSym"resolvePointer"    # RFC-0016 INT-83
   else:
     error("symex RFC-0005 S8e: stdName has no binding for `" & name & "`")
     nil
@@ -165,7 +170,10 @@ proc refWitnessCtx(witId: NimNode): NimNode =
   else: newCall(stdName("newRefWitness"), witId)
 
 proc resolveRefCall(refTy: NimNode; pos, witId: NimNode): NimNode =
-  ## RFC-0005 S8h. `resolveRef[refTy](ctx, pos)`.
+  ## RFC-0005 S8h. `resolveRef[refTy](ctx, pos)`. RFC-0016 INT-83: a
+  ## `pointer` position is `resolvePointer(ctx, pos)`.
+  if refTy.kind in {nnkIdent, nnkSym} and refTy.strVal == "pointer":
+    return newCall(stdName("resolvePointer"), refWitnessCtx(witId), pos)
   newCall(nnkBracketExpr.newTree(stdName("resolveRef"), refTy),
           refWitnessCtx(witId), pos)
 
@@ -194,6 +202,7 @@ proc resolvesByRef*(ty: IRType): bool =
   ## `resolveRef`: always, for a `ref`, unless it is a recursive field whose
   ## type reached the IR without a symbol; for a `ptr`, when its pointee is
   ## an object or a scalar `alloc0` can hold.
+  if isPointerTy(ty): return true   # RFC-0016 INT-83: `resolvePointer`
   let pointee = refPointeeOf(ty)
   if isRecursionPlaceholder(pointee) and witnessTypeSym(pointee) == nil:
     return false
@@ -209,6 +218,7 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   ## pointee is an empty placeholder carrying only the symbol it was
   ## classified from -- the alias itself, or the object an inline `ref Obj`
   ## points to.
+  if isPointerTy(ty): return stdName("pointer")   # RFC-0016 INT-83
   let pointee = refPointeeOf(ty)
   proc wrapped(inner: NimNode): NimNode =
     if ty.kind == itRef: nnkRefTy.newTree(inner) else: nnkPtrTy.newTree(inner)
@@ -1023,6 +1033,76 @@ proc irTypeHoldsPtr(t: IRType; depth = 0): bool =
   of itDistinct: irTypeHoldsPtr(t.distinctBase, depth + 1)
   else: false
 
+proc collectHierPointees(ty: IRType; acc: var seq[IRType];
+                         seen: var HashSet[string]; depth = 0) =
+  ## RFC-0016 INT-81. Every hierarchy object type a `ref`/`ptr` position in
+  ## the type tree `ty` points to (a recursive field's placeholder too: it
+  ## carries its chain).
+  if ty == nil or depth > 16: return
+  case ty.kind
+  of itRef, itPtr:
+    let p = refPointeeOf(ty)
+    let c = hierChain(p)
+    if c.len > 0 and not seen.containsOrIncl(c.join("/")): acc.add p
+    collectHierPointees(p, acc, seen, depth + 1)
+  of itTuple:
+    for f in ty.fields: collectHierPointees(f, acc, seen, depth + 1)
+  of itArray: collectHierPointees(ty.elemTy, acc, seen, depth + 1)
+  of itSeq: collectHierPointees(ty.seqElemTy, acc, seen, depth + 1)
+  of itDistinct: collectHierPointees(ty.distinctBase, acc, seen, depth + 1)
+  of itVariant:
+    for f in ty.vPlainFieldTypes: collectHierPointees(f, acc, seen, depth + 1)
+    for arm in ty.vArms:
+      for f in arm.fieldTypes: collectHierPointees(f, acc, seen, depth + 1)
+  of itMultiVariant:
+    for f in ty.mvPlainFieldTypes: collectHierPointees(f, acc, seen, depth + 1)
+    for ax in ty.mvAxes:
+      for arm in ax.arms:
+        for f in arm.fieldTypes: collectHierPointees(f, acc, seen, depth + 1)
+  else: discard
+
+proc witnessCellTypes*(params: seq[IRParam]): seq[IRType] =
+  ## RFC-0016 INT-81. The dynamic types a cell of a witness of `params` may
+  ## have: every hierarchy object type its positions point to, and every
+  ## type of those hierarchies whose run-type tag a walk tests
+  ## (`hierFamily`), each once.
+  var seen: HashSet[string]
+  var direct: seq[IRType]
+  for p in params: collectHierPointees(p.ty, direct, seen)
+  var roots: seq[string]
+  for t in direct:
+    let r = hierChain(t)[0]
+    if r notin roots: roots.add r
+  result = direct
+  for r in roots:
+    for t in hierFamily(r):
+      if not seen.containsOrIncl(hierChain(t).join("/")): result.add t
+
+proc cellTypeNameable*(t: IRType): bool =
+  ## RFC-0016 INT-81. A witness can build a cell as `t`: a symbol names it
+  ## (`keyedBySym`) wherever the witness is emitted.
+  witnessTypeSym(t) != nil
+
+proc emitCellTypes(params: seq[IRParam]; ctxId, witId: NimNode): NimNode =
+  ## RFC-0016 INT-81. Register with the witness's `RefWitness` each dynamic
+  ## type a cell may have (`witnessCellTypes`): its run-type tag codes and
+  ## its builder (`buildCellAs`), nil for a type no symbol names.
+  result = newStmtList()
+  for t in witnessCellTypes(params):
+    let c = hierChain(t)
+    # A root needs none: a cell no deeper is built as its position's type.
+    if c.len < 2: continue
+    var codes = nnkBracket.newTree()
+    for i in 1 ..< c.len: codes.add newLit(inheritTagCode(c[i]))
+    let build =
+      if cellTypeNameable(t):
+        newTree(nnkBracketExpr, stdName("buildCellAs"),
+                refWitnessTypeNode(tRef(t), "", witId))
+      else:
+        newCall(stdName("WitnessCellBuild"), newNilLit())
+    result.add newCall(stdName("registerCellType"), ctxId,
+                       nnkPrefix.newTree(ident"@", codes), build)
+
 proc emitWitnessTuple*(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode) =
   ## The witness tuple of `params` over the `RawWitness` `witId`: (its type,
   ## its value). RFC-0005 S8h: every `ref`/`ptr` position in it resolves
@@ -1053,10 +1133,14 @@ proc emitWitnessTuple*(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode)
   # `(pi: ptr int; q: Q)` built `pi` first and left it its own cell, so the
   # replay refuted a sound `sxSat`. The tuple keeps parameter order.
   var stmts = newStmtList(newLetStmt(ctxId, ctxInit))
+  stmts.add emitCellTypes(params, ctxId, witId)   # RFC-0016 INT-81
   var ids = newSeq[NimNode](params.len)
-  for rank in 0 .. 2:
+  for rank in 0 .. 3:
     for i, p in params:
-      let r = if p.ty != nil and p.ty.kind == itPtr: 2
+      # RFC-0016 INT-83: a `pointer` after every typed position, whose cell
+      # it may be.
+      let r = if isPointerTy(p.ty): 3
+              elif p.ty != nil and p.ty.kind == itPtr: 2
               elif irTypeHoldsPtr(p.ty): 1
               else: 0
       if r != rank: continue

@@ -36,6 +36,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs -- two-tag shape shared by the A1-construct + reassign pins (mirrors
@@ -178,26 +179,26 @@ proc sutWitnessConstructSymDisc(b: byte, n: int) =
 suite "symex round-6 A4 -- A1 construction then literal-tag reassign":
 
   test "A4-1a: a branch-changing reassign after A1 construction raises FieldDefect (S8f; was a zero-init sxSat)":
-    let res = symexFind(sutConstructLitThenReassignLit, tLabel("lit_reassign_zero_init"))
+    let res = pinFind(sutConstructLitThenReassignLit, tLabel("lit_reassign_zero_init"))
     check res.status == sxRaised
     check "FieldDefect" in res.raisedTypeId
     expect FieldDefect:
       sutConstructLitThenReassignLit(0)
 
   test "A4-1b: the stale PRE-reassign arm is never reached: the reassign raises first (S8f)":
-    let res = symexFind(sutConstructLitThenReassignLitStaleUnsat, tLabel("lit_reassign_stale_unreachable"))
+    let res = pinFind(sutConstructLitThenReassignLitStaleUnsat, tLabel("lit_reassign_stale_unreachable"))
     check res.status == sxRaised
     check "FieldDefect" in res.raisedTypeId
 
 suite "symex round-6 A4 -- A1 construction then symbolic reassign (isVariantReassignSymbolic interaction)":
 
   test "A4-2a: post-reassign ioA fork is reachable; plain `tag` field preserved through both construct and reassign":
-    let res = symexFind(sutConstructLitThenReassignSymA, tLabel("sym_reassign_hit_ioA"))
+    let res = pinFind(sutConstructLitThenReassignSymA, tLabel("sym_reassign_hit_ioA"))
     check res.status == sxSat
     check res.witness[0] == 1'u8
 
   test "A4-2b: the OTHER post-reassign fork (ioB) changes the branch and raises FieldDefect (S8f)":
-    let res = symexFind(sutConstructLitThenReassignSymB, tLabel("sym_reassign_hit_ioB"))
+    let res = pinFind(sutConstructLitThenReassignSymB, tLabel("sym_reassign_hit_ioB"))
     check res.status == sxRaised
     check "FieldDefect" in res.raisedTypeId
     expect FieldDefect:
@@ -208,7 +209,7 @@ suite "symex round-6 A4 -- A3 construction then reassign: forks compose without 
   test "A4-3a: a narrowed (2-tag) A3 construction, reassigned to a tag OUTSIDE the narrowed set, still reaches it -- reassign forks over the full declared arm set, not the construction's narrowed subset":
     ## S8f: ct0/ct1 -> ct5 changes the branch, so Nim raises FieldDefect
     ## on every b2 == 1 input before the target.
-    let res = symexFind(sutComposeNarrowedConstructThenWideReassign, tLabel("compose_reassign_to_ct5"))
+    let res = pinFind(sutComposeNarrowedConstructThenWideReassign, tLabel("compose_reassign_to_ct5"))
     check res.status == sxRaised
     check "FieldDefect" in res.raisedTypeId
     expect FieldDefect:
@@ -217,19 +218,19 @@ suite "symex round-6 A4 -- A3 construction then reassign: forks compose without 
   test "A4-3b: soundness companion -- reaching ct5 forces b2==1'u8, so ct5 with b2!=1'u8 in the same conjunction is impossible":
     ## S8f: the target stays unreachable; the verdict is the FieldDefect
     ## every b2 == 1 input raises first.
-    let res = symexFind(sutComposeNarrowedConstructThenWideReassignUnsat, tLabel("compose_reassign_unsat"))
+    let res = pinFind(sutComposeNarrowedConstructThenWideReassignUnsat, tLabel("compose_reassign_unsat"))
     check res.status == sxRaised
     check "FieldDefect" in res.raisedTypeId
 
 suite "symex round-6 A4 -- witness read-back of constructed non-param variants":
 
   test "A4-4: A1 literal-disc construction -- witness pins the input driving the constructed variant's active-arm field":
-    let res = symexFind(sutWitnessConstructLitField, tLabel("witness_construct_lit_field"))
+    let res = pinFind(sutWitnessConstructLitField, tLabel("witness_construct_lit_field"))
     check res.status == sxSat
     check res.witness[0] == 42
 
   test "A4-5: A3 symbolic-disc construction -- witness shows which tag the solver chose, via the driving input":
-    let res = symexFind(sutWitnessConstructSymDisc, tLabel("witness_construct_sym_disc"))
+    let res = pinFind(sutWitnessConstructSymDisc, tLabel("witness_construct_sym_disc"))
     check res.status == sxSat
     check res.witness[0] != 1'u8
     check res.witness[1] == 77

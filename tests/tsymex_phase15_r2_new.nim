@@ -24,6 +24,7 @@
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # A SMALL freshness cap (3) so the cap test can exercise the over-cap path with
 # only 5 allocations. `symexFind`'s `settings` is `static`, so this must be a
@@ -82,26 +83,26 @@ suite "symex Phase 15 R2 — `new T` allocation (fresh-ref distinctness + cap)":
     # `freshRef` mints `ref_int_1` for p and `ref_int_2` for q; `assertFreshness`
     # adds `q != p` (a GROUND inequality) to the path. So `p == q` is provably
     # false → the branch is unreachable → sxUnsat.
-    let r = symexFind(twoNewsAlias, tLabel("alias"))
+    let r = pinFind(twoNewsAlias, tLabel("alias"))
     check r.status == sxUnsat
 
   test "R2: disjoint forked paths do not share fresh-ref counters (armA reachable)":
     # Arm A allocates its own `ref_int_1`, writes `x` and reads `p[] == 1`,
     # so this is reachable. No constraint from arm B's allocation leaks here.
-    let rA = symexFind(disjointNews, tLabel("armA"))
+    let rA = pinFind(disjointNews, tLabel("armA"))
     check rA.status == sxSat
 
   test "R2: disjoint forked paths do not share fresh-ref counters (armB reachable)":
     # Symmetrically, arm B allocates its own `ref_int_1` (counter RESTARTED from
     # the fork snapshot — NOT continued from arm A) and reads `q[] == 2`.
-    let rB = symexFind(disjointNews, tLabel("armB"))
+    let rB = pinFind(disjointNews, tLabel("armB"))
     check rB.status == sxSat
 
   test "R2: over-cap allocations stay sound (no crash, no false UNSAT)":
     # Cap freshness at 3, then allocate 5 refs on one path. The over-cap allocs
     # skip their distinctness inequalities (a `heFreshnessCapExceeded` hint is
     # emitted), but the path is still sound: the satisfiable target is reachable.
-    let r = symexFind(manyNews, tLabel("capped"), lowFreshCap)
+    let r = pinFind(manyNews, tLabel("capped"), lowFreshCap)
     check r.status == sxSat
     # The hint must surface on the verdict (sevHint, never changes the verdict).
     var sawCapHint = false

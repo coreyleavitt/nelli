@@ -28,6 +28,7 @@ import nelli/smt/canonicalize
 import nelli/smt/runtime
 import nelli/smt/dsl_parser   ## S8t2: emitStmt, parseEntryImpl, emitHoistHeight
 import std/macros
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -119,20 +120,20 @@ suite "S8t (1): the nested lowering keeps short-circuit evaluation":
 
   test "a guarded read in an `if` chain never raises":
     ## Probe: Nim never evaluates `s[i]` here with `i` out of range.
-    let r = symexFind(sutIfGuarded, tIndexError())
+    let r = pinFind(sutIfGuarded, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxUnsat
-    let r2 = symexFind(sutIfGuarded, tLabel("s8t_if_guarded"))
+    let r2 = pinFind(sutIfGuarded, tLabel("s8t_if_guarded"))
     check r2.status == sxSat
     if r2.status == sxSat:
       let (s, i) = r2.witness
       check i >= 0 and i < s.len and s[i] == 'a'
 
   test "a guarded read in an `or` chain never raises":
-    let r = symexFind(sutOrGuarded, tIndexError())
+    let r = pinFind(sutOrGuarded, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxUnsat
-    let r2 = symexFind(sutOrGuarded, tLabel("s8t_or_guarded"))
+    let r2 = pinFind(sutOrGuarded, tLabel("s8t_or_guarded"))
     check r2.status == sxSat
     if r2.status == sxSat:
       let (s, i) = r2.witness
@@ -144,7 +145,7 @@ suite "S8t (1): the nested lowering keeps short-circuit evaluation":
     try: sutIfUnguarded("", 0)
     except IndexDefect: raised = true
     check raised
-    let r = symexFind(sutIfUnguarded, tIndexError())
+    let r = pinFind(sutIfUnguarded, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxRaised
 
@@ -153,10 +154,10 @@ suite "S8t (1): the nested lowering keeps short-circuit evaluation":
     ## `0 <= i < s.len`); `("x", 0)` reaches the target.
     sutMixed("x", 0)
     sutMixed("", 5)
-    let r = symexFind(sutMixed, tIndexError())
+    let r = pinFind(sutMixed, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxUnsat
-    let r2 = symexFind(sutMixed, tLabel("s8t_mixed"))
+    let r2 = pinFind(sutMixed, tLabel("s8t_mixed"))
     check r2.status == sxSat
     if r2.status == sxSat:
       let (s, i) = r2.witness
@@ -172,7 +173,7 @@ suite "S8t (1): the nested lowering keeps short-circuit evaluation":
     check sutWhileFirstFault("aa") == 2
     check sutWhileFirstFault("ba") == 0
     check sutWhileFirstFault("") == 0
-    let r = symexFind(sutWhileFirstFault, tIndexError())
+    let r = pinFind(sutWhileFirstFault, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
@@ -185,7 +186,7 @@ suite "S8t (1): an and/or chain does not fork 2^(n-1) paths":
     ## path). GREEN: 13 -- the target solve plus one UNSAT IndexDefect
     ## solve per read. The same counts hold for the four tests below.
     symexZ3CallCount = 0
-    let r = symexFind(sutIf12, tLabel("s8t_if12"))
+    let r = pinFind(sutIf12, tLabel("s8t_if12"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -195,7 +196,7 @@ suite "S8t (1): an and/or chain does not fork 2^(n-1) paths":
 
   test "let x = a and b and ... (12 operands)":
     symexZ3CallCount = 0
-    let r = symexFind(sutLet12, tLabel("s8t_let12"))
+    let r = pinFind(sutLet12, tLabel("s8t_let12"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -205,7 +206,7 @@ suite "S8t (1): an and/or chain does not fork 2^(n-1) paths":
 
   test "symexAssert(not (a and b and ...)) (12 operands)":
     symexZ3CallCount = 0
-    let r = symexFind(sutAssert12, tAssertionViolation())
+    let r = pinFind(sutAssert12, tAssertionViolation())
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxRaised
@@ -215,7 +216,7 @@ suite "S8t (1): an and/or chain does not fork 2^(n-1) paths":
 
   test "while a and b and ... (12 operands)":
     symexZ3CallCount = 0
-    let r = symexFind(sutWhile12, tLabel("s8t_while12"))
+    let r = pinFind(sutWhile12, tLabel("s8t_while12"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -225,7 +226,7 @@ suite "S8t (1): an and/or chain does not fork 2^(n-1) paths":
 
   test "if a or b or ... (12 operands), target on the else side":
     symexZ3CallCount = 0
-    let r = symexFind(sutOr12, tLabel("s8t_or12"))
+    let r = pinFind(sutOr12, tLabel("s8t_or12"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -322,7 +323,7 @@ suite "S8t (3): a B4 accumulating-scan offset keeps its overflow obligation":
 
   test "the B4 offset is promoted over int's range":
     ## RED: no abstraction entry (the unstamped promotion logged nothing).
-    let r = symexFind(sutAccOverflow, tLabel("s8t_acc_hit"))
+    let r = pinFind(sutAccOverflow, tLabel("s8t_acc_hit"))
     checkpoint show(r.errors)
     check hasTypeRangeEntry(r, "start")
 
@@ -333,7 +334,7 @@ suite "S8t (3): a B4 accumulating-scan offset keeps its overflow obligation":
     ## E6 surfaces a reachable Defect with its own type whatever the
     ## target. (RFC-0005 S8w traced this; S8t first read it as a false
     ## OverflowDefect. The finding was a correct, replaying IndexDefect.)
-    let r = symexFind(sutAccOverflow, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sutAccOverflow, tRaisedExn("OverflowDefect"))
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -342,7 +343,7 @@ suite "S8t (3): a B4 accumulating-scan offset keeps its overflow obligation":
       check r.raisedWitness[1] == high(int)
 
   test "the B4 hit is still reachable, with a replayable witness":
-    let r = symexFind(sutAccOverflow, tLabel("s8t_acc_hit"))
+    let r = pinFind(sutAccOverflow, tLabel("s8t_acc_hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -355,7 +356,7 @@ suite "S8t (2): the other scan shapes and isExact":
   test "a Q1/B0 skip-while offset is promoted, and its overflow found":
     ## RED: the suite is killed at 900 s inside this test (`start` was a
     ## bit-vector bridged into the string query, which Z3 did not bound).
-    let r = symexFind(sutSkip, tLabel("s8t_skip_hit"))
+    let r = pinFind(sutSkip, tLabel("s8t_skip_hit"))
     checkpoint show(r.errors)
     check hasTypeRangeEntry(r, "start")
     check r.status == sxSat
@@ -367,20 +368,20 @@ suite "S8t (2): the other scan shapes and isExact":
     try: sutSkip("", high(int))
     except OverflowDefect: raised = true
     check raised
-    let r2 = symexFind(sutSkip, tRaisedExn("OverflowDefect"))
+    let r2 = pinFind(sutSkip, tRaisedExn("OverflowDefect"))
     checkpoint show(r2.errors)
     check r2.status == sxRaised
 
   test "a pair-loop offset is promoted over int's range":
     ## RED: no abstraction entry (and `beBudgetExhausted`).
-    let r = symexFind(sutPairLoop, tLabel("s8t_pairloop_done"))
+    let r = pinFind(sutPairLoop, tLabel("s8t_pairloop_done"))
     checkpoint show(r.errors)
     check hasTypeRangeEntry(r, "start")
 
   test "under isExact a scan-pair offset is a stamped Int too":
     ## RED: `sxUnknown` ("canceled") -- the bridged query is not decided
     ## within 2M units (S8q measured it `unknown` at 10M).
-    let r = symexFind(sutPairFound, tLabel("s8t_pair_hit"), exactTight)
+    let r = pinFind(sutPairFound, tLabel("s8t_pair_hit"), exactTight)
     checkpoint show(r.errors)
     check hasTypeRangeEntry(r, "start")
     check r.status == sxSat
@@ -434,7 +435,7 @@ suite "S8t2: the emitted IR builder's depth is bounded":
     check hs[1] <= emitHoistHeight + 8       # what the compiler semchecks
 
   test "the 40-operand chain still solves":
-    let r = symexFind(sutChain40, tLabel("hit"))
+    let r = pinFind(sutChain40, tLabel("hit"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == repeat('a', 40)

@@ -59,6 +59,7 @@
 ## (`tests/tsymex_phase15_CR2_cachekey.nim`).
 import std/[unittest, strutils, tables]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/canonicalize
 
 # =============================================================================
@@ -138,7 +139,7 @@ suite "N46-followup-2 -- liftHeapValue unsupported-pointee-kind (converted)":
   test "sanity: string field read alone is honest sxUnknown carrying heUnsupportedPointeeRead, never a crash":
     # RFC-0005 S4: the site's kind split off `heUnresolvedRef`; the target is
     # reachable only through the fresh value, so it stays a candidate (sxUnknown).
-    let r = symexFind(heapStrFieldRead, tLabel("heap_str_field_read"))
+    let r = pinFind(heapStrFieldRead, tLabel("heap_str_field_read"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -149,16 +150,16 @@ suite "N46-followup-2 -- liftHeapValue unsupported-pointee-kind (converted)":
     check r.status != sxSat   ## a tainted path must never mint a bogus sat
 
   test "sound-path companion: an ordinary backed int field is sxSat (no over-taint)":
-    let r = symexFind(heapGoodIntFieldRead, tLabel("heap_good_int_read_sat"))
+    let r = pinFind(heapGoodIntFieldRead, tLabel("heap_good_int_read_sat"))
     check r.status == sxSat
     check r.errors.len == 0
 
   test "sound-path companion: UNSAT for the same good field (no over-taint)":
-    let r = symexFind(heapGoodIntFieldUnsat, tLabel("heap_good_int_read_unsat"))
+    let r = pinFind(heapGoodIntFieldUnsat, tLabel("heap_good_int_read_unsat"))
     check r.status == sxUnsat
 
   test "REGRESSION (RED pre-fix / GREEN post-fix): hazard branch does not mask a sibling path's true sxSat":
-    let r = symexFind(heapMaskingOrdered, tLabel("heap_masking_ordered"))
+    let r = pinFind(heapMaskingOrdered, tLabel("heap_masking_ordered"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -214,7 +215,7 @@ suite "N46-followup-2 -- itMultiVariant field deref/write (modelled since RFC-00
   # both targets are genuinely reachable and the witness replays.
 
   test "field READ through an inline ref-to-multi-variant param -- sxSat, reproduces":
-    let r = symexFind(heapMultiVariantFieldRead, tLabel("heap_mv_field_read"))
+    let r = pinFind(heapMultiVariantFieldRead, tLabel("heap_mv_field_read"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -222,7 +223,7 @@ suite "N46-followup-2 -- itMultiVariant field deref/write (modelled since RFC-00
       check r.witness[0] != nil and r.witness[0].a1 == 5
 
   test "field WRITE through an inline ref-to-multi-variant param -- sxSat, the write is stored":
-    let r = symexFind(heapMultiVariantFieldWrite, tLabel("heap_mv_field_write"))
+    let r = pinFind(heapMultiVariantFieldWrite, tLabel("heap_mv_field_write"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -239,7 +240,7 @@ suite "N46-followup-4 -- ref-to-multi-variant witness rendering":
     ## the field CONTENT is never meaningful here (the walk never observed
     ## it), only that access does not crash and the ref itself is non-nil,
     ## matching the verdict (p != nil was required to reach the target).
-    let r = symexFind(heapMultiVariantNilCheckOnly, tLabel("heap_mv_nil_check_only"))
+    let r = pinFind(heapMultiVariantNilCheckOnly, tLabel("heap_mv_nil_check_only"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat

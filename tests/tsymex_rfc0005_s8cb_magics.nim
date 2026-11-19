@@ -8,6 +8,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -19,7 +20,7 @@ template c(name: untyped, want: SymexStatusKind, body: untyped) {.dirty.} =
   proc name(x: int, y: int) =
     body
   test astToStr(name):
-    let r = symexFind(name, tLabel("t"))
+    let r = pinFind(name, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == want
 
@@ -111,7 +112,7 @@ suite "RFC-0005 S8cb magics: unsigned operators":
     except DivByZeroDefect:
       symexTarget("t")
   test "the unsigned zero divisors name the halt (ubUnsignedDivZero)":
-    for r in [symexFind(divzero, tLabel("t")), symexFind(modzero, tLabel("t"))]:
+    for r in [pinFind(divzero, tLabel("t")), pinFind(modzero, tLabel("t"))]:
       var halted = false
       for e in r.errors:
         if e.kind == ubUnsignedDivZero: halted = true

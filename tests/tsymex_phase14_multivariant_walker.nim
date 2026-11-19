@@ -15,6 +15,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 type
   KindA = enum kaX, kaY
@@ -35,7 +36,7 @@ proc anyTwoAxis(obj: TwoAxis) =
 
 suite "symex Phase 14 cycle A1c — itMultiVariant walker":
   test "two-axis variant param: walker allocates + produces SAT witness":
-    let r = symexFind(anyTwoAxis, tLabel("hit"))
+    let r = pinFind(anyTwoAxis, tLabel("hit"))
     check r.status == sxSat
 
   test "axis1 field access: walker constrains axis1 disc to owning arm":
@@ -51,5 +52,5 @@ suite "symex Phase 14 cycle A1c — itMultiVariant walker":
       if obj.axis1 == kaX:
         if obj.a1 == 42:
           symexTarget("a1-matched")
-    let r = symexFind(gatedByAxis1Field, tLabel("a1-matched"))
+    let r = pinFind(gatedByAxis1Field, tLabel("a1-matched"))
     check r.status == sxSat

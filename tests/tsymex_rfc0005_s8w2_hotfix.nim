@@ -18,6 +18,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 when not defined(symexQueryStats):
   {.error: "tsymex_rfc0005_s8w2_hotfix needs -d:symexQueryStats (its .nim.cfg)".}
@@ -48,7 +49,7 @@ suite "RFC-0005 S8w2":
 
   test "an and-chain's join is a conjunction, not an ite":
     symexQueryStats = @[]
-    let r = symexFind(sutAndJoin, tLabel("s8w2_and"))
+    let r = pinFind(sutAndJoin, tLabel("s8w2_and"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 5 and r.witness[1] + 1 == 7
@@ -59,7 +60,7 @@ suite "RFC-0005 S8w2":
 
   test "an or-chain's join is a disjunction, not an ite":
     symexQueryStats = @[]
-    let r = symexFind(sutOrJoin, tLabel("s8w2_or"))
+    let r = pinFind(sutOrJoin, tLabel("s8w2_or"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 5 and r.witness[1] + 1 != 7
@@ -70,7 +71,7 @@ suite "RFC-0005 S8w2":
 
   test "a literal shr on an unstamped Int needs no int2bv":
     symexQueryStats = @[]
-    let r = symexFind(sutFindShr, tLabel("s8w2_findshr"))
+    let r = pinFind(sutFindShr, tLabel("s8w2_findshr"))
     check r.status == sxSat
     if r.status == sxSat:
       check (r.witness[0].find('a') shr 1) < 0 and r.witness[0].len > 2
@@ -82,7 +83,7 @@ suite "RFC-0005 S8w2":
 
   test "a literal shr on a non-negative unstamped Int floors":
     check (5 shr 2) == 1 and (4 shr 2) == 1 and (7 shr 2) == 1
-    let r = symexFind(sutFindShrPos, tLabel("s8w2_findshr_pos"))
+    let r = pinFind(sutFindShrPos, tLabel("s8w2_findshr_pos"))
     check r.status == sxSat
     if r.status == sxSat:
       let i = r.witness[0].find('a')

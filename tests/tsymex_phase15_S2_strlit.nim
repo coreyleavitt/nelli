@@ -19,6 +19,7 @@
 ##   6. (optional) `s == "\x61"` is `sxSat`, witness == "a".
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc isHello(s: string) =
   if s == "hello":
@@ -46,27 +47,27 @@ proc isHexA(s: string) =
 
 suite "symex Phase 15 S2 — string literal lifts (byte-faithful)":
   test "s == \"hello\" round-trips through Z3 model":
-    let r = symexFind(isHello, tLabel("hit"))
+    let r = pinFind(isHello, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 
   test "empty string literal is SAT with empty witness":
-    let r = symexFind(isEmpty, tLabel("hit"))
+    let r = pinFind(isEmpty, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == ""
 
   test "embedded newline escape preserved in witness (1 byte)":
-    let r = symexFind(isNewline, tLabel("hit"))
+    let r = pinFind(isNewline, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "\n"
     check r.witness[0].len == 1
 
   test "contradictory string literals are UNSAT (not a crash)":
-    let r = symexFind(contradiction, tLabel("hit"))
+    let r = pinFind(contradiction, tLabel("hit"))
     check r.status == sxUnsat
 
   test "byte-faithful multi-byte literal: s == \"é\" SAT, witness is 2 bytes":
-    let r = symexFind(isEacute, tLabel("hit"))
+    let r = pinFind(isEacute, tLabel("hit"))
     check r.status == sxSat
     # byte-faithful (ADR-0006): "é" is U+00E9 -> UTF-8 [0xC3, 0xA9] -> 2 bytes.
     # `s.len` symex op is deferred to S3; assert byte-faithfulness on the
@@ -75,6 +76,6 @@ suite "symex Phase 15 S2 — string literal lifts (byte-faithful)":
     check r.witness[0].len == 2
 
   test "hex escape literal \\x61 round-trips to \"a\"":
-    let r = symexFind(isHexA, tLabel("hit"))
+    let r = pinFind(isHexA, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "a"

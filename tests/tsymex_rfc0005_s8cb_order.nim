@@ -6,6 +6,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -14,6 +15,16 @@ proc show(errs: seq[SymexErrorInfo]): string =
   "[" & parts.join(", ") & "]"
 
 template c(name: untyped, want: SymexStatusKind, body: untyped) {.dirty.} =
+  proc name(x: int, y: int) =
+    body
+  test astToStr(name):
+    let r = pinFind(name, tLabel("t"))
+    checkpoint show(r.errors)
+    check r.status == want
+
+template cq(name: untyped, want: SymexStatusKind, body: untyped) {.dirty.} =
+  ## a SUT that calls quit: its native runs would end this process, so the
+  ## verdict stays unpinned (pinFind refuses it)
   proc name(x: int, y: int) =
     body
   test astToStr(name):
@@ -46,19 +57,19 @@ suite "RFC-0005 S8cb tostr: string and bool ordering":
   proc strIrr(s: string) =
     if s < s: symexTarget("t")
   test "string lt":
-    check symexFind(strSut, tLabel("t")).status == sxSat
+    check pinFind(strSut, tLabel("t")).status == sxSat
   test "nothing is below the empty string":
-    check symexFind(strUnsat, tLabel("t")).status == sxUnsat
+    check pinFind(strUnsat, tLabel("t")).status == sxUnsat
   test "string le":
-    check symexFind(strLe, tLabel("t")).status == sxSat
+    check pinFind(strLe, tLabel("t")).status == sxSat
   test "string le refuted":
-    check symexFind(strLeu, tLabel("t")).status == sxUnsat
+    check pinFind(strLeu, tLabel("t")).status == sxUnsat
   test "string gt":
-    check symexFind(strGt, tLabel("t")).status == sxSat
+    check pinFind(strGt, tLabel("t")).status == sxSat
   test "string ge refuted":
-    check symexFind(strGeu, tLabel("t")).status == sxUnsat
+    check pinFind(strGeu, tLabel("t")).status == sxUnsat
   test "string lt is irreflexive":
-    check symexFind(strIrr, tLabel("t")).status == sxUnsat
+    check pinFind(strIrr, tLabel("t")).status == sxUnsat
   c(boollt, sxSat): (if (x > 0) < (y > 0) and x == 0 and y == 1: symexTarget("t"))
   c(boolltu, sxUnsat): (if (x > 0) < (y > 0) and x == 1: symexTarget("t"))
   c(boolle, sxSat): (if (x > 0) <= (y > 0) and x == 0 and y == 0: symexTarget("t"))
@@ -93,30 +104,30 @@ suite "RFC-0005 S8cb tostr: identity, hook and exit magics":
     let a = [x, y]
     let s = @a
     if s[1] == 4 and y == 5: symexTarget("t")
-  c(quitends, sxUnsat):
+  cq(quitends, sxUnsat):
     if x > 0: quit(1)
     if x == 1: symexTarget("t")
-  c(quitother, sxSat):
+  cq(quitother, sxSat):
     if x > 0: quit(1)
     if x == 0: symexTarget("t")
-  c(quitarg, sxUnsat):
+  cq(quitarg, sxUnsat):
     var a = 0
     if x > 0:
       a = 1
       quit(a)
     if a == 1: symexTarget("t")
-  c(quitnofinally, sxUnsat):
+  cq(quitnofinally, sxUnsat):
     try:
       if x > 0: quit(1)
     finally:
       if x == 1: symexTarget("t")
-  c(quitexpr, sxUnsat):
+  cq(quitexpr, sxUnsat):
     let a = if x > 0: quit(1) else: 2
     if a != 2: symexTarget("t")
-  c(quitmsg, sxUnsat):
+  cq(quitmsg, sxUnsat):
     if x > 0: quit("stop", 2)
     if x == 1: symexTarget("t")
-  c(quitexprstr, sxUnsat):
+  cq(quitexprstr, sxUnsat):
     let a = if x > 0: quit(1) else: "b"
     if a != "b": symexTarget("t")
 
@@ -125,7 +136,7 @@ proc reprSut(s: string) =
 
 suite "RFC-0005 S8cb tostr: what stays declined":
   test "repr of a string declines at the call":
-    let r = symexFind(reprSut, tLabel("t"))
+    let r = pinFind(reprSut, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedOp)

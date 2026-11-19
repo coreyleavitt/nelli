@@ -15,6 +15,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 type
   K = enum kA, kB, kC
@@ -33,7 +34,7 @@ proc hitInElse(v: V) =
 
 suite "symex Phase 14 cycle A2 — else: arms in variants":
   test "variant with `else:` arm parses + walker reaches target in else":
-    let r = symexFind(hitInElse, tLabel("else-hit"))
+    let r = pinFind(hitInElse, tLabel("else-hit"))
     check r.status == sxSat
     check r.witness[0].kind == kB
     check r.witness[0].x == 99

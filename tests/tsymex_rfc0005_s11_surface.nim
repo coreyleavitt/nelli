@@ -19,6 +19,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils, options, json]
 import nelli
 import nelli/symex
+import ./s8cu_helpers
 
 var sideEffects = 0   ## counts REAL executions of the SUTs: symex never runs
                       ## `fn`, so an increment during a `symexFind` is a replay
@@ -122,7 +123,7 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
     check parseInt(symexWalkerVersion) >= 188
 
   test "forcedBy shape: an sxUnknown through symexFind carries a non-empty runTaint":
-    let r = symexFind(s11Opaque, tLabel("s11_opaque"))
+    let r = pinFind(s11Opaque, tLabel("s11_opaque"))
     check r.status == sxUnknown
     check r.errors.named(feOpaqueCallUnmodelled)
     check r.soundness.runTaint != {}
@@ -131,13 +132,13 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
     check r.soundness.replay == rsNotNeeded
 
   test "forcedBy shape: a budget-bound sxUnknown names scIncomplete in runTaint":
-    let r = symexFind(s11Deep, tLabel("s11_deep"))
+    let r = pinFind(s11Deep, tLabel("s11_deep"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
     check scIncomplete in r.soundness.runTaint
 
   test "a clean sxSat: pathTaint {}, replay rsNotNeeded":
-    let r = symexFind(s11Clean, tLabel("s11_clean"))
+    let r = pinFind(s11Clean, tLabel("s11_clean"))
     check r.status == sxSat
     check r.witness[0] == 42
     check r.soundness.pathTaint == {}
@@ -145,7 +146,7 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
 
   test "a replay-confirmed sxSat: pathTaint keeps scSpurious, replay rsConfirmed":
     let before = replayExecutions()
-    let r = symexFind(s11Confirm, tLabel("s11_confirm"))
+    let r = pinFind(s11Confirm, tLabel("s11_confirm"))
     check r.status == sxSat
     check replayExecutions() > before                    # the replay really ran fn
     check scSpurious in r.soundness.pathTaint
@@ -153,20 +154,20 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
 
   test "replay off: the same candidate stays sxUnknown, replay never claimed":
     const noReplay = SymexSettings(replay: false)
-    let r = symexFind(s11Confirm, tLabel("s11_confirm"), noReplay)
+    let r = pinFind(s11Confirm, tLabel("s11_confirm"), noReplay)
     check r.status == sxUnknown
     check r.errors.named(feGlobalHavoc)
     check r.soundness.replay == rsNotNeeded
     check r.soundness.runTaint != {}
 
   test "an sxUnsat: runTaint lacks scIncomplete":
-    let r = symexFind(s11Dead, tLabel("s11_dead"))
+    let r = pinFind(s11Dead, tLabel("s11_dead"))
     check r.status == sxUnsat
     check scIncomplete notin r.soundness.runTaint
     check r.soundness.pathTaint == {}
 
   test "an sxRaised carries the same common-section soundness":
-    let r = symexFind(s11Raises, tRaisedExn("ValueError"))
+    let r = pinFind(s11Raises, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedWitness[0] == 9
     check r.soundness.pathTaint == {}
@@ -179,22 +180,22 @@ suite "RFC-0005 S11 (a) -- Soundness on the result":
 suite "RFC-0005 S11 (b) -- trusted()":
 
   test "clean sxSat, confirmed sxSat, sxRaised and sxUnsat are trusted; sxUnknown never is":
-    check trusted(symexFind(s11Clean, tLabel("s11_clean")))
-    check trusted(symexFind(s11Confirm, tLabel("s11_confirm")))
-    check trusted(symexFind(s11Raises, tRaisedExn("ValueError")))
-    check trusted(symexFind(s11Dead, tLabel("s11_dead")))
-    check not trusted(symexFind(s11Opaque, tLabel("s11_opaque")))
-    check not trusted(symexFind(s11Deep, tLabel("s11_deep")))
+    check trusted(pinFind(s11Clean, tLabel("s11_clean")))
+    check trusted(pinFind(s11Confirm, tLabel("s11_confirm")))
+    check trusted(pinFind(s11Raises, tRaisedExn("ValueError")))
+    check trusted(pinFind(s11Dead, tLabel("s11_dead")))
+    check not trusted(pinFind(s11Opaque, tLabel("s11_opaque")))
+    check not trusted(pinFind(s11Deep, tLabel("s11_deep")))
 
   test "the predicate reads the soundness, not the status alone":
     # A hand-built result with a spurious, UNconfirmed winning path is a SAT
     # the verdict rule never ships -- trusted() says so.
-    var r = symexFind(s11Clean, tLabel("s11_clean"))
+    var r = pinFind(s11Clean, tLabel("s11_clean"))
     r.soundness.pathTaint = {scSpurious}
     check not trusted(r)
     r.soundness.replay = rsConfirmed
     check trusted(r)
-    var u = symexFind(s11Dead, tLabel("s11_dead"))
+    var u = pinFind(s11Dead, tLabel("s11_dead"))
     u.soundness.runTaint = {scIncomplete}
     check not trusted(u)
     u.soundness.runTaint = {scSpurious}         # over-approximation only
@@ -207,11 +208,11 @@ suite "RFC-0005 S11 (b) -- trusted()":
 suite "RFC-0005 S11 (c) -- gaps(): read the cause, pull its lever":
 
   test "a clean run has no gaps":
-    check symexFind(s11Clean, tLabel("s11_clean")).gaps().len == 0
-    check symexFind(s11Dead, tLabel("s11_dead")).gaps().len == 0
+    check pinFind(s11Clean, tLabel("s11_clean")).gaps().len == 0
+    check pinFind(s11Dead, tLabel("s11_dead")).gaps().len == 0
 
   test "gaps() lists exactly the declines the run coordinate was built from":
-    let r = symexFind(s11Both, tLabel("s11_both"))
+    let r = pinFind(s11Both, tLabel("s11_both"))
     var joined: Taint
     for g in r.gaps():
       check g.class == classOf(g.e.kind)
@@ -219,7 +220,7 @@ suite "RFC-0005 S11 (c) -- gaps(): read the cause, pull its lever":
     check joined == r.soundness.runTaint
 
   test "walkthrough 1 -- a bound: dcFabricated names maxLoopUnwind, raising it moves the verdict":
-    let r = symexFind(s11Deep, tLabel("s11_deep"))
+    let r = pinFind(s11Deep, tLabel("s11_deep"))
     check r.status == sxUnknown
     let gs = r.gaps()
     check gs.len > 0
@@ -227,7 +228,7 @@ suite "RFC-0005 S11 (c) -- gaps(): read the cause, pull its lever":
     check beBudgetExhausted in kindsOf(gs)
     check r.bounds.maxLoopUnwind == 5
     # The lever: the bound the gap names.
-    let r2 = symexFind(s11Deep, tLabel("s11_deep"), deepSettings)
+    let r2 = pinFind(s11Deep, tLabel("s11_deep"), deepSettings)
     check r2.status == sxSat
     check r2.witness[0] >= 8
     check r2.bounds.maxLoopUnwind == 12
@@ -237,7 +238,7 @@ suite "RFC-0005 S11 (c) -- gaps(): read the cause, pull its lever":
     for g in r2.gaps(): check g.e.kind == beBudgetExhausted
 
   test "walkthrough 2 -- a model gap: dcSubstituted names the opaque call":
-    let r = symexFind(s11Opaque, tLabel("s11_opaque"))
+    let r = pinFind(s11Opaque, tLabel("s11_opaque"))
     let gs = r.gaps()
     check classesOf(gs) == @[dcSubstituted]
     check feOpaqueCallUnmodelled in kindsOf(gs)
@@ -247,7 +248,7 @@ suite "RFC-0005 S11 (c) -- gaps(): read the cause, pull its lever":
     check named
 
   test "walkthrough 3 -- two causes, two levers: ⊤ on the run, two classes in gaps()":
-    let r = symexFind(s11Both, tLabel("s11_both"))
+    let r = pinFind(s11Both, tLabel("s11_both"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
     check r.errors.named(feOpaqueCallUnmodelled)
@@ -257,7 +258,7 @@ suite "RFC-0005 S11 (c) -- gaps(): read the cause, pull its lever":
     check dcSubstituted in cs
 
   test "gaps() leaves out what did not decide anything (hints, warnings)":
-    let r = symexFind(s11Confirm, tLabel("s11_confirm"))
+    let r = pinFind(s11Confirm, tLabel("s11_confirm"))
     for g in r.gaps():
       check g.e.severity == sevError or g.e.kind == eeUnknownExnType
 
@@ -270,17 +271,17 @@ suite "RFC-0005 S11 (d) -- bound provenance is a settings echo on the result":
   test "an sxUnsat echoes the budget it was proved under":
     const s = SymexSettings(budget: ResourceBudget(maxLoopUnwind: 8,
                                                    maxCallDepth: 4))
-    let r = symexFind(s11Dead, tLabel("s11_dead"), s)
+    let r = pinFind(s11Dead, tLabel("s11_dead"), s)
     check r.status == sxUnsat
     check r.bounds == s.budget
     check r.bounds.maxLoopUnwind == 8
     check r.bounds.maxCallDepth == 4
 
   test "every status echoes the budget, defaults included":
-    check symexFind(s11Clean, tLabel("s11_clean")).bounds == ResourceBudget()
-    check symexFind(s11Opaque, tLabel("s11_opaque")).bounds == ResourceBudget()
-    check symexFind(s11Raises, tRaisedExn("ValueError")).bounds == ResourceBudget()
-    check symexFind(s11Confirm, tLabel("s11_confirm")).bounds == ResourceBudget()
+    check pinFind(s11Clean, tLabel("s11_clean")).bounds == ResourceBudget()
+    check pinFind(s11Opaque, tLabel("s11_opaque")).bounds == ResourceBudget()
+    check pinFind(s11Raises, tRaisedExn("ValueError")).bounds == ResourceBudget()
+    check pinFind(s11Confirm, tLabel("s11_confirm")).bounds == ResourceBudget()
 
 # =============================================================================
 # (e) SymexFinding and the cache

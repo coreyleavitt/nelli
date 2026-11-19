@@ -15,6 +15,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/replayproc
 import s8ct_platform   ## RFC-0005 S8ct
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -121,7 +122,7 @@ suite "RFC-0005 S8bo: walker version":
 suite "RFC-0005 S8bo (6): an abandoned replay's late write":
   test "a replay started while an abandoned one runs is not confirmed":
     s8boFlag = 0
-    let a = symexFind(sutLateWriter, tLabel("w"),
+    let a = pinFind(sutLateWriter, tLabel("w"),
                       SymexSettings(replayTimeoutMs: 200))
     checkpoint "writer " & $a.status & " " & show(a.errors)
     check a.status != sxSat
@@ -129,7 +130,7 @@ suite "RFC-0005 S8bo (6): an abandoned replay's late write":
     check a.errors.hasKind(feReplayTimedOut) or
           (replayReexecs and declinedNotMarshallable(a.errors))
     check s8boFlag == 0
-    let b = symexFind(sutLateReader, tLabel("late"),
+    let b = pinFind(sutLateReader, tLabel("late"),
                       SymexSettings(replayTimeoutMs: 200))
     checkpoint "reader " & $b.status & " " & show(b.errors)
     check b.status != sxSat
@@ -138,7 +139,7 @@ suite "RFC-0005 S8bo (6): an abandoned replay's late write":
   test "with nothing of the abandoned replay left, a replay confirms":
     s8boFlag = 1
     s8boDone.send(1)      # `s8boRelease`'s handshake, answered in advance
-    let c = symexFind(sutLateReader, tLabel("late"))
+    let c = pinFind(sutLateReader, tLabel("late"))
     checkpoint "reader " & $c.status & " " & show(c.errors)
     satOrDeclined(c)
     discard s8boGo.tryRecv()
@@ -146,12 +147,14 @@ suite "RFC-0005 S8bo (6): an abandoned replay's late write":
 suite "RFC-0005 S8bo (7): the calling thread's `{.threadvar.}`s":
   test "the replay reads the calling thread's value":
     s8boTv = 7
-    let r = symexFind(sutTv, tLabel("tv"))
+    let r = pinFind(sutTv, tLabel("tv"))
     checkpoint $r.status & " " & show(r.errors)
     satOrDeclined(r)
   test "the replay's writes stay in its child":
     s8boTv = 7
     s8boTvCount = 0
+    # not pinned: the native pin runs the SUT in this process, which is
+    # exactly the write this test proves stays in the replay's child
     let r = symexFind(sutTvWrite, tLabel("tvw"))
     checkpoint $r.status & " " & show(r.errors)
     satOrDeclined(r)
@@ -159,6 +162,6 @@ suite "RFC-0005 S8bo (7): the calling thread's `{.threadvar.}`s":
 
 suite "RFC-0005 S8bo (7): the calling thread's stack":
   test "a frame the calling thread holds does not overflow the replay":
-    let r = symexFind(sutBigFrame, tLabel("big"))
+    let r = pinFind(sutBigFrame, tLabel("big"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat or r.errors.hasKind(feReplayDeclined)

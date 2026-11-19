@@ -18,6 +18,7 @@
 ## symex, so every condition is inlined directly in the SUT body.
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # --- `$n`: a SUT where `$n == "42"` (n: int) pins n to 42 -------------------
 proc dollarEq(n: int) =
@@ -48,22 +49,22 @@ proc parseNonDigit(s: string) =
 
 suite "symex Phase 15 S10a — $int/parseInt digits-path (pre-E1 window)":
   test "$int: $n == \"42\" pins n == 42 (decimal string repr)":
-    let r = symexFind(dollarEq, tLabel("dollar"))
+    let r = pinFind(dollarEq, tLabel("dollar"))
     check r.status == sxSat
     check r.witness[0] == 42
 
   test "parseInt: parseInt(s) == 42 is SAT with witness s == \"42\"":
-    let r = symexFind(parseEq, tLabel("pi"))
+    let r = pinFind(parseEq, tLabel("pi"))
     check r.status == sxSat
     check r.witness[0] == "42"
 
   test "parseInt: parseInt(\"-42\") produces sxSat with int result -42":
-    let r = symexFind(parseNeg, tLabel("piNeg"))
+    let r = pinFind(parseNeg, tLabel("piNeg"))
     check r.status == sxSat
     check r.witness[0] == "-42"
 
   test "parseInt: non-digit input RAISES ValueError (S10b closed the window)":
-    let r = symexFind(parseNonDigit, tRaisedExn("ValueError"))
+    let r = pinFind(parseNonDigit, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     # the S10a unsoundness-window hint is no longer emitted (S10b closed it).

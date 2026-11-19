@@ -30,6 +30,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+import ./s8cu_helpers
 
 when not defined(symexQueryStats):
   {.error: "tsymex_rfc0005_s8aj_remainder needs -d:symexQueryStats (its .nim.cfg)".}
@@ -139,7 +140,7 @@ suite "S8aj (1): a local aggregate is zero-initialised":
 
   template run(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     block:
-      let r = symexFind(fn, tLabel(lbl))
+      let r = pinFind(fn, tLabel(lbl))
       checkpoint lbl & " " & $r.status & " " & show(r.errors)
       check r.status == want
       check not r.errors.hasKind(weInternalWalkerFault)

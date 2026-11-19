@@ -17,6 +17,7 @@
 import std/unittest
 import std/strutils  ## contains/find/startsWith/endsWith on strings
 import nelli/symex
+import ./s8cu_helpers
 
 # --- contains: gate on substring membership ---
 proc containsEll(s: string) =
@@ -58,38 +59,38 @@ proc findAbsent(s: string) =
 
 suite "symex Phase 15 S4 — string find/contains/startsWith/endsWith":
   test "contains: s.contains(\"ell\") is SAT (a string with ell exists)":
-    let r = symexFind(containsEll, tLabel("hit"))
+    let r = pinFind(containsEll, tLabel("hit"))
     check r.status == sxSat
 
   test "contains contradiction: \"world\".contains(\"ell\") is UNSAT":
-    let r = symexFind(containsContradiction, tLabel("hit"))
+    let r = pinFind(containsContradiction, tLabel("hit"))
     check r.status == sxUnsat
 
   test "`sub in s` routes to iekStrContains (string path) and is SAT":
-    let r = symexFind(inEll, tLabel("hit"))
+    let r = pinFind(inEll, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 
   test "startsWith: \"hello\".startsWith(\"he\") is SAT":
-    let r = symexFind(startsHe, tLabel("hit"))
+    let r = pinFind(startsHe, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 
   test "startsWith contradiction: \"hello\".startsWith(\"xy\") is UNSAT":
-    let r = symexFind(startsXy, tLabel("hit"))
+    let r = pinFind(startsXy, tLabel("hit"))
     check r.status == sxUnsat
 
   test "endsWith: \"hello\".endsWith(\"lo\") is SAT":
-    let r = symexFind(endsLo, tLabel("hit"))
+    let r = pinFind(endsLo, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 
   test "find: \"abc\".find(\"bc\") == 1 is SAT (byte offset)":
-    let r = symexFind(findBc, tLabel("hit"))
+    let r = pinFind(findBc, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "abc"
 
   test "find absent: \"abc\".find(\"zz\") == -1 is SAT (no crash, -1 sentinel)":
-    let r = symexFind(findAbsent, tLabel("hit"))
+    let r = pinFind(findAbsent, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "abc"

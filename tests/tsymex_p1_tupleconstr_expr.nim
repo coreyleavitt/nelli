@@ -37,6 +37,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs
@@ -133,37 +134,37 @@ proc sutPlainArithRegression(x: int) =
 suite "symex RFC-chapulin-hardening P1 — tuple construction as expression":
 
   test "P1-1: let t=(x,x+1); t[0]==3 and t[1]==4 -> sxSat, exact witness x==3":
-    let r = symexFind(sutTupleBasicHit, tLabel("basic_hit"))
+    let r = pinFind(sutTupleBasicHit, tLabel("basic_hit"))
     check r.status == sxSat
     check r.witness[0] == 3
 
   test "P1-2: UNSAT soundness — t[1] == t[0]+2 is impossible (real modeling)":
-    let r = symexFind(sutTupleUnsat, tLabel("basic_unsat"))
+    let r = pinFind(sutTupleUnsat, tLabel("basic_unsat"))
     check r.status == sxUnsat
 
   test "P1-3: N-ary (3-elem) tuple — exact witness x==5":
-    let r = symexFind(sutTupleTriple, tLabel("triple_hit"))
+    let r = pinFind(sutTupleTriple, tLabel("triple_hit"))
     check r.status == sxSat
     check r.witness[0] == 5
 
   test "P1-4: N-ary (3-elem) UNSAT soundness":
-    let r = symexFind(sutTupleTripleUnsat, tLabel("triple_unsat"))
+    let r = pinFind(sutTupleTripleUnsat, tLabel("triple_unsat"))
     check r.status == sxUnsat
 
   test "P1-5: named-field tuple (a: x, b: x+1) — exact witness x==3":
-    let r = symexFind(sutNamedTupleHit, tLabel("named_hit"))
+    let r = pinFind(sutNamedTupleHit, tLabel("named_hit"))
     check r.status == sxSat
     check r.witness[0] == 3
 
   test "P1-6: named-field tuple UNSAT soundness":
-    let r = symexFind(sutNamedTupleUnsat, tLabel("named_unsat"))
+    let r = pinFind(sutNamedTupleUnsat, tLabel("named_unsat"))
     check r.status == sxUnsat
 
 suite "symex RFC-chapulin-hardening P1 — SND-1 soundness (unsupported field)":
 
   test "P1-8: tuple with cast[int32](x) field compiles and degrades to sxUnknown + feUnsupportedExprKind":
     ## Strong form: assert the classified KIND, not just the verdict.
-    let r = symexFind(sutTupleUnsupportedField, tLabel("dummy_would_sat"))
+    let r = pinFind(sutTupleUnsupportedField, tLabel("dummy_would_sat"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -174,13 +175,13 @@ suite "symex RFC-chapulin-hardening P1 — SND-1 soundness (unsupported field)":
   test "P1-9: the dummy field value never produces a false sxSat (SND-1 taint)":
     ## Even though a leaked dummy (0) would make `t[1] == 0` look trivially
     ## reachable for every x, SND-1's taint forces sxUnknown — never sxSat.
-    let r = symexFind(sutTupleUnsupportedField, tLabel("dummy_would_sat"))
+    let r = pinFind(sutTupleUnsupportedField, tLabel("dummy_would_sat"))
     check r.status != sxSat
 
 suite "symex RFC-chapulin-hardening P1 — regression guard":
 
   test "P1-10: plain (non-tuple) arithmetic unaffected — exact witness x==4":
-    let r = symexFind(sutPlainArithRegression, tLabel("plain_arith"))
+    let r = pinFind(sutPlainArithRegression, tLabel("plain_arith"))
     check r.status == sxSat
     check r.witness[0] == 4
 

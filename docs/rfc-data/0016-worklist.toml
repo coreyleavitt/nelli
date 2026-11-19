@@ -2797,3 +2797,115 @@ source = "INT-79 (`rfc-0016-w4prc51`), the u4 decline pin, 2026-11-18"
 evidence = "`tests/tsymex_0016_int80_seqconcat.nim`: at d45c9f3a (walker 438) every shape `sxUnknown` (`feUnsupportedOp`; `add` of a seq `weInternalWalkerFault`); at walker 439 green on c and cpp: `seq & seq` read at the boundary indices, `seq & T`, `T & seq`, a chain, `int8`/`uint16`/`int32` elements, tuples, objects, strings, empty operands, a length the walk does not know (`newSeq[int](k) & @[7, k]` read at `k`, `k + 1`, `k - 1`), `g & g`, a write to an operand or to the result after `&` (copy), `add` of a seq and of an array literal, `&=` on a variable and a field, an unnamed operand, each exact against native; a seq of seqs declines `seNestedSeqUnsupported`, never faults. Cost within twice the hand-written loop (`var h = a; for x in b: h.add x`): 390,602 against 294,059 units, and 77,947 against 84,738 at an unknown length. INT-79's u4 re-pinned exact (`sxSat`, and its 104-plus twin `sxUnsat`). Walker 441: self-append within the capacity (`newSeqOfCap`, so native is defined on every allocator and under ASan) on a variable, through `add(s, s)` and `&=`, on a field, on an empty seq, and over a tuple element; `concat` of three seqs, of one, with empty operands and of none (`concat[int]()`), operands with side effects read in order (`concat(nxt(n), nxt(n), @[k])`), `concat(g, g)` with a later write to `g`, tuples; each exact against native on c and cpp, and a seq of seqs through `concat` declines `seNestedSeqUnsupported`. At walker 439 the self-append shapes were already exact and `concat` was `sxUnknown` (`feOverflowCheckOption`, `feUnadmitted`, its body walked) and `concat[int]()` a compile-time parse error (`cannot infer element type of empty []`)"
 cells = []
 pins = ["tsymex_0016_int80_seqconcat", "tsymex_0016_int79_seqlitloop"]
+
+[[row]]
+id = "INT-72"
+table = "5.8c"
+title = "K9d-3: `tsymex_a7_rune`'s `runeOob` (`r.ord > 0x10FFFF`, `r: Rune`) is `sxUnsat` in the walker, and the native run refutes it. `Rune` is `distinct int32`, so `boundaryOf(Rune)` generates the int32 boundary points through the base type and `runeOob(Rune(2147483646))` reaches the target natively (`pinExact ... walker says sxUnsat for label(\"oob\") but input (2147483646) hits it natively`). The walker pins a `Rune` parameter to [0, 0x10FFFF] (ADR-0017, Invariant 3), a model invariant that no native `Rune` constructor enforces; so the verdict is sound over valid runes and unsound over every int32 the type admits. Same class as the `symexAssume` gap (F-07): a domain the walker restricts and the native run does not. Open: either the Rune domain generator must be restricted to the invariant (a `boundaryOf(Rune)` overload of valid code points, which makes this pin legitimate) or the invariant must be recorded as an assumption with a gate. The suite stays unconverted until that is decided; `tsymex_a7_runes_iter` and `tsymex_m6_probeproto_strproto` take Rune parameters too"
+class = "soundness (walker domain restriction not mirrored natively)"
+state = "closed"
+note = "fixed in the walker (426): a free `Rune` ranges over int32, its native domain; `$r`/`toUTF8` encode 1-6 bytes up to 0x7FFFFFFF and a negative Rune as `\"\"`, `size(r)` is modelled by the same thresholds, `Rune(n)` checks int32 (`RangeDefect`, it was a false `sxSat`), an int conversion of a Rune converts its value (`uint32(Rune(-1))` was the identity). Decoded runes stay what Nim's decoder returns (concrete literals only). ADR-0017 amended: [0, 0x10FFFF] was a model encoding, not a contract. The three Rune-parameter suites convert; K9d census 386 -> 383"
+sha = "f7eeb57b"
+slice = "K9d"
+home = "INT-72 (`rfc-0016-w4int72`)"
+source = "K9d-3 pinFind conversion"
+evidence = "reproducer: in `tests/tsymex_a7_rune.nim` change `symexFind(runeOob` to `pinFind(runeOob` (and add `import ./s8cu_helpers`), then `scripts/dt-bounded.sh c tests/tsymex_a7_rune.nim`: the test `soundness: r.ord > 0x10FFFF` fails with the PinFailure above"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int72_runedomain", "tsymex_a7_rune", "tsymex_a7_runes_iter", "tsymex_m6_probeproto_strproto"]
+
+[[row]]
+id = "INT-77"
+table = "5.8c"
+title = "K9d-8: a float `range` parameter (`range[0.0 .. 1.0]`, `range[-1.5'f32 .. 2.5'f32]`, anonymous or named) does not compile in the walker: `parseRangeBracket` (`src/nelli/smt/dsl_typebridge.nim`) reads both bounds with `intVal` (`Error: node lacks field: intVal`), so any suite whose SUT takes one fails at macro time instead of declining. The value set Nim admits is `lo <= x and x <= hi` in the base width: the closed IEEE interval, NaN excluded, -0.0 admitted with 0.0. The bar is to model that exactly wherever the type lands (a parameter, an object field, a seq element)"
+class = "precision"
+state = "closed"
+note = "fixed in the walker (436): a float range (anonymous or named) is classified as its base float refined with the closed interval (`IRType.floatRange`, `withFloatRange`), asserted at allocation and at a seq element read (`rangeCondsIfNeeded`), clamped in an unread witness cell, emitted and keyed by its bounds' bits. Modelled exactly, no decline. Found converting the float family (K9d-8)"
+sha = "f2bcc983"
+slice = "K9d"
+home = "INT-77 (`wip/k9d8`)"
+source = "K9d-8 pinFind conversion"
+evidence = "red at 87695fc2: `tsymex_0016_int77_floatrange` does not compile (`node lacks field: intVal` in `parseRangeBracket`); green at f2bcc983, c and cpp, 6 OK: every verdict pinned natively (`pinExact` over the float-range domain, `pinFind`), incl. -0.0 admitted, NaN and the float32 successor of 2.5 excluded"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int77_floatrange"]
+
+[[row]]
+id = "INT-82"
+table = "5.8c"
+title = "K9d-10: a ref parameter compared with a node the SUT allocates (`Node(...)`, `new`) is a false `sxSat`. `assertFreshness` (`runtime_heap.nim`) keeps a fresh address distinct from nil and from the path's live refs only, and a caller's ref parameter (or a ref reached through one) is never among them, so `p == n` holds in the model. Natively no caller's object is the one the SUT has just allocated: `p == n` is false on every input, and every target behind it (a write through `n` read back through `p`) is unreachable. `tsymex_h_verification` asserted the false verdict as intended (its section 2 comment); its two witnesses do not hit natively"
+class = "soundness"
+state = "closed"
+note = "fixed in the walker (440, provisional): an allocation is distinct from every object of the walk's entry state. A disjointness predicate per ref sort (`@pre_<T>`, EUF, no quantifier): the `new` arm's address is `not @pre`, and every entry-state address a query mentions is `@pre` -- a parameter's leaves and a global's entry value by name, and a `select` on an input heap (`heap_<key>`) or a parameter's seq / table backing, through stores and merges, guarded by its index being `@pre` for a Ref-keyed array (`refProvenanceRoots`, heap_model.nim, asserted from `globalRoots`). Read off the query's terms, so it is complete for every address a query can name, not only the path's live set. `tsymex_h_verification`'s `param_ctor_eq_hit` and `param_ctor_write_hit` are pinned `sxUnsat` (pinFind). A module-level ref read before any write still declines (`feGlobalReadUnmodelled`), pinned in the reproducer"
+sha = "39736fd6"
+slice = "K9d"
+home = "K9d-10 (`wip/k9d10`)"
+source = "K9d-10 pinFind conversion"
+evidence = "red at 6179aae4: six of the reproducer's targets `sxSat` (param vs `Node(...)`, vs `new`, a field, a write through the fresh node, a field two down, a seq parameter's element); green after the fix, c and cpp, 13 OK, every verdict pinned natively by pinFind over the ref domain, the three stored-then-compared targets `sxSat` with witnesses that hit"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int82_paramfresh"]
+
+[[row]]
+id = "INT-83"
+table = "5.8c"
+title = "K9d-10: the walker declines a `pointer` parameter and a `pointer` field of a by-value parameter (`feUnsupportedParamType`), where a `ref` or `ptr` one is modelled. `pinFind` now generates a `pointer` domain (nil and the addresses of `ref int` cells), so a verdict would be pinned natively the moment the walker decides one"
+class = "precision"
+state = "closed"
+note = "fixed in the walker (443, provisional; e8b48a20): Nim's `pointer` is an address of its own sort (`tPtr(pointerPointeeTy())`, `Ref_pointer`; `classifyType`), related to each typed sort by a pair of unary functions minted per sort, `@toAddr_T` and `@fromAddr_T` (heap_model.nim, the `pointer` section), with each application's round trip and nil-to-nil as ground facts (no quantifier). The casts and conversions (`cast[pointer](r)`, `pointer(q)`, a typed address passed as a `pointer`, `cast[ptr T](p)`) lower through `iekPtrCast`; a cell read through `cast[ptr T](p)` is a cell of `T`; two whole objects of different types are two addresses (`@addrKind`); an allocation is apart from a `pointer` parameter (INT-82's provenance, through the casts). A `pointer` parameter, field and element is modelled; its witness is the typed cell the model aliases it to, or a scalar cell of its own (`resolvePointer`). Named declines: a location read at two types is `heUnresolvedRef`; a `seq[pointer]` parameter is `feUnsupportedWitnessType` (its witness is not rendered). Integration with INT-65 (`rfc-0016-w4int65`, 74a5bdfe, unmerged): INT-65 holds a non-nil `pointer` as the typed ptr it was converted from, its nil as `ptr uint8` (`pointerNilTy`), and declines a non-nil cross-sort compare (`refCrossSortEq`) and `cast[ptr T]` of a `pointer` (`heUnsafeCast`); this model is a superset and wins. Conflict spots: `dsl_parser.nim` `parseNilCompare` (INT-65's `ntyPointer` arm), the `nnkNilLit` arm and the `var x: pointer` zero in `parseStmtInner` (`pointerNilTy`, dropped: a `pointer` nil is `nil_pointer`), the `nnkCast` arm (INT-65's `nilSideCore` pass-through and `cast[ptr T]`-of-`pointer` decline, replaced by `pointerCastIR`); `runtime.nim` `refEq` and `refCrossSortEq` (the pointer half goes: both sides are `Ref_pointer`; the proc-value half stays). Re-pin then in `tsymex_0016_int65_ptrnil`: `i65PointerCrossSort` (`heUnresolvedRef` decline -> exact `sxUnsat`) and `i65PointerBackCast` (`heUnsafeCast` decline -> exact, sat at a = 4); `i65PointerArith` (integer arithmetic on an address) should still decline; rerun the rest of that file. Also textual: `tsymex_0016_p6_nillit` (both re-pin the pointer nil arm; keep one, floor 443), `tsymex_0016_k2c_typeclass` (the E2 comment), `tsymex_rfc0005_s8cl_lifetime_b`'s GC_ref pin (INT-65 moved it to `cast[Cell]`) and the CR2 version pin. Found converting the ref family (K9d-10)"
+sha = "e8b48a20"
+slice = "K9d"
+home = "K9d-10 (`wip/k9d10`)"
+source = "K9d-10 pinFind conversion"
+evidence = "red at 0692c8e0 (before e8b48a20): each reproducer target `sxUnknown` with `feUnsupportedParamType`, and `tsymex_0016_k2c_typeclass` pinned the same decline for `ppointer` and `pptrobj`; green after the fix, `tsymex_0016_int83_pointerparam` 19 OK on c and cpp, every definite verdict pinned natively by pinFind over the `pointer` domain; `k2c_typeclass` re-pinned (`ppointer`, `pptrobj` exact sxSat by pinFind; the type-class row admits `pointer` at `tcClassify`), `p6_nillit` re-pinned (the pointer nil arm exact, pinExact); `k9d_pinfind`, `h_verification`, `int82_paramfresh` green on c"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int83_pointerparam", "tsymex_0016_k2c_typeclass", "tsymex_0016_p6_nillit"]
+
+[[row]]
+id = "INT-81"
+table = "5.8c"
+title = "K9d-10: the walker's witness builds a ref cell as the static type of the position it fills (`resolveRef`, `new(result)`, `runtime.nim`), not the run-type tag the model chose. A sat verdict that needs a descendant behind a base-typed parameter (a method override, `of`, a down-conversion) is right, but its witness replays as the base type and misses the target natively; a cell shared by a base-typed and a descendant-typed position is allocated at the size of whichever is built first"
+class = "witness fidelity (the verdict is sound)"
+state = "closed"
+note = "fixed in the witness builder (the walk is unchanged, so no walker version bump): a witness cell is built once per model address, as the dynamic type its run-type tags name, and every position holding the address gets that one object, upcast. The snapshot writes each hierarchy cell's tags (`<cell>.@lvl<j>`; down to `<cell>.@floor`, the deepest static type of a position holding it, they are that type's chain, deeper ones the model's input tag where the walk read the level) and renders the fields its dynamic chain declares (`heapFieldOwners`, heap_model.nim); the witness tuple registers every type of its positions' hierarchies and every type a walk tested the tag against (`hierFamily`), and `resolveRef` builds the cell as the deepest registered type the tags spell (`cellDynBuild`, `buildCellAs`). A type no symbol names makes the witness lossy (`paramsFidelity`). pinFind's ref domain builds and copies a hierarchy object by reference (`objectRefDomain`, `copyCellInto`): Nim's C backend generates a broken `=copy` for a descendant of a case object (`Sup` assigned an int), which `s8bn_remainder_e`'s `CMid8` hit. `tsymex_rfc0005_s8bn_remainder_d` and `_e` are pinned (census ceiling 37 -> 35)"
+sha = "782e18bc"
+slice = "K9d"
+home = "K9d-10 (`wip/k9d10`)"
+source = "K9d-10 pinFind conversion"
+evidence = "red at 0692c8e0: seven of the reproducer's eight tests fail (a method override, `of`, a down-conversion, a cell shared by a base- and a descendant-typed position, a descendant's own fields two levels down, a descendant reached through a field of a non-root static type, a cycle through two descendants), each `sxSat` whose witness does not hit natively or comes back untrusted; under pinFind `s8bn_remainder_d` failed two tests and `_e` did not compile in the C backend. Green after the fix: the reproducer c and cpp, 8 OK, every verdict pinned (two `sxUnsat` among them); `s8bn_remainder_d` 8 OK, `_e` 6 OK (c)"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int81_witnesstag"]
+
+[[row]]
+id = "INT-84"
+table = "5.8c"
+title = "K9d-11a: a holey enum parameter's hole is a trusted `sxSat` witness. The walker bounds an enum by `[0, maxOrd]` (#163 W7), which for a holey enum keeps its holes as model values, so a target only a hole reaches (`e != sA and e != sB` over `Sparse = enum sA = 0, sB = 3`) is a trusted `sxSat` at ordinal 1 or 2. Natively a hole is no value of the type and no caller can pass one: no input reaches the target. `tsymex_163audit_range_domain` asserted the false verdict as a documented imprecision (`sparseHole`), and pinFind replayed the hole witness (a conversion to a holey enum does not check holes), so the pin passed vacuously until `convWitness` refused a hole"
+class = "soundness"
+state = "closed"
+note = "fixed in the walker (444, provisional; 3605e3b5): a holey enum's lifted `itInt` carries its declared ordinals (`IRType.enumOrds`, `classifyType`'s enum arm), and `enumHoleConds` (heap_model.nim) asserts them as one disjunction of runs. Exactly on what `runSymexImpl` allocates for the parameters (`allocInputDomain`: a scalar, its fields and elements, a builtin set's hole bits are zero); with 0 as well at a read site (a seq element, a table value, a ref cell's field: a zero-initialised slot of an enum without ordinal 0 holds 0 natively) until the walk lowers a hole it does not see made, a conversion to a holey enum (`iekConvIntWidth.ciwHoley`; Nim checks `low .. high` only) or an opaque call (`freshRetSym`, the opaque havocs; `enumHolesMade`). An assignment's range check keeps `low .. high` (`rangeCondsIfNeeded(holes = false)`). pinFind's set domain takes an enum's declared values (it built sets holding holes). Native evidence (pinned toolchain): `Sparse(k)` of a hole converts (warning `HoleEnumConv`) and of 7 raises `RangeDefect`; `cast[Sparse](2)` is ordinal 2; `var w`, `default`, `newSeq`, `setLen`, an object constructor, `new` and an array of an enum without ordinal 0 all hold 0; `for e in E` over a holey enum needs std/enumutils and yields the declared values; `succ`, `pred`, `inc` and `a .. b` do not compile. Left: a zero-initialised element or field read through a container (`newSeq[Wide](1)[0]`, `new(WRef).w`) of an enum without ordinal 0 is `sxUnsat` (the read site's `[low, high]` excludes 0; not this row's holes, and older than it). A cast to an enum and `items` over one decline. Found converting the impure family (K9d-11a)"
+sha = "3605e3b5"
+slice = "K9d"
+home = "K9d-11a (`wip/k9d11`)"
+source = "K9d-11a pinFind conversion"
+evidence = "red at b275700f (before 3605e3b5): the reproducer's parameter, between-values ordinal, field and seq element targets were each `sxSat` with a hole witness that pinFind refused, as were a negative enum's hole at 0, an array element, a ref cell's field, a table value and a set of more members than declared values; green after the fix, `tsymex_0016_int84_holeyenum` 19 OK on c and cpp, every hole target `sxUnsat` pinned natively over the declared values, the conversion, zero-init and declared controls `sxSat` replayed; `163audit_range_domain` (`sparseHole` pinned `sxUnsat`), `163rev_enum_domain` (`reachesHoleAbove44`, `sparseHole` re-pinned `sxUnsat`), `163rev_enum_field_witness` (`reachHoleAbove44Field` re-pinned `sxUnsat`), `163rev_enum_ordinal`, `163rev_enum_positions`, `163rev_enum_valueshapes`, `163rev_disc_domain`, `0016_cr4_enum_layout`, `0016_w1g_inslice`, `rfc0005_s8cb_order`, `rfc0005_s8cb_tostr`, `k9d_pinfind`, `k9d_census`, CR2 green on c"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int84_holeyenum", "tsymex_163audit_range_domain", "tsymex_163rev_enum_domain", "tsymex_163rev_enum_field_witness"]
+
+[[row]]
+id = "INT-85"
+table = "5.8c"
+title = "K9d-11a: a zero-initialised slot of an enum or range without ordinal 0 is refuted at 0. `newSeq[Wide](1)[0]`, a `setLen` growth slot and `new(WRef).w` for `Wide = enum wA = 2, wB = 5` or `range[3..9]` hold 0 natively, but every read out of a container bounded the value to `[low, high]` (`rangeCondsIfNeeded` at the read site), so \"it holds 0\" was a false `sxUnsat`; `newSeq` and `setLen` of such a range declined (`defaultZeroTotal`)"
+class = "soundness"
+state = "closed"
+note = "fixed in the walker (445, provisional; a3400c47): a read site (a seq element, a heap cell's field or pointee, a case object's arm field, a table value, a nested part of a compound element) asserts the declared domain only where the slot does not hold a value the program made (`readRangeConds`, heap_model.nim). `madeValueCond` reads the value term through the views the walk builds over a backing (`store`, `ite`, the constant array of `newSeq`'s zero, `setLen`'s `lambda`) to a Boolean that holds exactly when the value is a numeral: a created slot is modelled exactly as 0 already (`seqNewZeroArrs`, `new`'s zero store), so only a caller's value (a free backing, an input's constant) keeps its domain, and a caller's seq grown by `setLen` keeps it on its old slots. A `range` excluding 0 has a zero (`defaultZeroTotal`), except as a discriminator (`discHoldsZero`). The INT-82 provenance marker (`@pre_<T>`) was not needed: the value term itself tells a made slot from a caller's. Native evidence (pinned toolchain): `newSeq`, `setLen`, `new`, `default(T)`, `default` of an object, a local and an array of `Wide` and of `range[3..9]` all hold 0, and an object constructor leaving a `Wide` field out and an untouched `result` of `Wide` hold 0; for `range[3..9]` those two do not compile (\"requires explicit initialization\"), the others compile with `UnsafeDefault`, `UnsafeSetLen` or `ProveInit` warnings. Predates INT-84 (the reproducer is red alike at 50edafcd). Left: a float range excluding 0.0 (`readRangeConds` reads integer kinds only); `tsymex_r11_range_invariant_audit` is red on the branch from INT-84's direct `bvRangeConds` in `enumHoleConds` (not this row)"
+sha = "a3400c47"
+slice = "K9d"
+home = "K9d-11a (`wip/k9d11`)"
+source = "INT-84 (left)"
+evidence = "red at ae1dc667 and at 50edafcd (before INT-84): the reproducer's `newSeq`, `setLen` and `new` targets for the enum were `sxUnsat` with a native hit, the range's `newSeq` and `setLen` `sxUnknown`, its `new` `sxUnsat`, and a caller's seq grown by `setLen` `sxUnsat` at its grown slot; green after the fix, `tsymex_0016_int85_zeroinit` 25 OK on c and cpp, every zeroed slot `sxSat` replayed, every caller's value `sxUnsat` pinned natively; `0016_int84_holeyenum`, `163rev_enum_domain`, `163rev_enum_field_witness`, `163rev_enum_ordinal`, `163rev_enum_positions`, `163rev_enum_valueshapes`, `0016_cr4_enum_layout`, `k9d_pinfind`, `0016_universe`, `163audit_range_domain`, `163audit_range_elem`, `rfc0005_s8bv_subrange`, `163rev_range_bounds`, CR2 green on c; float follow-up (446, provisional): a float `range` excluding 0.0 (`range[1.0..2.0]`, its float32 twin) holds +0.0 natively in a `newSeq` element, a `setLen` growth slot, `new`'s fields, `default(T)`, `default(Obj)`, a local array and an uninitialised local (probed, signbit false; an omitting constructor and an untouched `result` do not compile), but `readRangeConds` skipped float kinds and the seq element read asserted INT-77's interval directly: red at 44cd0bbd, `newSeq` (f64, f32), `setLen`, `new` (f64, f32) and a caller's seq grown by `setLen` `sxUnsat` with a native hit; green after the fix (float kinds read through `madeValueCond`, the seq read routed through `readRangeConds`), `tsymex_0016_int85_zeroinit` 42 OK on c and cpp, every zeroed float slot `sxSat` replayed natively, every caller twin `sxUnsat` pinned; `0016_int77_floatrange`, `r11_range_invariant_audit`, `0016_universe`, CR2 green on c"
+aliases = []
+cells = []
+pins = ["tsymex_0016_int85_zeroinit"]

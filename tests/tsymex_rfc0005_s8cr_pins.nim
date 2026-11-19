@@ -16,6 +16,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 const noReplay = SymexSettings(replay: false)
 
@@ -64,7 +65,7 @@ suite "RFC-0005 S8cr (a) -- a live sevError cap decline beside a clean witness":
       check M61 mod d != 0
 
   test "symexFind: sxSat, the witness, and the decline AT sevError":
-    let r = symexFind(capUnreached, tLabel("s8cr_cap_unreached"))
+    let r = pinFind(capUnreached, tLabel("s8cr_cap_unreached"))
     for e in r.errors: checkpoint($e.kind & " sev=" & $e.severity & ": " & e.msg)
     check r.status == sxSat
     check r.witness[0] == 42
@@ -76,7 +77,7 @@ suite "RFC-0005 S8cr (a) -- a live sevError cap decline beside a clean witness":
                          it.scope.kind == dskSiteAnchored)
 
   test "the witness is clean: no taint on its path, no replay, trusted":
-    let r = symexFind(capUnreached, tLabel("s8cr_cap_unreached"))
+    let r = pinFind(capUnreached, tLabel("s8cr_cap_unreached"))
     check r.soundness.pathTaint == {}
     check r.soundness.replay == rsNotNeeded
     check r.trusted
@@ -85,7 +86,7 @@ suite "RFC-0005 S8cr (a) -- a live sevError cap decline beside a clean witness":
     check r.gaps.anyIt(it.e.kind == feUnsupportedExprKind)
 
   test "the decline is live: the same run with no witness cannot prove sxUnsat":
-    let r = symexFind(capUnreachedDead, tLabel("s8cr_cap_unreached_dead"))
+    let r = pinFind(capUnreachedDead, tLabel("s8cr_cap_unreached_dead"))
     for e in r.errors: checkpoint($e.kind & " sev=" & $e.severity & ": " & e.msg)
     check r.status == sxUnknown
     check feUnsupportedExprKind in sevErrorKinds(r)

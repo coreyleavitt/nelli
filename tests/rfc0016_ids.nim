@@ -146,7 +146,9 @@ func evidenced*(r: WRow): bool =
 
 const pinVerbs* = ["pinExact", "pinExactOn", "pinDecline", "pinUndefined",
                    "pinCap", "pinRefused", "pinCrash", "pinAdmission",
-                   "pinNever", "skipCell", "writePinRecord"]
+                   "pinNever", "skipCell", "writePinRecord", "pinFind"]
+  ## `pinFind` (K9d's generator) judges through `pinJudge`, which writes the
+  ## record (RFC-0016 INT-72, the first closed row pinned by it alone).
 
 func isIdent(c: char): bool = c in IdentChars
 

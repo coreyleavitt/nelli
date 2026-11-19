@@ -43,6 +43,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -56,7 +57,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind) =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & show(r.errors)
     check r.status == want
     check not r.errors.hasKind(weInternalWalkerFault)
@@ -165,7 +166,7 @@ suite "S8an (2): the address of a local passed as a ptr":
     ## RFC-0005 S8ax: `addr x` of a routine variable is its address cell,
     ## which outlives the call, so the escape no longer declines.
     verdict(sutAddrEscape, "aesc", sxSat)
-    let r = symexFind(sutAddrEscape, tLabel("aesc"))
+    let r = pinFind(sutAddrEscape, tLabel("aesc"))
     if r.status == sxSat: check r.witness[0] == 2
 
   test "an addr actual the callee also reaches as a var is one location":
@@ -253,7 +254,7 @@ suite "S8an (3): a module-level var reached from a callee":
     ## callee's write was dropped).
     verdict(sutGlobal, "g", sxSat)
     verdict(sutGlobal, "g_dead", sxUnsat)
-    let r = symexFind(sutGlobal, tLabel("g"))
+    let r = pinFind(sutGlobal, tLabel("g"))
     if r.status == sxSat: check r.witness[0] == 7
 
   test "a callee reads the global as the caller left it":

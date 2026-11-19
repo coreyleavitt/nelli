@@ -23,6 +23,7 @@
 import std/strutils
 import ./k9cg_probes
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 genProbes("s", "b", "seq[int]", "@[1]", "@[2]", seqNames, "E")
 
@@ -37,15 +38,15 @@ suite "K9c-g unbacked element paths (seq[seq[int]], empty literal)":
     checkProbes("s", seqNames, "E")
 
   test "insert into an empty seq of an unbacked element declines as a gap":
-    let r = symexFind(tabInsertE, tLabel("t"))
+    let r = pinFind(tabInsertE, tLabel("t"))
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)
     check not r.errors.named(weInternalWalkerFault)
 
   test "a loop over an empty seq of an unbacked element runs zero times":
-    let r = symexFind(sForInE, tLabel("t"))
+    let r = pinFind(sForInE, tLabel("t"))
     check r.status == sxSat and r.trusted
-    let w = symexFind(sWhileE, tLabel("t"))
+    let w = pinFind(sWhileE, tLabel("t"))
     check w.status == sxSat and w.trusted
 
   test "walker version floor >= 374 (RFC-0016 K9c-g)":

@@ -37,6 +37,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 proc reachOversizedLiteral(a: int32) =
   if a > 3_000_000_000:
@@ -65,11 +66,11 @@ suite "#163 item 2 -- an oversized untyped literal compared against a narrower i
     check ok == false
 
   test "RED (pre-fix): symex must agree the target is UNSAT, not falsely SAT":
-    let r = symexFind(reachOversizedLiteral, tLabel("hit"))
+    let r = pinFind(reachOversizedLiteral, tLabel("hit"))
     check r.status == sxUnsat
 
   test "the mirror comparison direction agrees too":
-    let r = symexFind(reachOversizedLiteralLe, tLabel("hit"))
+    let r = pinFind(reachOversizedLiteralLe, tLabel("hit"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ suite "#163 item 2 non-regression -- a same-width (no hidden conv) oversized lit
     check 4_000_000_000 > 3_000_000_000
 
   test "symex still finds it reachable":
-    let r = symexFind(reachViaWideParam, tLabel("hit"))
+    let r = pinFind(reachViaWideParam, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] > 3_000_000_000
 
@@ -194,19 +195,19 @@ suite "#163 item 2 follow-up -- range-alias discrimination-gate gap":
       check not (r.f.int64 > 3_000_000_000'i64)
 
   test "non-regression -- a signed range-alias TOP-LEVEL PARAM stays sound (promoteSound)":
-    let r = symexFind(reachRangeAliasParam, tLabel("hit"))
+    let r = pinFind(reachRangeAliasParam, tLabel("hit"))
     check r.status == sxUnsat
 
   test "non-regression -- an unsigned range-alias param stays sound":
-    let r = symexFind(reachUnsignedRangeAliasParam, tLabel("hit"))
+    let r = pinFind(reachUnsignedRangeAliasParam, tLabel("hit"))
     check r.status == sxUnsat
 
   test "RED (pre-fix): a range-typed OBJECT FIELD must agree the target is UNSAT":
-    let r = symexFind(reachRangeAliasField, tLabel("hit"))
+    let r = pinFind(reachRangeAliasField, tLabel("hit"))
     check r.status == sxUnsat
 
   test "RED (pre-fix): a range-typed LOCAL VARIABLE must agree the target is UNSAT":
-    let r = symexFind(reachRangeAliasLocal, tLabel("hit"))
+    let r = pinFind(reachRangeAliasLocal, tLabel("hit"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -238,7 +239,7 @@ suite "#163 item 2 follow-up -- same-width pass-through stays untouched":
     check not (ord(cGreen) > 1)
 
   test "an enum ord() comparison within native-int width is still reachable":
-    let r = symexFind(reachEnumWidenViaOrd, tLabel("hit"))
+    let r = pinFind(reachEnumWidenViaOrd, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == cBlue
 
@@ -358,31 +359,31 @@ suite "#163 -- ord() carries its declared native-int width, not the argument's":
     check ord(cGreen) == 1
 
   test "RED (pre-fix): an enum PARAM's ord() must agree the target is UNSAT":
-    let r = symexFind(ordEnumParam, tLabel("hit"))
+    let r = pinFind(ordEnumParam, tLabel("hit"))
     check r.status == sxUnsat
 
   test "RED (pre-fix): an enum LOCAL's ord() must agree the target is UNSAT":
-    let r = symexFind(ordEnumLocal, tLabel("hit"))
+    let r = pinFind(ordEnumLocal, tLabel("hit"))
     check r.status == sxUnsat
 
   test "RED (pre-fix): an enum OBJECT FIELD's ord() must agree the target is UNSAT":
-    let r = symexFind(ordEnumField, tLabel("hit"))
+    let r = pinFind(ordEnumField, tLabel("hit"))
     check r.status == sxUnsat
 
   test "RED (pre-fix): a char's ord() must agree the target is UNSAT":
-    let r = symexFind(ordCharParam, tLabel("hit"))
+    let r = pinFind(ordCharParam, tLabel("hit"))
     check r.status == sxUnsat
 
   test "non-regression -- a signed range-alias TOP-LEVEL PARAM stays sound (promoteSound)":
-    let r = symexFind(ordRangeAliasParam, tLabel("hit"))
+    let r = pinFind(ordRangeAliasParam, tLabel("hit"))
     check r.status == sxUnsat
 
   test "RED (pre-fix): ord() bound to a let outside any comparison must agree UNSAT":
-    let r = symexFind(ordNonComparisonLet, tLabel("hit"))
+    let r = pinFind(ordNonComparisonLet, tLabel("hit"))
     check r.status == sxUnsat
 
   test "non-regression -- an ordinary in-range ord() comparison still finds its witness":
-    let r = symexFind(ordEqualsOne, tLabel("hit"))
+    let r = pinFind(ordEqualsOne, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == cGreen
 

@@ -29,6 +29,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # If-expression as a sub-expression (nested as a `+` operand)
@@ -97,46 +98,46 @@ proc maxSymbolicVsSymbolic(a, b: int) =
 suite "symex RFC-chapulin-hardening M5 — if-expr sub-expression":
 
   test "M5-1: (if x>0:1 else:2)+1 == 2 <=> x>0, exact witness":
-    let r = symexFind(ifExprSubExprHit1, tLabel("hit1"))
+    let r = pinFind(ifExprSubExprHit1, tLabel("hit1"))
     check r.status == sxSat
     check r.witness[0] > 0
 
   test "M5-2: (if x>0:1 else:2)+1 == 3 <=> x<=0, exact witness (BOTH arms modeled)":
-    let r = symexFind(ifExprSubExprHit2, tLabel("hit2"))
+    let r = pinFind(ifExprSubExprHit2, tLabel("hit2"))
     check r.status == sxSat
     check r.witness[0] <= 0
 
   test "M5-3: if-expr sub-expression soundness UNSAT":
-    let r = symexFind(ifExprSubExprUnsat, tLabel("unsat"))
+    let r = pinFind(ifExprSubExprUnsat, tLabel("unsat"))
     check r.status == sxUnsat
 
   test "M5-4: if-expr as direct let-rhs — sxSat with x>0 witness":
-    let r = symexFind(ifExprDirectLet, tLabel("hit"))
+    let r = pinFind(ifExprDirectLet, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] > 0
 
 suite "symex RFC-chapulin-hardening M5 — min/max":
 
   test "M5-5: max(x, 5) == 5 <=> x <= 5, exact witness":
-    let r = symexFind(maxHitAtBound, tLabel("hit"))
+    let r = pinFind(maxHitAtBound, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] <= 5
 
   test "M5-6: max(x, 5) < 5 is UNSAT (max(x,5) >= 5 always)":
-    let r = symexFind(maxUnsat, tLabel("unsat"))
+    let r = pinFind(maxUnsat, tLabel("unsat"))
     check r.status == sxUnsat
 
   test "M5-7: min(x, 5) == 5 <=> x >= 5, exact witness":
-    let r = symexFind(minHitAtBound, tLabel("hit"))
+    let r = pinFind(minHitAtBound, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] >= 5
 
   test "M5-8: min(x, 5) > 5 is UNSAT (min(x,5) <= 5 always)":
-    let r = symexFind(minUnsat, tLabel("unsat"))
+    let r = pinFind(minUnsat, tLabel("unsat"))
     check r.status == sxUnsat
 
   test "M5-9: max(a, b) == a and a > b — symbolic-vs-symbolic form":
-    let r = symexFind(maxSymbolicVsSymbolic, tLabel("hit"))
+    let r = pinFind(maxSymbolicVsSymbolic, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] > r.witness[1]
 

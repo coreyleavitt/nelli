@@ -11,6 +11,7 @@
 ## comment documents the ACTUAL classifyType/heap routing, not a guess.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 type
   Node = ref object
@@ -43,20 +44,17 @@ proc transitiveWriteUnsat(p, q, r: Node) =
       symexTarget("transitive_unsat")
 
 # =============================================================================
-# 2. Mixed param <-> constructed-node aliasing. `p` is a caller PARAM (a free
-# `Ref_Node`-sorted symbol with no address history); `n` is a LOCALLY
-# constructed node (`Node(val: x, next: nil)`, Step C's real heap
-# construction, which allocates via the same `freshRef`/`assertFreshness`
-# machinery as `new`). `assertFreshness` (runtime_heap.nim) only asserts `n`
-# distinct from `nil` and from every PRIOR *live* ref of this type ON THIS
-# PATH (`path.liveRefs`) — bare caller params are never registered there (no
-# universal quantifier over the ref sort is ever asserted — the G4 MBQI-hang
-# lesson). So `p` (an unconstrained free symbol of the SAME uninterpreted
-# `Ref_Node` sort) is NOT excluded from coinciding with `n`'s freshly-minted
-# address: `p == n` is genuinely reachable, and so is `p != n` — a real,
-# two-sided verdict, not a one-sided degrade. When `p == n` is forced, a
-# write through either is observable through the other, with a matching
-# UNSAT soundness companion — real identity, not a free/unconstrained value.
+# 2. Mixed param <-> constructed-node aliasing. `p` is a caller PARAM;
+# `n` is a LOCALLY constructed node (`Node(val: x, next: nil)`, Step C's real
+# heap construction, through the `new` arm's `freshRef`/`assertFreshness`).
+# Natively a fresh allocation is distinct from every object that existed
+# before it, so `p == n` is false on every input and `p != n` true on every
+# one. This section once asserted `p == n` reachable (`assertFreshness` kept
+# `n` apart from the path's own allocations only, never from a parameter):
+# a false sxSat, RFC-0016 INT-82, whose witnesses did not hit natively. The
+# walker now keeps every allocation apart from the entry state
+# (`refProvenanceRoots`, heap_model.nim), so the two `p == n` targets are
+# sxUnsat and the forced-write companion is unsat for the same reason.
 # =============================================================================
 
 proc paramConstructedEqHit(p: Node, x: int) =
@@ -242,77 +240,77 @@ proc deepChainWriteUnsat(p: Node) =
 suite "Cluster H verification — identity transitivity / composition":
 
   test "transitive: p==q and q==r; write through p is observed through r (sxSat)":
-    let r = symexFind(transitiveWriteHit, tLabel("transitive_hit"))
+    let r = pinFind(transitiveWriteHit, tLabel("transitive_hit"))
     check r.status == sxSat
 
   test "transitive UNSAT soundness: r.val != 42 is impossible under the same chain":
-    let r = symexFind(transitiveWriteUnsat, tLabel("transitive_unsat"))
+    let r = pinFind(transitiveWriteUnsat, tLabel("transitive_unsat"))
     check r.status == sxUnsat
 
 suite "Cluster H verification — mixed param<->constructed-node aliasing":
 
-  test "p == n (param vs freshly-constructed node) is reachable (sxSat)":
-    let r = symexFind(paramConstructedEqHit, tLabel("param_ctor_eq_hit"))
+  test "p == n (param vs freshly-constructed node) is unreachable (sxUnsat, INT-82)":
+    let r = pinFind(paramConstructedEqHit, tLabel("param_ctor_eq_hit"))
+    check r.status == sxUnsat
+
+  test "p != n is reachable":
+    let r = pinFind(paramConstructedNeqHit, tLabel("param_ctor_neq_hit"))
     check r.status == sxSat
 
-  test "p != n is ALSO reachable (freshness only excludes nil/prior live refs, not free params)":
-    let r = symexFind(paramConstructedNeqHit, tLabel("param_ctor_neq_hit"))
-    check r.status == sxSat
-
-  test "forced p == n: a write through n is observed through p (sxSat)":
-    let r = symexFind(paramConstructedForcedWriteHit, tLabel("param_ctor_write_hit"))
-    check r.status == sxSat
+  test "p == n never holds, so no write through n is seen through p (sxUnsat, INT-82)":
+    let r = pinFind(paramConstructedForcedWriteHit, tLabel("param_ctor_write_hit"))
+    check r.status == sxUnsat
 
   test "forced p == n UNSAT soundness: p.val != 99 after the write is impossible":
-    let r = symexFind(paramConstructedForcedWriteUnsat, tLabel("param_ctor_write_unsat"))
+    let r = pinFind(paramConstructedForcedWriteUnsat, tLabel("param_ctor_write_unsat"))
     check r.status == sxUnsat
 
 suite "Cluster H verification — nil edge cases":
 
   test "p == nil is reachable (sxSat)":
-    let r = symexFind(pNilReachable, tLabel("p_nil_hit"))
+    let r = pinFind(pNilReachable, tLabel("p_nil_hit"))
     check r.status == sxSat
 
   test "p != nil is reachable (sxSat)":
-    let r = symexFind(pNonNilReachable, tLabel("p_nonnil_hit"))
+    let r = pinFind(pNonNilReachable, tLabel("p_nonnil_hit"))
     check r.status == sxSat
 
   test "proven non-nil p: p == nil is UNSAT inside the guard":
-    let r = symexFind(provenNonNilThenNilUnsat, tLabel("proven_nonnil_then_nil_unsat"))
+    let r = pinFind(provenNonNilThenNilUnsat, tLabel("proven_nonnil_then_nil_unsat"))
     check r.status == sxUnsat
 
   test "two independent nil refs compare equal (sxSat)":
-    let r = symexFind(twoNilRefsEqReachable, tLabel("two_nil_eq_hit"))
+    let r = pinFind(twoNilRefsEqReachable, tLabel("two_nil_eq_hit"))
     check r.status == sxSat
 
   test "two independent nil refs UNSAT soundness: they can never compare unequal":
-    let r = symexFind(twoNilRefsNeqUnsat, tLabel("two_nil_neq_unsat"))
+    let r = pinFind(twoNilRefsNeqUnsat, tLabel("two_nil_neq_unsat"))
     check r.status == sxUnsat
 
 suite "Cluster H verification — variant ref-object FIELD ACCESS (supported vs excluded)":
 
   test "SUPPORTED since RFC-0005 S8l: inline ref to a MULTI-axis variant — disc read is sxSat (was sxUnknown, heRefVariantUnsupported)":
-    let r = symexFind(inlineMultiVariantDiscRead, tLabel("inline_multivariant_disc_hit"))
+    let r = pinFind(inlineMultiVariantDiscRead, tLabel("inline_multivariant_disc_hit"))
     check r.status == sxSat
     for e in r.errors:
       check e.kind != weInternalWalkerFault   # RFC-0005 S8m: heRefVariantUnsupported retired
 
   test "SUPPORTED (contrast): inline ref to a SINGLE-axis variant — arm-field read is sxSat":
-    let r = symexFind(inlineSingleVariantArmFieldRead, tLabel("inline_singlevariant_armfield_hit"))
+    let r = pinFind(inlineSingleVariantArmFieldRead, tLabel("inline_singlevariant_armfield_hit"))
     check r.status == sxSat
 
   test "SUPPORTED (contrast): NAMED alias to a ref-to-variant — field read is sxSat (heap-modelled since RFC-0005 S8l)":
-    let r = symexFind(namedAliasVariantDiscRead, tLabel("named_alias_variant_disc_hit"))
+    let r = pinFind(namedAliasVariantDiscRead, tLabel("named_alias_variant_disc_hit"))
     check r.status == sxSat
 
 suite "Cluster H verification — deep aliasing chain VERDICT (3+ hops)":
 
   test "a field 3 hops deep can be written and re-read for a real sxSat verdict":
-    let r = symexFind(deepChainWriteHit, tLabel("deep_chain_hit"))
+    let r = pinFind(deepChainWriteHit, tLabel("deep_chain_hit"))
     check r.status == sxSat
 
   test "UNSAT soundness: the 3-hop-deep field cannot be anything other than the written value":
-    let r = symexFind(deepChainWriteUnsat, tLabel("deep_chain_unsat"))
+    let r = pinFind(deepChainWriteUnsat, tLabel("deep_chain_unsat"))
     check r.status == sxUnsat
 
 suite "Cluster H verification — version pins (no bump expected)":

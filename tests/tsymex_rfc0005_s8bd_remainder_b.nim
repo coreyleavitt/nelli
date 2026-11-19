@@ -14,6 +14,7 @@
 
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -32,7 +33,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 template clean(fn: typed, lbl: string, want: SymexStatusKind,
                st: SymexSettings = SymexSettings()): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl), st)
+    let r = pinFind(fn, tLabel(lbl), st)
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
@@ -144,8 +145,8 @@ suite "S8bd (3): the heap-depth budget bounds a chain":
       check r.witness[0].next.next.next.next.next.next.val == 7
 
   test "a chain past the budget still declines, and names it":
-    for (r, lbl) in [(symexFind(chain9, tLabel("c9")), "default"),
-                     (symexFind(chain7, tLabel("c7"), shallow), "shallow")]:
+    for (r, lbl) in [(pinFind(chain9, tLabel("c9")), "default"),
+                     (pinFind(chain7, tLabel("c7"), shallow), "shallow")]:
       checkpoint lbl & " " & $r.status & " " & show(r.errors)
       check r.status == sxUnknown
       check r.errors.hasKind(heDepthExhausted)

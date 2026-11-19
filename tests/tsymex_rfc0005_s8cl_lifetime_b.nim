@@ -225,7 +225,7 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     declines(sutCreate, "cr", "create"):
       check r.status == sxUnknown
       check r.errors.named(feUnsupportedOp)
-    # RFC-0016 INT-65: arc.nim's `cast[pointer]` keeps the address now, so
+    # RFC-0016 INT-83: arc.nim's `cast[pointer]` keeps the address now, so
     # GC_ref declines one statement later, at `nimIncRef`'s write through an
     # integer-computed address (`cast[Cell](cast[int](p) -% ...).rc = ...`).
     declines(sutGcRef, "gr", "nnkAsgn shape: cast[Cell]"):

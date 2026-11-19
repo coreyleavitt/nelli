@@ -75,8 +75,8 @@ suite "RFC-0016 W3-z P6: nil in a composite slot":
     discard pinExact(pref, cellKey(axTypeClass, "ref"), domain = sampled([true, false]))
     discard pinExact(prefG, cellKey(axTypeClass, "ref"), domain = sampled([true, false]))
 
-  test "a pointer nil arm is modelled and agrees with native (INT-65)":
-    check parseInt(symexWalkerVersion) >= 434
+  test "a pointer nil arm is modelled and agrees with native (INT-65, INT-83)":
+    check parseInt(symexWalkerVersion) >= 443
     discard pinExact(pptr, cellKey(axTypeClass, "pointer"), domain = sampled([true, false]))
     discard pinExact(pptrG, cellKey(axTypeClass, "pointer"), domain = sampled([true, false]))
 

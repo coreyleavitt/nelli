@@ -157,10 +157,10 @@ suite "RFC-0016 K2c: one snippet per NimTypeKind":
     check not admitTypeClass(ntyForward, tcClassify).admitted
 
 suite "RFC-0016 K2c: the pointer and view kinds":
-  test "ptr, openArray and var are classified, pointer, varargs and UncheckedArray are not":
-    for k in [ntyPtr, ntyOpenArray, ntyVar]:
+  test "ptr, pointer, openArray and var are classified, varargs and UncheckedArray are not":
+    for k in [ntyPtr, ntyPointer, ntyOpenArray, ntyVar]:
       check admitTypeClass(k, tcClassify).admitted
-    for k in [ntyPointer, ntyVarargs, ntyUncheckedArray]:
+    for k in [ntyVarargs, ntyUncheckedArray]:
       check not admitTypeClass(k, tcClassify).admitted
 
   test "ptr, openArray and var parameters are modelled":
@@ -170,8 +170,13 @@ suite "RFC-0016 K2c: the pointer and view kinds":
                      domain = sampled([@[1, 2], @[], @[1]]))
     discard pinExact(pvar, cellKey(axTypeClass, "var"), domain = sampled([3, 0]))
 
-  test "pointer, varargs and UncheckedArray parameters decline with their row's kind":
-    pinDecline(ppointer, cellKey(axTypeClass, "pointer"), feUnsupportedParamType)
+  test "a pointer parameter is modelled (RFC-0016 INT-83), pinned on its witness":
+    let r = pinFind(ppointer, tLabel("hit"))
+    checkpoint $r.errors
+    check r.status == sxSat
+    check r.trusted
+
+  test "varargs and UncheckedArray parameters decline with their row's kind":
     pinDecline(pvarargs, cellKey(axTypeClass, "varargs"), feUnsupportedParamType)
     pinDecline(punchecked, cellKey(axTypeClass, "uncheckedArray"), feUnsupportedParamType)
 
@@ -190,10 +195,16 @@ suite "RFC-0016 K2c: the pointer and view kinds":
     # terminate (a loop-cap matter, K7), so the input is bounded.
     pinDecline(psplit, cellKey(axTypeClass, "string"), seUnsupportedStringOp)
 
-  test "CRH-01: an object field the walker declines was a compile stop, now declines":
-    # `pointer` field: the witness reader gave the `int` placeholder to a
-    # `pointer` slot. `UncheckedArray` field: a witness tuple cannot hold one.
-    pinDecline(pptrobj, cellKey(axTypeClass, "pointer"), feUnsupportedParamType)
+  test "CRH-01: a pointer field is modelled (RFC-0016 INT-83), pinned on its witness":
+    # It declined (`feUnsupportedParamType`) until INT-83; before CRH-01 the
+    # witness reader gave the `int` placeholder to a `pointer` slot.
+    let r = pinFind(pptrobj, tLabel("hit"))
+    checkpoint $r.errors
+    check r.status == sxSat
+    check r.trusted
+
+  test "CRH-01: an UncheckedArray field was a compile stop, now declines":
+    # a witness tuple cannot hold one.
     pinDecline(pucobj, cellKey(axTypeClass, "uncheckedArray"), feUnsupportedWitnessType)
 
 suite "RFC-0016 K2c: classifyType reads the named-feature rows":
@@ -214,10 +225,10 @@ suite "RFC-0016 K2c: walker version":
 # E2 (W3-z): `cstring`, `pointer` and `proc` are modelled at the by-value-formal
 # site (`typeCopiedByValue`): the formal is the caller's bytes, so a callee that
 # overwrites the global it was handed a copy of does not change what it holds.
-# The parameter site declines (pinned above); these pin the modelled site, where
-# the walk's copy is Nim's and the verdict is exact against native. A `pointer`
-# value holds the `ptr` it is built from (its nil and `cast` are INT-65's,
-# `tsymex_0016_int65_ptrnil`), and a `proc` value is a local.
+# The `cstring` and `proc` parameter sites decline (a `pointer` parameter is
+# modelled since INT-83, pinned above); these pin the by-value site, where the
+# walk's copy is Nim's and the verdict is exact against native. A `proc` value
+# is a local (a global one is held by name and declines).
 var
   gByCs: cstring
   gByPtr: ptr int

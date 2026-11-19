@@ -43,6 +43,7 @@
 import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # 1. Direct closure call, int retTy -- the S3 shape through `applyClosureGround`
@@ -86,17 +87,17 @@ proc sutClosureIntAssignedSat(x: int) =
 suite "symex round-6 N16 — direct closure call: untouched-result path binds to zero (int)":
 
   test "N16-1a: r == 0 on the untouched (x <= 0) path is reachable (sxSat), witness replays":
-    let r = symexFind(sutClosureIntZeroSat, tLabel("closure_int_zero_sat"))
+    let r = pinFind(sutClosureIntZeroSat, tLabel("closure_int_zero_sat"))
     check r.status == sxSat
     check r.witness[0] <= 0
     check zeroIfNonPositiveInt(r.witness[0]) == 0
 
   test "N16-1b: r == 42 on the untouched path is UNREACHABLE (sxUnsat), not a false sxSat":
-    let r = symexFind(sutClosureIntFalseSat42, tLabel("closure_int_false_sat_42"))
+    let r = pinFind(sutClosureIntFalseSat42, tLabel("closure_int_false_sat_42"))
     check r.status == sxUnsat
 
   test "N16-1c: regression -- the assigned branch (x > 0, r == x) still proves sxSat":
-    let r = symexFind(sutClosureIntAssignedSat, tLabel("closure_int_assigned_sat"))
+    let r = pinFind(sutClosureIntAssignedSat, tLabel("closure_int_assigned_sat"))
     check r.status == sxSat
     check r.witness[0] > 0
     check zeroIfNonPositiveInt(r.witness[0]) == r.witness[0]
@@ -142,7 +143,7 @@ proc sutHofMapIntZeroSat(a: int) =
 suite "symex round-6 N16 — C4 HOF inline path (map): N29-unblocked real verdict":
 
   test "N16-2: conditional-body closure through inline map now proves sxSat (N29 fix unblocked it; witness a <= 0)":
-    let r = symexFind(sutHofMapIntZeroSat, tLabel("hof_map_int_zero_sat"))
+    let r = pinFind(sutHofMapIntZeroSat, tLabel("hof_map_int_zero_sat"))
     check r.status == sxSat
     if r.status == sxSat:
       # Model-independent (RFC-0005 S8w2): replay the SUT's own condition.
@@ -180,13 +181,13 @@ proc sutClosureBoolFalseSatTrue(x: int) =
 suite "symex round-6 N16 — direct closure call: bool retTy zero-default (false)":
 
   test "N16-3a: r == false on the untouched path is reachable (sxSat)":
-    let r = symexFind(sutClosureBoolZeroSat, tLabel("closure_bool_zero_sat"))
+    let r = pinFind(sutClosureBoolZeroSat, tLabel("closure_bool_zero_sat"))
     check r.status == sxSat
     check r.witness[0] <= 0
     check trueIfPositiveBool(r.witness[0]) == false
 
   test "N16-3b: r == true on the untouched path is UNREACHABLE (sxUnsat)":
-    let r = symexFind(sutClosureBoolFalseSatTrue, tLabel("closure_bool_false_sat_true"))
+    let r = pinFind(sutClosureBoolFalseSatTrue, tLabel("closure_bool_false_sat_true"))
     check r.status == sxUnsat
 
 # =============================================================================
@@ -230,11 +231,11 @@ suite "symex round-6 N16 — direct closure call: string retTy, modelled since R
   test "N16-4: string-returning closure's untouched path is \"\" (RFC-0005 S8p; was a classified decline, N30)":
     ## The regression guard this suite promised a slice widening the string
     ## return: the zero-default `result` binds "" on the untouched path.
-    let r = symexFind(sutClosureStringZeroSat, tLabel("closure_string_zero_sat"))
+    let r = pinFind(sutClosureStringZeroSat, tLabel("closure_string_zero_sat"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] <= 0
-    let z = symexFind(sutClosureStringZeroNonEmpty, tLabel("closure_string_zero_nonempty"))
+    let z = pinFind(sutClosureStringZeroNonEmpty, tLabel("closure_string_zero_nonempty"))
     check z.status == sxUnsat
 
 # =============================================================================
@@ -258,7 +259,7 @@ proc sutClosureExhaustive(x: int) =
 suite "symex round-6 N16 — soundness: closure result union {1, -1, 0} is exhaustive":
 
   test "N16-5: no value outside {1, -1, 0} is ever reachable (sxUnsat)":
-    let r = symexFind(sutClosureExhaustive, tLabel("closure_exhaustive_impossible"))
+    let r = pinFind(sutClosureExhaustive, tLabel("closure_exhaustive_impossible"))
     check r.status == sxUnsat
 
 # =============================================================================

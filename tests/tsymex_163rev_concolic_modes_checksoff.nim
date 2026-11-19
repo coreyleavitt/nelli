@@ -34,7 +34,7 @@ suite "#163 review R16 D2 -- signed narrow width, checks-off build":
     check validateSymexSettings(defaultSymexSettings()).len == 0
 
   test "D2 wmExplore (rule a): the wrap at a=100, b=100 is a trusted sat (int8 wraps)":
-    let r = symexFind(addI8UncheckedGateAt100_100, tLabel("i8_wrapped_100_100"))
+    let r = pinFind(addI8UncheckedGateAt100_100, tLabel("i8_wrapped_100_100"))
     # RFC-0016 WA-B (P1): an int8 sum is computed in `int` and narrowed, a
     # defined wrap (the oracle above), so the pair is an exact witness.
     check r.status == sxSat

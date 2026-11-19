@@ -25,6 +25,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs
@@ -119,40 +120,40 @@ proc sutPlainFieldBindsUnconditionally(s: Shape) =
 suite "symex round-6 A2 — retBindEq svVariant general encoding":
 
   test "A2-1: callee constructs Shape(kind: skCircle, radius: r); r==7 reachable -> sxSat, witness r==7":
-    let res = symexFind(sutCalleeConstructedHit, tLabel("callee_circle_radius_7"))
+    let res = pinFind(sutCalleeConstructedHit, tLabel("callee_circle_radius_7"))
     check res.status == sxSat
     check res.witness[0] == 7
 
   test "A2-2: UNSAT companion — callee's returned s.radius is always r+1, s.radius==r is impossible":
-    let res = symexFind(sutCalleeConstructedUnsat, tLabel("callee_radius_unsat"))
+    let res = pinFind(sutCalleeConstructedUnsat, tLabel("callee_radius_unsat"))
     check res.status == sxUnsat
 
   test "A2-3a: pass-through param, symbolic disc — matching field constraint on the bound result -> sxSat":
-    let res = symexFind(sutPassThroughFieldMatchSat, tLabel("passthrough_field_match"))
+    let res = pinFind(sutPassThroughFieldMatchSat, tLabel("passthrough_field_match"))
     check res.status == sxSat
 
   test "A2-3b: pass-through UNSAT companion — mismatched field constraint on the SAME identity is impossible":
-    let res = symexFind(sutPassThroughFieldMismatchUnsat, tLabel("passthrough_field_mismatch"))
+    let res = pinFind(sutPassThroughFieldMismatchUnsat, tLabel("passthrough_field_mismatch"))
     check res.status == sxUnsat
 
   test "A2-4a: guarded-arm soundness — r's disc can never diverge from s's through pure identity -> sxUnsat":
-    let res = symexFind(sutGuardedDiscMismatchUnsat, tLabel("guarded_disc_mismatch"))
+    let res = pinFind(sutGuardedDiscMismatchUnsat, tLabel("guarded_disc_mismatch"))
     check res.status == sxUnsat
 
   test "A2-4b: guarded-arm soundness — the Circle arm binds correctly through pass-through -> sxSat, witness radius==7":
-    let res = symexFind(sutGuardedCircleArmReachable, tLabel("guarded_circle_reachable"))
+    let res = pinFind(sutGuardedCircleArmReachable, tLabel("guarded_circle_reachable"))
     check res.status == sxSat
     check res.witness[0].kind == skCircle
     check res.witness[0].radius == 7
 
   test "A2-4c: guarded-arm soundness — the OTHER (Square) arm ALSO binds correctly, independently -> sxSat, witness side==11":
-    let res = symexFind(sutGuardedSquareArmReachable, tLabel("guarded_square_reachable"))
+    let res = pinFind(sutGuardedSquareArmReachable, tLabel("guarded_square_reachable"))
     check res.status == sxSat
     check res.witness[0].kind == skSquare
     check res.witness[0].side == 11
 
   test "A2-5: plain (non-case) field binds unconditionally through the pass-through, no disc guard needed -> sxSat, witness tag==99":
-    let res = symexFind(sutPlainFieldBindsUnconditionally, tLabel("plain_field_binds"))
+    let res = pinFind(sutPlainFieldBindsUnconditionally, tLabel("plain_field_binds"))
     check res.status == sxSat
     check res.witness[0].tag == 99
 

@@ -20,7 +20,7 @@
 ##       be replayed.
 ## Every expected value was probed against the real compiler (Nim 2.2.10,
 ## debug build, c and cpp identical); the probe is quoted beside the test.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli
 import nelli/symex
@@ -99,40 +99,40 @@ suite "S8k (1): every query over strings is bounded":
 
   test "findColon(s, 0) > 1000 terminates as a recorded maxSeqLen decline":
     ## Was: no return (the query needs a 1001-byte witness).
-    let r = symexFind(farColon, tLabel("s8k_far_colon"))
+    let r = pinFind(farColon, tLabel("s8k_far_colon"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.capMsg
     check r.errors.onlyKinds({beSolverUndef})
 
   test "a length contradiction stays sxUnsat under the cap":
-    let r = symexFind(longAndShort, tLabel("s8k_long_and_short"))
+    let r = pinFind(longAndShort, tLabel("s8k_long_and_short"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "a 100-byte witness is inside the default cap":
-    let r = symexFind(len100, tLabel("s8k_len100"))
+    let r = pinFind(len100, tLabel("s8k_len100"))
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0].len == 100
 
   test "a 130-byte witness is past the default cap: declined, not sxUnsat":
-    let r = symexFind(needs130, tLabel("s8k_needs130"))
+    let r = pinFind(needs130, tLabel("s8k_needs130"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(beSolverUndef)
     check r.errors.capMsg
 
   test "a 130-byte length alone is past the default cap too":
-    let r = symexFind(len130, tLabel("s8k_len130"))
+    let r = pinFind(len130, tLabel("s8k_len130"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.named(beSolverUndef)
     check r.errors.capMsg
 
   test "maxSeqLen raises the cap: the 130-byte witness is found":
-    let r = symexFind(len130, tLabel("s8k_len130"), wideCap)
+    let r = pinFind(len130, tLabel("s8k_len130"), wideCap)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -143,7 +143,7 @@ suite "S8k (1): every query over strings is bounded":
     ## 0x71`; the query takes it as `str.at(s, 129) == "q"` (the same
     ## predicate on a byte string). Was: over 300 s under the wide cap
     ## with no budget, the sequence solver polling the counter slowly.
-    let r = symexFind(needs130, tLabel("s8k_needs130"), wideCap)
+    let r = pinFind(needs130, tLabel("s8k_needs130"), wideCap)
     checkpoint show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -155,12 +155,12 @@ suite "S8k (1): every query over strings is bounded":
     ## is declined at once.
     ## RFC-0005 S8cn: mixed bytes, since step 1e's first candidate (every byte
     ## the query's `q`) answers `needs130` within this budget, by evaluation.
-    let one = symexFind(needs130, tLabel("s8k_needs130"), smallSeqBudget)
+    let one = pinFind(needs130, tLabel("s8k_needs130"), smallSeqBudget)
     checkpoint show(one.errors)
     check one.status == sxSat
     if one.status == sxSat:
       check one.witness[0].len == 130 and one.witness[0][129] == 'q'
-    let r = symexFind(needs130Mixed, tLabel("s8k_needs130_mixed"), smallSeqBudget)
+    let r = pinFind(needs130Mixed, tLabel("s8k_needs130_mixed"), smallSeqBudget)
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.onlyKinds({beSolverUndef})
@@ -218,12 +218,12 @@ suite "S8k (2): the k-unroll prunes infeasible iterations":
   test "a dead label after a concretely bounded loop is sxUnsat":
     ## Was: sxUnknown [beBudgetExhausted] -- the infeasible "guard still
     ## true" survivors of every iteration past the third.
-    let r = symexFind(deadAfter, tLabel("s8k_dead_after"))
+    let r = pinFind(deadAfter, tLabel("s8k_dead_after"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
 
   test "the live label after the loop is still a clean sxSat":
-    let r = symexFind(liveAfter, tLabel("s8k_live_after"))
+    let r = pinFind(liveAfter, tLabel("s8k_live_after"))
     check r.status == sxSat
 
   test "nested loops at the default unwind: sxUnsat, iterations linear in the trip counts":
@@ -234,14 +234,14 @@ suite "S8k (2): the k-unroll prunes infeasible iterations":
     ## `sxUnknown` [beBudgetExhausted]. Pruned: the four outer and sixteen
     ## inner bodies a real run executes -- 20 -- and 37 queries.
     symexLoopIterations = 0
-    let r = symexFind(nested, tLabel("s8k_nested_dead"))
+    let r = pinFind(nested, tLabel("s8k_nested_dead"))
     checkpoint show(r.errors)
     checkpoint "loop body walks: " & $symexLoopIterations
     check r.status == sxUnsat
     check symexLoopIterations == 20
 
   test "a symbolic trip count past the bound still records the budget decline":
-    let r = symexFind(symbolicTrip, tLabel("s8k_symbolic_trip"))
+    let r = pinFind(symbolicTrip, tLabel("s8k_symbolic_trip"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(beBudgetExhausted)
@@ -280,13 +280,13 @@ suite "S8k (3): replay declines a witness through a nil dereference":
     ## Was: the run replayed the candidate against
     ## `tRaisedExn("NilAccessDefect")`, called `nilWriteOnNaN(nil, NaN)`,
     ## and the test binary died with SIGSEGV.
-    let r = symexFind(nilWriteOnNaN, tRaisedExn("NilAccessDefect"))
+    let r = pinFind(nilWriteOnNaN, tRaisedExn("NilAccessDefect"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check not r.errors.hasKind(feReplayRefuted)
 
   test "a label behind a caught nil write is not replayed either":
-    let r = symexFind(nilWriteCaught, tLabel("s8k_nil_caught"))
+    let r = pinFind(nilWriteCaught, tLabel("s8k_nil_caught"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check not r.errors.hasKind(feReplayRefuted)

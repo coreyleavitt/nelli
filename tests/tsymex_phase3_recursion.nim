@@ -8,6 +8,7 @@
 from ./s8cu_helpers import named
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc fib(n: int): int =
   if n <= 1:
@@ -20,7 +21,7 @@ proc fibTarget(x: int) =
 
 suite "symex Phase 3 — bounded recursion":
   test "depth-3 recursion completes; witness reaches the target":
-    let r = symexFind(fibTarget, tLabel("hit"))
+    let r = pinFind(fibTarget, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == 3
 
@@ -32,7 +33,7 @@ suite "symex Phase 3 — bounded recursion":
     proc fibDeep(x: int) =
       if fib(x) == 13:
         symexTarget("deep")
-    let r = symexFind(fibDeep, tLabel("deep"))
+    let r = pinFind(fibDeep, tLabel("deep"))
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)
 
@@ -43,6 +44,6 @@ suite "symex Phase 3 — bounded recursion":
     proc settings1(): SymexSettings =
       result = defaultSymexSettings()
       result.budget.maxCallDepth = 1
-    let r = symexFind(fibTarget, tLabel("hit"), settings1())
+    let r = pinFind(fibTarget, tLabel("hit"), settings1())
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhaustedUnmodelled)

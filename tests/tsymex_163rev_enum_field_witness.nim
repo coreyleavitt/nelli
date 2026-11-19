@@ -51,6 +51,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 # =============================================================================
 # Half 1 -- the flagship: a plain (dense, zero-based) enum object field.
@@ -86,11 +87,11 @@ suite "#163 item 1 -- symexFind COMPILES for an object with a plain enum field":
       check ord(c) >= 0 and ord(c) <= 2
 
   test "the call compiles and finds the target: sxSat":
-    let r = symexFind(reachGreen, tLabel("hit"))
+    let r = pinFind(reachGreen, tLabel("hit"))
     check r.status == sxSat
 
   test "WITNESS REPLAY: the returned witness's enum field genuinely equals cGreen":
-    let r = symexFind(reachGreen, tLabel("hit"))
+    let r = pinFind(reachGreen, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].tag == cGreen
     check r.witness[0].n == 7
@@ -102,7 +103,7 @@ suite "#163 item 1 -- symexFind COMPILES for an object with a plain enum field":
     check hit
 
   test "an out-of-domain field ordinal stays excluded: sxUnsat":
-    check symexFind(excludesOutOfDomain, tLabel("oob")).status == sxUnsat
+    check pinFind(excludesOutOfDomain, tLabel("oob")).status == sxUnsat
 
 # =============================================================================
 # Half 2 -- the enum DOMAIN positions R21 documented as unreachable at the
@@ -138,9 +139,10 @@ proc excludesOutOfDomainOrdering(b: OrderBox) =
     symexTarget("oob")
 
 proc reachHoleAbove44Field(b: BigBox) =
-  ## 100 is not a declared `BigOrd` member (a documented sparse-domain
-  ## imprecision, `tsymex_163rev_enum_domain.nim`) but must stay reachable:
-  ## it is inside [0, 300].
+  ## 100 is not a declared `BigOrd` member: a hole, inside [0, 300]. It
+  ## was pinned reachable (with a hole witness) as a documented sparse-
+  ## domain imprecision; RFC-0016 INT-84 bounds a field by its declared
+  ## ordinals, so no input reaches it.
   if ord(b.kind) == 100 and b.payload == 1:
     symexTarget("hole100")
 
@@ -160,13 +162,13 @@ suite "#163 item 1 -- object-field enum DOMAIN: negative ordinals":
     check ob.cmp == roLess and ob.payload == 42
 
   test "the negative-ordinal field is reachable, with a genuine matching witness":
-    let r = symexFind(reachNegOrdinalField, tLabel("neg-hit"))
+    let r = pinFind(reachNegOrdinalField, tLabel("neg-hit"))
     check r.status == sxSat
     check r.witness[0].cmp == roLess
     check r.witness[0].payload == 42
 
   test "an out-of-domain field ordinal stays excluded (would be unsound if unconstrained)":
-    check symexFind(excludesOutOfDomainOrdering, tLabel("oob")).status == sxUnsat
+    check pinFind(excludesOutOfDomainOrdering, tLabel("oob")).status == sxUnsat
 
 suite "#163 item 1 -- object-field enum DOMAIN: sparse, large explicit ordinal":
 
@@ -175,20 +177,18 @@ suite "#163 item 1 -- object-field enum DOMAIN: sparse, large explicit ordinal":
     let bb = BigBox(kind: boC, payload: 9)
     check bb.kind == boC and bb.payload == 9
 
-  test "a legal value beyond a truncated 8-bit bound is still reachable, with witness replay":
-    let r = symexFind(reachHoleAbove44Field, tLabel("hole100"))
-    check r.status == sxSat
-    check ord(r.witness[0].kind) == 100
-    check r.witness[0].payload == 1
+  test "a hole beyond a truncated 8-bit bound is no input (RFC-0016 INT-84)":
+    let r = pinFind(reachHoleAbove44Field, tLabel("hole100"))
+    check r.status == sxUnsat
 
   test "the declared large ordinal itself is reachable, with witness replay":
-    let r = symexFind(reachDeclaredBigField, tLabel("is-boc"))
+    let r = pinFind(reachDeclaredBigField, tLabel("is-boc"))
     check r.status == sxSat
     check r.witness[0].kind == boC
     check r.witness[0].payload == 9
 
   test "a genuinely out-of-domain ordinal is still excluded":
-    check symexFind(excludesGenuineOOBField, tLabel("oob")).status == sxUnsat
+    check pinFind(excludesGenuineOOBField, tLabel("oob")).status == sxUnsat
 
 
 suite "#163 item 1 -- walker version pin":

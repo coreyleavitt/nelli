@@ -46,7 +46,7 @@
 ## corpus. `renderAsChoicesVersion` stays unchanged -- no new witness shape
 ## (a chained scan's `string`/`int` witnesses render exactly as any other
 ## already-modeled `string`/`int` param).
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -111,11 +111,11 @@ proc faithfulSixChainImpossible(s: string) =
 suite "symex round-6 B5 — faithful catalog #6 repro (retires the finding)":
 
   test "B5-1: chained accumulating scans (readCStringHelper twice), 2nd offset = 1st result -> sxSat":
-    let r = symexFind(faithfulSixChain, tLabel("hit"))
+    let r = pinFind(faithfulSixChain, tLabel("hit"))
     check r.status == sxSat
 
   test "B5-1b UNSAT companion: 2nd scan's result can never precede its own (1st-derived) start":
-    let r = symexFind(faithfulSixChainImpossible, tLabel("impossible"))
+    let r = pinFind(faithfulSixChainImpossible, tLabel("impossible"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -133,11 +133,11 @@ proc sutChainedTwoPayloads(s: string) =
 suite "symex round-6 B5 — two-sequential-readCString (filename then mode)":
 
   test "B5-2: both payloads reachable in one witness (filename, then mode from its terminator) -> sxSat":
-    let r = symexFind(sutChainedTwoPayloads, tLabel("hit_both"))
+    let r = pinFind(sutChainedTwoPayloads, tLabel("hit_both"))
     check r.status == sxSat
 
   test "B5-2-cross: the witness, replayed through the real function twice, reproduces both payloads":
-    let r = symexFind(sutChainedTwoPayloads, tLabel("hit_both"))
+    let r = pinFind(sutChainedTwoPayloads, tLabel("hit_both"))
     check r.status == sxSat
     let s = r.witness[0]
     let (payload1, p1) = readCStringHelper(s, 0)
@@ -188,11 +188,11 @@ proc mixedChainNotFoundImpossible(s: string) =
 suite "symex round-6 B5 — zero/degenerate chain seed (no clamp resurrection)":
 
   test "B5-3: not-found 1st scan seeds a genuinely zero-iteration 2nd scan (i==s.len, j preserved at s.len+1) -> sxSat":
-    let r = symexFind(mixedChainNotFoundIntoB3, tLabel("seed-preserved"))
+    let r = pinFind(mixedChainNotFoundIntoB3, tLabel("seed-preserved"))
     check r.status == sxSat
 
   test "B5-3b UNSAT companion: the zero-iteration seed is never re-clamped below its true value":
-    let r = symexFind(mixedChainNotFoundImpossible, tLabel("impossible"))
+    let r = pinFind(mixedChainNotFoundImpossible, tLabel("impossible"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -301,7 +301,7 @@ when not defined(symexCiLeanB5):
   suite "symex round-6 B5 — trip wire (2nd bound not .len stays unrecognized)":
 
     test "B5-4: chain's 2nd scan has a non-.len (local-alias) bound -> NOT recognized, sxUnknown (unchanged, real trip-wire)":
-      let r = symexFind(sutChainSecondNonLenBoundImpossible, tLabel("impossible"),
+      let r = pinFind(sutChainSecondNonLenBoundImpossible, tLabel("impossible"),
                         b5TripWireBudget)
       check r.status == sxUnknown
       check r.errors.named(beBudgetExhausted)
@@ -321,7 +321,7 @@ proc sutB4ThenB3(s: string) =
 suite "symex round-6 B5 — mixed sibling composition (B4 then B3)":
 
   test "B5-5: B4's accumulating scan chained into B3's plain int-result scan -> sxSat":
-    let r = symexFind(sutB4ThenB3, tLabel("hit_mixed"))
+    let r = pinFind(sutB4ThenB3, tLabel("hit_mixed"))
     check r.status == sxSat
 
 suite "symex round-6 B5 — walker version pin":

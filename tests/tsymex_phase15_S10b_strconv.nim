@@ -19,6 +19,7 @@
 ## closed by the raises-path).
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # --- parseInt raises-path: non-digit input raises ValueError ----------------
 # `s` is pinned to a non-digit string; `let n = parseInt(s)` must RAISE
@@ -50,7 +51,7 @@ proc pf(s: string) =
 
 suite "symex Phase 15 S10b — parseInt raises-path + $float/parseFloat":
   test "parseInt: non-digit input RAISES ValueError (sxRaised)":
-    let r = symexFind(parseRaises, tRaisedExn("ValueError"))
+    let r = pinFind(parseRaises, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     # The S10a unsoundness-window hint is gone — closed by the raises-path.
@@ -58,23 +59,23 @@ suite "symex Phase 15 S10b — parseInt raises-path + $float/parseFloat":
       check e.kind != seParseIntPreE
 
   test "parseInt: parseInt(\"-42\") is sxSat with int value -42 (regression)":
-    let r = symexFind(parseNeg, tLabel("piNeg"))
+    let r = pinFind(parseNeg, tLabel("piNeg"))
     check r.status == sxSat
     check r.witness[0] == "-42"
 
   test "$float: an integral value is modelled (RFC-0016 PRC-35)":
-    let r = symexFind(dollarFloat, tLabel("df"))
+    let r = pinFind(dollarFloat, tLabel("df"))
     check r.status == sxSat
     check r.witness[0] == -3.0
 
   test "$float: a value outside PRC-35's domain declines (sxUnknown)":
-    let r = symexFind(dollarFloatOut, tLabel("df"))
+    let r = pinFind(dollarFloatOut, tLabel("df"))
     check r.status == sxUnknown
     check r.errors.len > 0
     check r.errors[0].kind == feUnsupportedOp
 
   test "parseFloat: `parseFloat(s)` is classified seUnsupportedStringOp → sxUnknown":
-    let r = symexFind(pf, tLabel("pf"))
+    let r = pinFind(pf, tLabel("pf"))
     check r.status == sxUnknown
     check r.errors.len > 0
     check r.errors[0].kind == seUnsupportedStringOp

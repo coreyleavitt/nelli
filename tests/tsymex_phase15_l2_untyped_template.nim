@@ -1,5 +1,6 @@
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # Phase 15 — Cluster L cycle L2: untyped template parameters (verification).
 
@@ -23,11 +24,11 @@ proc l2constrained(n: int) =
 suite "symex Phase 15 — L2 untyped template params":
 
   test "untyped-template SUT body parses without unknown residuals -> sxSat":
-    let r = symexFind(l2ok, tLabel("positive"))
+    let r = pinFind(l2ok, tLabel("positive"))
     check r.status == sxSat
 
   test "untyped-template expansion is faithfully walked (constraint honored)":
     # If the `if n != 5: return` from the template were dropped, n==6 would be
     # reachable (sxSat). Honoring it makes n==5 ∧ n==6 unsatisfiable -> sxUnsat.
-    let r = symexFind(l2constrained, tLabel("contradiction"))
+    let r = pinFind(l2constrained, tLabel("contradiction"))
     check r.status == sxUnsat

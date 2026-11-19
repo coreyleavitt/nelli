@@ -14,6 +14,7 @@
 ## tsymex_phase15_A1_bitwise.nim.
 import std/[unittest]
 import nelli/symex
+import ./s8cu_helpers
 
 proc checkTwins[T](rInline, rHoisted: SymexResult[T]) =
   check rInline.status == rHoisted.status
@@ -120,36 +121,36 @@ proc callArgDefectGuardedHoisted(s: string, i: int) =
 suite "symex A1 — call-argument-position operand-shape characterization corpus":
 
   test "cell 1 (atomic arg, coverage): reachable, sxSat":
-    let r = symexFind(callArgAtomic, tLabel("hit"))
+    let r = pinFind(callArgAtomic, tLabel("hit"))
     check r.status == sxSat
 
   test "cell 2 (bitwise compound arg, depth 1): twin-identical, sxSat":
-    let rInline  = symexFind(callArgBitwiseD1, tLabel("hit"))
-    let rHoisted = symexFind(callArgBitwiseD1Hoisted, tLabel("hit"))
+    let rInline  = pinFind(callArgBitwiseD1, tLabel("hit"))
+    let rHoisted = pinFind(callArgBitwiseD1Hoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell 3 (bitwise compound arg, depth 2): twin-identical, sxSat":
-    let rInline  = symexFind(callArgBitwiseD2, tLabel("hit"))
-    let rHoisted = symexFind(callArgBitwiseD2Hoisted, tLabel("hit"))
+    let rInline  = pinFind(callArgBitwiseD2, tLabel("hit"))
+    let rHoisted = pinFind(callArgBitwiseD2Hoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell 4 (boolean compound arg): twin-identical, sxSat":
-    let rInline  = symexFind(callArgBoolean, tLabel("hit"))
-    let rHoisted = symexFind(callArgBooleanHoisted, tLabel("hit"))
+    let rInline  = pinFind(callArgBoolean, tLabel("hit"))
+    let rHoisted = pinFind(callArgBooleanHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)
 
   test "cell 5 (defect-bearing arg, unguarded): twin-identical, sxSat via a real in-bounds witness":
-    let rInline  = symexFind(callArgDefectUnguarded, tLabel("hit"))
-    let rHoisted = symexFind(callArgDefectUnguardedHoisted, tLabel("hit"))
+    let rInline  = pinFind(callArgDefectUnguarded, tLabel("hit"))
+    let rHoisted = pinFind(callArgDefectUnguardedHoisted, tLabel("hit"))
     check rInline.status == sxSat
     check rInline.witness[1] >= 0 and rInline.witness[1] < rInline.witness[0].len
     checkTwins(rInline, rHoisted)
 
   test "cell 6 (defect-bearing arg, guarded): twin-identical, sxSat":
-    let rInline  = symexFind(callArgDefectGuarded, tLabel("hit"))
-    let rHoisted = symexFind(callArgDefectGuardedHoisted, tLabel("hit"))
+    let rInline  = pinFind(callArgDefectGuarded, tLabel("hit"))
+    let rHoisted = pinFind(callArgDefectGuardedHoisted, tLabel("hit"))
     check rInline.status == sxSat
     checkTwins(rInline, rHoisted)

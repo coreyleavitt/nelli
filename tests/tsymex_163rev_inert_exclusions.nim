@@ -7,6 +7,7 @@
 import std/[unittest, strutils, sequtils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 const Magic = 0x5A4D
 
@@ -93,7 +94,7 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     withTouchCString(0)
 
   test "an object argument is summarised, never treated as inert":
-    let r = symexFind(withTouchObj, tRaisedExn("ValueError"))
+    let r = pinFind(withTouchObj, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -106,7 +107,7 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     check not classified
 
   test "a tuple argument is summarised, never treated as inert":
-    let r = symexFind(withTouchTuple, tRaisedExn("ValueError"))
+    let r = pinFind(withTouchTuple, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -119,7 +120,7 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     check not classified
 
   test "a seq argument is summarised, never treated as inert":
-    let r = symexFind(withTouchSeq, tRaisedExn("ValueError"))
+    let r = pinFind(withTouchSeq, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -132,7 +133,7 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     check not classified
 
   test "a ptr argument is summarised, never treated as inert":
-    let r = symexFind(withTouchPtr, tRaisedExn("ValueError"))
+    let r = pinFind(withTouchPtr, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -150,7 +151,7 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchPtr" in it.msg)
 
   test "a pointer argument is summarised, never treated as inert":
-    let r = symexFind(withTouchPointer, tRaisedExn("ValueError"))
+    let r = pinFind(withTouchPointer, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -159,15 +160,19 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     # RFC-0005 S8ax item 5: the opaque call is summarised, not declined --
     # every cell its argument reaches holds fresh contents afterwards, and
     # a hit reached through one is replayed. Not inert: the havoc is named.
-    # The verdict stays sxUnknown for another reason: the `nil` literal
-    # argument is itself unsupported (CR-2a, `feUnsupportedExprKind`).
-    check r.status == sxUnknown
+    # RFC-0016 INT-83 models the untyped `pointer` as an address sort of
+    # its own (`Ref_pointer`), so its `nil` literal is modelled as the typed
+    # one is (S8bn): the raise after the call is decided -- `sxRaised`,
+    # judged against the native run by `pinFind`, as the oracle test shows
+    # Nim raising on `Magic`.
+    check r.status == sxRaised
+    check r.trusted   # so `pinFind` judged it against the native run
     check not classified
     check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchPointer" in it.msg)
-    check r.errors.anyIt(it.kind == feUnsupportedExprKind and "nil" in it.msg)
+    check not r.errors.anyIt(it.kind == feUnsupportedExprKind and "nil" in it.msg)
 
   test "a proc (callback) argument is summarised, never treated as inert":
-    let r = symexFind(withTouchProc, tRaisedExn("ValueError"))
+    let r = pinFind(withTouchProc, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -182,7 +187,7 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchProc" in it.msg)
 
   test "a cstring argument is summarised, never treated as inert":
-    let r = symexFind(withTouchCString, tRaisedExn("ValueError"))
+    let r = pinFind(withTouchCString, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -236,10 +241,10 @@ proc mixedBan(safeP: range[0'i64..1000'i64],
 suite "#163 review R14c -- the wrap-scan bans the whole program, not per-variable":
 
   test "checked build (control): the wrap scan is off, the provably-safe param promotes in either program":
-    let alone = symexFind(safeAlone, tLabel("t"), Unchecked)
+    let alone = pinFind(safeAlone, tLabel("t"), Unchecked)
     check alone.status == sxSat
     check alone.abstractions.len == 1
-    let mixed = symexFind(mixedBan, tLabel("t"), Unchecked)
+    let mixed = pinFind(mixedBan, tLabel("t"), Unchecked)
     check mixed.abstractions.len >= 1   ## no whole-program ban in a checked build
 
 # =============================================================================
@@ -279,7 +284,7 @@ suite "#163 review R14d -- an opaque call AFTER the target is invisible to it":
     check Magic == Magic  ## trivial; the real oracle is structural (see below)
 
   test "a target reached BEFORE a later opaque call is found un-degraded":
-    let r = symexFind(targetBeforeOpaque, tLabel("hit"))
+    let r = pinFind(targetBeforeOpaque, tLabel("hit"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -287,7 +292,7 @@ suite "#163 review R14d -- an opaque call AFTER the target is invisible to it":
   test "the SAME opaque call placed BEFORE the target is summarised and replayed":
     ## The asymmetry, made visible side by side: identical call, identical
     ## target, only the ORDER differs.
-    let r = symexFind(targetAfterOpaque, tLabel("hit"))
+    let r = pinFind(targetAfterOpaque, tLabel("hit"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)

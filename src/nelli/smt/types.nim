@@ -277,6 +277,21 @@ type
                                ## provenance-only contract as `isChar`: NOT
                                ## part of `IRType.==`, IS rendered by
                                ## `canonicalize`.
+      enumOrds*: seq[int64]   ## RFC-0016 INT-84. A HOLEY enum's declared
+                               ## ordinals, ascending (empty for an enum
+                               ## whose values are consecutive, and for
+                               ## every non-enum `itInt`). `[rangeLo,
+                               ## rangeHi]` spans the holes too; a caller
+                               ## can pass no hole, so an input of the type
+                               ## ranges over these values only
+                               ## (`enumHoleConds`, heap_model.nim). A value
+                               ## the program makes is not bounded by it: a
+                               ## conversion to a holey enum checks
+                               ## `low .. high` only, a cast nothing, and a
+                               ## zero-initialised slot holds ordinal 0.
+                               ## Not part of `IRType.==` (a refinement of
+                               ## the value set, as `hasRange`); IS rendered
+                               ## by `canonicalize`.
     of itBool:
       discard
     of itTuple:
@@ -504,8 +519,19 @@ type
         ## a Z3 sort mismatch (`weInternalWalkerFault`). "" for every other
         ## uninterpreted type.
     of itFloat32, itFloat64:
-      # Phase 15 F1: sort fully determined by the kind; no payload fields.
-      discard
+      # Phase 15 F1: sort fully determined by the kind.
+      floatRange*: bool        ## RFC-0016 INT-77. A float `range[lo..hi]`:
+      floatLo*: float64        ## Nim admits `x` when `lo <= x and x <= hi`
+      floatHi*: float64        ## (an IEEE comparison in the base width), so
+                               ## the value set is that closed interval: NaN
+                               ## is outside it and -0.0 is inside whenever
+                               ## 0.0 is. The bounds are held as float64,
+                               ## which holds a float32 bound exactly. As
+                               ## `hasRange` on `itInt`: not part of `==`
+                               ## (a refinement, not a shape), part of the
+                               ## canonical form, asserted wherever a value
+                               ## of the type is allocated or read from a
+                               ## backing store (`rangeCondsIfNeeded`).
     of itDistinct:
       distinctName*: string   ## Phase 15 G4: the Nim distinct type name; the
                               ## Z3 uninterpreted-sort name (e.g. "Meters").
@@ -841,6 +867,9 @@ type
                         ## `set[T]` values (`bsOp`): a literal, `contains`,
                         ## `incl` / `excl` (the new value), `+`, `-`, `*`,
                         ## `<=`, `<`, `==` and `card`.
+    iekPtrCast          ## RFC-0016 INT-83: an address reinterpreted between
+                        ## `pointer` and a typed `ptr`/`ref` (`cast`, or a
+                        ## conversion to `pointer`): `pcArg` held at `pcTy`.
 
   BitSetOp* = enum
     ## RFC-0005 S8bq (item 2). An `iekBitSet` operation, and its `bsArgs`:
@@ -891,6 +920,9 @@ type
                              ## width relation is modelled here, the value
                              ## being representable in the target whenever
                              ## the check passes.
+      ciwHoley*: bool        ## RFC-0016 INT-84: the target is a holey enum,
+                             ## so the converted value may be a hole (Nim
+                             ## checks `low .. high` only).
     of iekConvIntReinterpret:
       cirOperand*:   IRExpr  ## A1 adjudication: the value being reinterpreted
       cirWidth*:     int     ## shared src==tgt width: 8, 16, 32, or 64
@@ -1193,6 +1225,9 @@ type
       bsOp*:    BitSetOp
       bsArgs*:  seq[IRExpr]          ## see `BitSetOp`
       bsSetTy*: IRType               ## the `itBitSet` of the set operand(s)
+    of iekPtrCast:                   ## RFC-0016 INT-83
+      pcArg*: IRExpr                 ## the address (a `ref`, `ptr`, `pointer`)
+      pcTy*:  IRType                 ## the `itPtr`/`itRef` it is read as
 
   DiscWriteMode* = enum
     ## RFC-0005 S8cp (item 2). What an assignment to a discriminator does.
@@ -2699,7 +2734,8 @@ proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64, signed = true,
 
 proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
                       tgtWidth: int, tgtSigned: bool,
-                      hasRange = false, lo = 0'i64, hi = 0'i64): IRExpr =
+                      hasRange = false, lo = 0'i64, hi = 0'i64,
+                      holey = false): IRExpr =
   ## Round-6 B2: WIDENING-only int-family width conversion. Zero-/sign-
   ## extend is keyed on `srcSigned` (the SOURCE value's own signedness);
   ## `tgtSigned` becomes the resulting SymVal's `signed` flag.
@@ -2712,7 +2748,7 @@ proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
     $srcWidth & " tgt=" & $tgtWidth
   IRExpr(kind: iekConvIntWidth, ciwOperand: e, ciwSrcWidth: srcWidth,
          ciwSrcSigned: srcSigned, ciwTgtWidth: tgtWidth, ciwTgtSigned: tgtSigned,
-         ciwHasRange: hasRange, ciwLo: lo, ciwHi: hi)
+         ciwHasRange: hasRange, ciwLo: lo, ciwHi: hi, ciwHoley: holey)
 
 proc carriesRangeCheck*(e: IRExpr, ty: IRType): bool =
   ## RFC-0005 S8j. True iff `e` is an integer conversion that range-checks
@@ -3126,7 +3162,22 @@ proc withRange*(ty: IRType, lo, hi: int64): IRType =
   doAssert ty.kind == itInt, "withRange: not an itInt: " & $ty.kind
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
          hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName,
-         typeKey: ty.typeKey)
+         enumOrds: ty.enumOrds, typeKey: ty.typeKey)
+
+func floatOfBits*(b: uint64): float64 = cast[float64](b)
+  ## RFC-0016 INT-77: a float literal carried through emitted code by its bits
+
+proc withFloatRange*(ty: IRType, lo, hi: float64): IRType =
+  ## RFC-0016 INT-77. Refine an `itFloat32`/`itFloat64` with the bounds of
+  ## the float `range` it came from; a fresh `IRType`, as `withRange`.
+  doAssert ty.kind in {itFloat32, itFloat64},
+    "withFloatRange: not a float: " & $ty.kind
+  if ty.kind == itFloat32:
+    IRType(kind: itFloat32, floatRange: true, floatLo: lo, floatHi: hi,
+           typeKey: ty.typeKey)
+  else:
+    IRType(kind: itFloat64, floatRange: true, floatLo: lo, floatHi: hi,
+           typeKey: ty.typeKey)
 
 proc withEnumName*(ty: IRType, name: string): IRType =
   ## Issue #163 (rev item 1). Stamp the lifted `itInt`'s ORIGIN enum name —
@@ -3141,7 +3192,17 @@ proc withEnumName*(ty: IRType, name: string): IRType =
   doAssert ty.kind == itInt, "withEnumName: not an itInt: " & $ty.kind
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
          hasRange: ty.hasRange, rangeLo: ty.rangeLo, rangeHi: ty.rangeHi,
-         enumName: name, typeKey: ty.typeKey)
+         enumName: name, enumOrds: ty.enumOrds, typeKey: ty.typeKey)
+
+proc withEnumOrds*(ty: IRType, ords: seq[int64]): IRType =
+  ## RFC-0016 INT-84. Stamp a holey enum's declared ordinals (ascending)
+  ## onto its lifted `itInt`; see `IRType.enumOrds`. A fresh `IRType`, as
+  ## `withEnumName`, carrying every other `itInt` field forward.
+  doAssert ty.kind == itInt, "withEnumOrds: not an itInt: " & $ty.kind
+  IRType(kind: itInt, width: ty.width, signed: ty.signed,
+         hasRange: ty.hasRange, rangeLo: ty.rangeLo, rangeHi: ty.rangeHi,
+         enumName: ty.enumName, enumRange: ty.enumRange, enumOrds: ords,
+         typeKey: ty.typeKey)
 
 proc withEnumRange*(ty: IRType, lo, hi: int64): IRType =
   ## RFC-0005 S8bv. The enum subrange `range[lo..hi]` of the lifted enum
@@ -3151,7 +3212,7 @@ proc withEnumRange*(ty: IRType, lo, hi: int64): IRType =
     "withEnumRange: not a lifted enum"
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
          hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName,
-         enumRange: true, typeKey: ty.typeKey)
+         enumRange: true, enumOrds: ty.enumOrds, typeKey: ty.typeKey)
 
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              objectName: string = "", nominalId: string = "",
@@ -3300,6 +3361,11 @@ proc bitSetDomain*(elemTy: IRType): tuple[ok: bool, lo: int64, size: int] =
 proc mkBitSet*(op: BitSetOp; args: seq[IRExpr]; setTy: IRType): IRExpr =
   ## RFC-0005 S8bq. An operation on builtin `set[T]` values (`BitSetOp`).
   IRExpr(kind: iekBitSet, bsOp: op, bsArgs: args, bsSetTy: setTy)
+
+proc mkPtrCast*(arg: IRExpr; ty: IRType): IRExpr =
+  ## RFC-0016 INT-83. `arg` (an address) reinterpreted as `ty`, where one of
+  ## the two is Nim's `pointer` (`isPointerTy`).
+  IRExpr(kind: iekPtrCast, pcArg: arg, pcTy: ty)
 
 proc satAdd64*(a, b: int64): int64 =
   ## D2 (round-6 review remediation, N9 companion). Saturating add: caps at
@@ -4190,8 +4256,9 @@ proc `$`*(t: IRType): string =
   case t.kind
   of itBool: "bool"
   of itUninterp: "uninterp[" & t.uninterpName & "]"
-  of itFloat32: "float32"
-  of itFloat64: "float64"
+  of itFloat32, itFloat64:   ## RFC-0016 INT-77: a float range's bounds
+    (if t.kind == itFloat32: "float32" else: "float64") &
+      (if t.floatRange: "[" & $t.floatLo & ".." & $t.floatHi & "]" else: "")
   of itDistinct: "distinct " & t.distinctName & "(" & $t.distinctBase & ")"  ## G4
   of itRef: "ref " & $t.refPointeeTy    ## Phase 15 R1a
   of itPtr: "ptr " & $t.ptrPointeeTy    ## Phase 15 R1a
@@ -5238,6 +5305,8 @@ proc render*(e: IRExpr): string =
   of iekSeqNew:           ## RFC-0005 S8bi
     (if e.snOfCap: "newSeqOfCap" elif e.snZeroed: "newSeq"
      else: "newSeqUninit") & "[" & $e.snElemTy & "](" & render(e.snArg) & ")"
+  of iekPtrCast:          ## RFC-0016 INT-83
+    "cast[" & $e.pcTy & "](" & render(e.pcArg) & ")"
   of iekBitSet:           ## RFC-0005 S8bq
     var es: seq[string]
     for a in e.bsArgs: es.add render(a)
@@ -5359,3 +5428,85 @@ proc render*(s: IRStmt): string =
   of isUndefined:    "undefined(" & $s.udKind & ": " & s.udSite & ")"
   of isUnsupported:  "unsupported(" & $s.unKind & ": " & s.reason & ")"
   of isUnsafeCast:   "unsafeCast(" & s.ucReason & ")"
+
+# ---- RFC-0016 INT-83: the ref sort id of a pointee (moved from heap_model) ----
+
+proc sanitizeTypeId*(base: string): string =
+  ## The heap/sort-name spelling of a type id: every character outside
+  ## `[A-Za-z0-9_]` becomes `_` (split out of `refPointeeTypeId` at RFC-0005
+  ## S8bh, whose `fieldHeapKey` spells a declaring type's id the same way).
+  result = base
+  for i in 0 ..< result.len:
+    if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      result[i] = '_'
+
+proc refPointeeTypeId*(pointeeTy: IRType): string =
+  ## Phase 15 R1; flipped at Cluster H Step B (ADR-0022). A stable
+  ## per-pointee-type identifier used to key the `Ref_T` sort + heap array +
+  ## nil const (and, via `fieldHeapKey`, the per-field heap arrays — an
+  ## object's ref sort and its field-array keys must agree, so the same
+  ## preference applies uniformly to `refPointeeTypeId(objTy)` calls too).
+  ##
+  ## Prefer the pointee's `nominalId` (a canonical, symbol-unique nominal
+  ## identity — Cluster H Step A) over the structural `$pointeeTy` rendering
+  ## when the pointee is a named object (`itTuple` with a non-empty
+  ## `nominalId`). Two `IRType`s for the SAME nominal object can carry
+  ## DIFFERENT structural renderings — e.g. a bare ref's full-field pointee
+  ## vs. a recursive field's empty-fielded placeholder (`namedRefPlaceholder`,
+  ## built to break compile-time self-reference) — yet they denote the same
+  ## Nim type and must key the SAME `Ref_T` sort. Keying on `nominalId`
+  ## unifies them; keying on `$pointeeTy` (the pre-Step-B behaviour) would
+  ## mint two distinct sorts and a Z3 sort mismatch on the first cross-use
+  ## (degrading to `sxUnknown`). That unification becomes reachable once a
+  ## bare named-ref parameter itself routes through `itRef` (Step C); Step B
+  ## proves the mechanism keeps inline-ref sort naming consistent first.
+  ## Anonymous tuples and non-object pointees have no `nominalId` and keep
+  ## the structural rendering (unchanged behaviour).
+  ##
+  ## RFC-0005 S8j: a variant pointee keys on its `vNominalId` the same way.
+  ## An inline `ref Obj` field's pointee is the empty-fielded placeholder
+  ## tuple, keyed on `nominalId(Obj)`; when `Obj` is a case object, every
+  ## other position (the nil in `h.v != nil`, the pointee of `h.v.kind`)
+  ## carries the full variant. Keyed structurally, the two were distinct
+  ## sorts for one Nim type: a Z3 sort error, or a false `sxUnsat`.
+  ## RFC-0005 S8l: a multi-variant keys on its `mvNominalId` for the same
+  ## reason (an inline `ref MV` field was that sort error).
+  ## RFC-0005 S8bh (item 3): a type of an inheritance hierarchy keys on the
+  ## hierarchy's ROOT (`inheritChain[0]`): every ref of the hierarchy is an
+  ## address of one sort, as in Nim, where `Base(d)` is `d`'s own address.
+  ## RFC-0016 K9c follow-up: a named object the classifier could not
+  ## represent (`__unsupported:<name>`) keys on `uninterpRefKey`, the key
+  ## its placeholder pointee carries, for the same reason.
+  let base = if pointeeTy.kind == itTuple and pointeeTy.inheritChain.len > 0:
+               pointeeTy.inheritChain[0]
+             elif pointeeTy.kind == itVariant and
+                  pointeeTy.vInheritChain.len > 0:
+               pointeeTy.vInheritChain[0]   # RFC-0005 S8bn (item 8)
+             elif pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
+               pointeeTy.nominalId
+             elif pointeeTy.kind == itVariant and pointeeTy.vNominalId.len > 0:
+               pointeeTy.vNominalId
+             elif pointeeTy.kind == itMultiVariant and pointeeTy.mvNominalId.len > 0:
+               pointeeTy.mvNominalId   # RFC-0005 S8l
+             elif pointeeTy.kind == itUninterp and
+                  pointeeTy.uninterpRefKey.len > 0:
+               pointeeTy.uninterpRefKey   # RFC-0016 K9c follow-up
+             else:
+               $pointeeTy
+  result = sanitizeTypeId(base)
+
+const pointerTypeId* = "pointer"
+  ## RFC-0016 INT-83. The ref sort id of Nim's untyped `pointer`
+  ## (`Ref_pointer`, the address space every `ptr`/`ref` sort maps into).
+
+proc pointerPointeeTy*(): IRType =
+  ## RFC-0016 INT-83. The pointee a `pointer` is held as (`tPtr` of it): a
+  ## placeholder no cell is ever read at (`p[]` does not compile for a
+  ## `pointer`), keyed on `pointerTypeId` so every `pointer` is one sort.
+  tUninterp("__pointer", pointerTypeId)
+
+proc isPointerTy*(t: IRType): bool =
+  ## RFC-0016 INT-83. `t` is Nim's `pointer` (`tPtr(pointerPointeeTy())`).
+  t != nil and t.kind == itPtr and t.ptrPointeeTy != nil and
+    t.ptrPointeeTy.kind == itUninterp and
+    t.ptrPointeeTy.uninterpRefKey == pointerTypeId

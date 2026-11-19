@@ -27,6 +27,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -134,58 +135,58 @@ proc arrCont(x: int) =
 
 suite "S8m (1) break and continue through finally; labelled blocks":
   test "defer runs on a continue":
-    let r = symexFind(deferCont, tLabel("s8m_defercont"), loopK)
+    let r = pinFind(deferCont, tLabel("s8m_defercont"), loopK)
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 2
 
   test "a break in an except arm leaves the loop enclosing the try":
-    let r = symexFind(exArmBreak, tLabel("s8m_exarm"), loopK)
+    let r = pinFind(exArmBreak, tLabel("s8m_exarm"), loopK)
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 9
-    let d = symexFind(exArmBreak, tLabel("s8m_exarm_dead"), loopK)
+    let d = pinFind(exArmBreak, tLabel("s8m_exarm_dead"), loopK)
     checkpoint($d.status & " " & show(d.errors))
     check deadModuloUnroll(d)
-    let f = symexFind(exArmBreakFin, tLabel("s8m_exarm_fin"), loopK)
+    let f = pinFind(exArmBreakFin, tLabel("s8m_exarm_fin"), loopK)
     checkpoint($f.status & " " & show(f.errors))
     check f.status == sxSat
 
   test "a break in a finally cancels the return":
-    let r = symexFind(callsBrkCancels, tLabel("s8m_brk_cancels"), loopK)
+    let r = pinFind(callsBrkCancels, tLabel("s8m_brk_cancels"), loopK)
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 3
-    let d = symexFind(callsBrkCancels, tLabel("s8m_brk_cancels_dead"), loopK)
+    let d = pinFind(callsBrkCancels, tLabel("s8m_brk_cancels_dead"), loopK)
     checkpoint($d.status & " " & show(d.errors))
     check deadModuloUnroll(d)
 
   test "a break in a finally on a raised exit declines (backends disagree)":
-    let r = symexFind(brkOnRaise, tLabel("s8m_brk_on_raise"), loopK)
+    let r = pinFind(brkOnRaise, tLabel("s8m_brk_on_raise"), loopK)
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
     check hasKind(r.errors, eeFinallyJumpOnRaise)
 
   test "a return still leaves through the loop's finally":
-    let r = symexFind(callsRetInLoopFin, tLabel("s8m_ret_loop_fin"), loopK)
+    let r = pinFind(callsRetInLoopFin, tLabel("s8m_ret_loop_fin"), loopK)
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 2
 
   test "break and continue in an unrolled array loop":
-    let r = symexFind(arrBreak, tLabel("s8m_arrbreak"), loopK)
+    let r = pinFind(arrBreak, tLabel("s8m_arrbreak"), loopK)
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 2
-    let d = symexFind(arrBreak, tLabel("s8m_arrbreak_dead"), loopK)
+    let d = pinFind(arrBreak, tLabel("s8m_arrbreak_dead"), loopK)
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
-    let c = symexFind(arrCont, tLabel("s8m_arrcont"), loopK)
+    let c = pinFind(arrCont, tLabel("s8m_arrcont"), loopK)
     checkpoint($c.status & " " & show(c.errors))
     check c.status == sxSat
     if c.status == sxSat:

@@ -47,7 +47,8 @@ const
   ## local that shares a name with a `runtime.nim` symbol (`exact`) is counted.
   ## What slice D3c-6 made real modules below `runtime.nim`: the heap algebra
   ## and the sort-checked Z3 term builders it rests on.
-  hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
+  hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils",
+               "std/hashes", "std/algorithm", "z3",   # RFC-0016 INT-83, INT-84
                "./types", "./abstraction", "./symval", "./walk_state", "./z3check",
                "./variant_layout",   ## R2-4: the union byte image of the moved allocator
                "../thread_state"]  ## S8ck-r: the Z3-free per-thread release leaf
@@ -56,7 +57,9 @@ const
   ## The decl-kind caches of the linked Z3: the same in every run, read in a
   ## probe context (`probeContext`), so `resetHeapModel` leaves them alone.
   hmProcessStable = ["storeDeclKind", "selectDeclKind", "constArrayDeclKind",
-                     "iteDeclKind", "heapChainKinds"]
+                     "iteDeclKind", "heapChainKinds",
+                     "provKinds",   # RFC-0016 INT-82
+                     "madeKinds"]   # RFC-0016 INT-85
 
   heapPinned = [
     "AddrCellEntry", "Degrade", "ElemCell", "Path", "PtrLeafAim",
@@ -806,7 +809,10 @@ suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
     for l in hm.splitLines:
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
-    check tvs.len == 15
+    check tvs.len == 28   # RFC-0016 INT-82: +4 (provenance); INT-81: +1 (field owners);
+                          # INT-83: +5 (pointer facts, views, sorts, read sorts,
+                          # decls); INT-84: +2 (input domain, holes made);
+                          # INT-85: +1 (made-value decl kinds, process-stable)
     for n in tvs:
       checkpoint n
       if n in hmProcessStable:

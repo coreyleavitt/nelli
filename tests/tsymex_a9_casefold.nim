@@ -20,6 +20,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---- SUT 1: toLowerAscii(s) == "abc" ----------------------------------------
 # Any string whose toLowerAscii == "abc" satisfies this. The witness can be
@@ -52,14 +53,14 @@ suite "symex Phase 16 A9 — toLowerAscii / toUpperAscii ASCII case-fold":
     ## A9: BV18-ITE seqMap fold models the ASCII case fold. The solver finds a
     ## string s such that s.toLowerAscii == "abc". Witness validation: the
     ## concrete value satisfies the Nim predicate byte-for-byte (Invariant 3).
-    let r = symexFind(lowerEqAbc, tLabel("lower_abc"))
+    let r = pinFind(lowerEqAbc, tLabel("lower_abc"))
     check r.status == sxSat
     check r.witness[0].toLowerAscii == "abc"
 
   test "toUpperAscii: sxSat — witness satisfies toUpperAscii == \"ABC\"":
     ## A9: toUpperAscii fold. The solver finds a string s such that
     ## s.toUpperAscii == "ABC". Witness validation checks Invariant 3.
-    let r = symexFind(upperEqABC, tLabel("upper_abc"))
+    let r = pinFind(upperEqABC, tLabel("upper_abc"))
     check r.status == sxSat
     check r.witness[0].toUpperAscii == "ABC"
 
@@ -68,13 +69,13 @@ suite "symex Phase 16 A9 — toLowerAscii / toUpperAscii ASCII case-fold":
     ## so the result cannot contain uppercase letters in the ASCII range.
     ## "ABC" has three uppercase characters → UNSAT, decided by BV arithmetic.
     ## This is not sxUnknown — the model is complete for this query.
-    let r = symexFind(lowerEqUpper, tLabel("lower_impossible"))
+    let r = pinFind(lowerEqUpper, tLabel("lower_impossible"))
     check r.status != sxSat   ## must not claim a witness for an impossible constraint
 
   test "toUpperAscii SOUNDNESS: toUpperAscii(s)==\"abc\" is sxUnsat (no lowercase output)":
     ## Invariant 3 soundness: the BV18-ITE fold provably maps 'a'-'z' to 'A'-'Z',
     ## so the result cannot contain lowercase letters in the ASCII range.
-    let r = symexFind(upperEqLower, tLabel("upper_impossible"))
+    let r = pinFind(upperEqLower, tLabel("upper_impossible"))
     check r.status != sxSat   ## must not claim a witness for an impossible constraint
 
   test "walker version pin: symexWalkerVersion floor >= 34 (A9 introduced at 34)":

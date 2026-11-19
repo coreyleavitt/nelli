@@ -29,6 +29,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
+import ./s8cu_helpers
 
 when not defined(symexQueryStats):
   {.error: "tsymex_rfc0005_s8ad_remainder needs -d:symexQueryStats (its .nim.cfg)".}
@@ -87,7 +88,7 @@ suite "S8ad (1): a local distinct value is modelled":
 
   template run(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     block:
-      let r = symexFind(fn, tLabel(lbl))
+      let r = pinFind(fn, tLabel(lbl))
       checkpoint lbl & " " & $r.status & " " & show(r.errors)
       check r.status == want
       check not r.errors.hasKind(weInternalWalkerFault)
@@ -192,7 +193,7 @@ suite "S8ad (2): an Int quotient under the sequence theory decides":
                    st: static SymexSettings = SymexSettings()): untyped =
     block:
       symexQueryStats = @[]
-      let r = symexFind(fn, tLabel("t"), st)
+      let r = pinFind(fn, tLabel("t"), st)
       checkpoint astToStr(fn) & " " & $r.status & " " & show(r.errors)
       checkpoint symexQueryStatsSummary()
       check r.status == want

@@ -19,6 +19,7 @@ import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/coverage
+import ./s8cu_helpers
 
 const Magic = 0x5A4D
 
@@ -71,25 +72,25 @@ suite "issue 163 -- nelli's own instrumentation is transparent to the solver":
       sut(0)
 
   test "a {.cover.}'d proc's raise is FOUND, not degraded to sxUnknown":
-    let r = symexFind(covered, tRaisedExn("ValueError"))
+    let r = pinFind(covered, tRaisedExn("ValueError"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
 
   test "a {.covercmp.}'d proc's raise is FOUND -- logCmp sits AHEAD of the branch":
-    let r = symexFind(cmpLogged, tRaisedExn("ValueError"))
+    let r = pinFind(cmpLogged, tRaisedExn("ValueError"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
 
   test "{.cover, covercmp.} together are still transparent":
-    let r = symexFind(bothInstrumented, tRaisedExn("ValueError"))
+    let r = pinFind(bothInstrumented, tRaisedExn("ValueError"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
 
   test "instrumentation in a CALLEE does not degrade its uninstrumented caller":
-    let r = symexFind(callsCovered, tRaisedExn("ValueError"))
+    let r = pinFind(callsCovered, tRaisedExn("ValueError"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxRaised
@@ -97,7 +98,7 @@ suite "issue 163 -- nelli's own instrumentation is transparent to the solver":
 suite "issue 163 -- a genuine opaque call degrades with its name attached":
 
   test "a used opaque result still degrades -- but says why, and names the callee":
-    let r = symexFind(usesSensor, tRaisedExn("ValueError"))
+    let r = pinFind(usesSensor, tRaisedExn("ValueError"))
     var classified = false
     var internalFault = false
     for e in r.errors:
@@ -156,7 +157,7 @@ suite "issue 163 slice 4 -- an inert opaque call does not taint the walk":
     withEcho(0)
 
   test "a raise BEHIND a statement-position echo is found, not degraded":
-    let r = symexFind(withEcho, tRaisedExn("ValueError"))
+    let r = pinFind(withEcho, tRaisedExn("ValueError"))
     var opaqueUnmodelled = false
     var internalFault = false
     for e in r.errors:
@@ -168,13 +169,13 @@ suite "issue 163 slice 4 -- an inert opaque call does not taint the walk":
     check not internalFault
 
   test "a label BEHIND the same echo, on the non-raise path, is reachable":
-    let r = symexFind(withEcho, tLabel("t_echo"))
+    let r = pinFind(withEcho, tLabel("t_echo"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
 
   test "a var-param opaque callee is summarised -- void is not the whole test":
-    let r = symexFind(withMutate, tRaisedExn("ValueError"))
+    let r = pinFind(withMutate, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -191,7 +192,7 @@ suite "issue 163 slice 4 -- an inert opaque call does not taint the walk":
     check havoc
 
   test "a ref-arg opaque callee is summarised -- a copied ref can be written through":
-    let r = symexFind(withTouch, tRaisedExn("ValueError"))
+    let r = pinFind(withTouch, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -258,7 +259,7 @@ suite "issue 163 W5 -- the public symexTransparent pragma and its fallback":
     withAnnounce(0)
 
   test "a used transparent result falls back to opaque -- not honoured, not a crash":
-    let r = symexFind(usesProbe, tRaisedExn("ValueError"))
+    let r = pinFind(usesProbe, tRaisedExn("ValueError"))
     var classified = false
     var internalFault = false
     for e in r.errors:
@@ -272,7 +273,7 @@ suite "issue 163 W5 -- the public symexTransparent pragma and its fallback":
     check not internalFault
 
   test "a statement-position transparent call is deleted -- the raise behind it is found":
-    let r = symexFind(withAnnounce, tRaisedExn("ValueError"))
+    let r = pinFind(withAnnounce, tRaisedExn("ValueError"))
     var opaqueUnmodelled = false
     var internalFault = false
     for e in r.errors:

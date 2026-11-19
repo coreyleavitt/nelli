@@ -18,6 +18,7 @@
 import std/[unittest, dynlib]
 import nelli/symex
 import z3
+import ./s8cu_helpers
 
 proc sut(x, y: int) =
   if x > 1 and y > 1 and x < 2000 and y < 2000 and x * y == 1022117:
@@ -52,7 +53,7 @@ proc runOnThread() {.thread.} =
   {.cast(gcsafe).}:
     probe.ctxBefore = currentContext().isNil
     probe.allocBefore = allocSize()
-    let r = symexFind(sut, tLabel("s8cj_runctx"))
+    let r = pinFind(sut, tLabel("s8cj_runctx"))
     probe.status = r.status
     probe.ctxAfter = currentContext().isNil
     probe.allocAfter = allocSize()

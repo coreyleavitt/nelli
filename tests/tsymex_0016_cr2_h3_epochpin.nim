@@ -52,7 +52,7 @@ suite "CR2 H3: the tail walk does not pin a callee's havoc epoch":
     check parseInt(symexWalkerVersion) >= 355
 
   test "the finding's trigger: the real callee's effect overflows the tail":
-    let r = symexFind(epochPre, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(epochPre, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat
@@ -65,7 +65,7 @@ suite "CR2 H3: the tail walk does not pin a callee's havoc epoch":
   test "the epoch first read after the label: not a trusted sat":
     # The explore model does not interpret an epoch nothing before the label
     # reads, so nothing pinned it; the verdict is not trusted either way.
-    let r = symexFind(epochPost, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(epochPost, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check not r.trusted
@@ -73,7 +73,7 @@ suite "CR2 H3: the tail walk does not pin a callee's havoc epoch":
       check UbKind(ubSignedOverflow) in r.soundness.undefinedKinds
 
   test "control: a defined tail over the epoch stays trusted":
-    let r = symexFind(epochPreDefined, tLabel("hit"), pinSettingsConst)
+    let r = pinFind(epochPreDefined, tLabel("hit"), pinSettingsConst)
     checkpoint show(r.errors)
     checkpoint $r.soundness
     check r.status == sxSat

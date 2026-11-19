@@ -98,6 +98,7 @@ import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 # =============================================================================
 # 1. iekStrInOptionRegion (the :791 copy) -- pair-loop-idiom BV-bound shape.
@@ -157,7 +158,7 @@ suite "symex N36 -- iekStrInOptionRegion BV-bound decline inside a block:":
     ## fallback's own closed forms reach -- multiple honest reasons, never a
     ## silent completion).
     symexTargetSolveStats = default(typeof(symexTargetSolveStats))
-    let r = symexFind(sutOptionRegionBlockAfter, tLabel("n36_optregion_block_after"))
+    let r = pinFind(sutOptionRegionBlockAfter, tLabel("n36_optregion_block_after"))
     # RFC-0005 S8y: the suite's runtime floor, by count (never wall time).
     checkpoint "S8y budgetOut=" & $symexTargetSolveStats.budgetOut &
                " declined=" & $symexTargetSolveStats.declined &

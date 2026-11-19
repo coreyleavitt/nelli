@@ -34,6 +34,7 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -159,7 +160,7 @@ proc fault(shape: string): string = "S8ce synthetic " & shape & " fault"
 
 template faultCase(name, fn, shape: untyped) =
   test name:
-    let r = symexFind(fn, tLabel("hit"))
+    let r = pinFind(fn, tLabel("hit"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status notin {sxSat, sxUnsat}
     check namedFault(r, fault(shape))
@@ -188,13 +189,13 @@ suite "S8ce (5): each raise shape reaches the run boundary":
     check reached
 
   test "control: the same shape with no sentinel decides":
-    let r = symexFind(cleanShape, tLabel("hit"))
+    let r = pinFind(cleanShape, tLabel("hit"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
 
   test "a later run is not declined by an earlier run's armed shape":
-    discard symexFind(dispatchInLoop, tLabel("hit"))
-    let r = symexFind(cleanShape, tLabel("hit"))
+    discard pinFind(dispatchInLoop, tLabel("hit"))
+    let r = pinFind(cleanShape, tLabel("hit"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
 

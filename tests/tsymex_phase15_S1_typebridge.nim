@@ -15,6 +15,7 @@
 ##      was still an unmodeled stub). This assertion was updated when S3 shipped.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 proc isHello(s: string) =
   if s == "hello":
@@ -26,12 +27,12 @@ proc lenGt3(s: string) =
 
 suite "symex Phase 15 S1 — string type-bridge":
   test "string SUT param: walker accepts, Z3 returns model, evalStr extracts":
-    let r = symexFind(isHello, tLabel("hello"))
+    let r = pinFind(isHello, tLabel("hello"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 
   test "s.len on itString receiver -> iekStrLen (modeled as of S3, sxSat)":
-    let r = symexFind(lenGt3, tLabel("long"))
+    let r = pinFind(lenGt3, tLabel("long"))
     # S3 ships the real Z3 `str.len` lowering (byte-faithful), so a free `s`
     # with `s.len > 3` is satisfiable. (In S1 this was an unmodeled stub ->
     # sxUnknown; the assertion was updated when S3 made the op live.)

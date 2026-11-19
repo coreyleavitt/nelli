@@ -28,6 +28,7 @@
 
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 type CaseExprTestError = object of CatchableError
 
@@ -52,7 +53,7 @@ suite "RFC-0005 s1 — case-expression: the disjoint-sibling target is reachable
         if blockNum == 5:
           symexTarget("s1_sibling_reached")
 
-    let r = symexFind(sut, tLabel("s1_sibling_reached"))
+    let r = pinFind(sut, tLabel("s1_sibling_reached"))
     check r.status == sxSat
 
   test "s1-2: the case-expression's own value is modelled, not just tolerated":
@@ -69,7 +70,7 @@ suite "RFC-0005 s1 — case-expression: the disjoint-sibling target is reachable
       if classify(modeStr) == 2:
         symexTarget("s1_netascii_arm")
 
-    let r = symexFind(sut, tLabel("s1_netascii_arm"))
+    let r = pinFind(sut, tLabel("s1_netascii_arm"))
     check r.status == sxSat
 
   test "s1-3: UNSAT companion — an arm value the case can never yield":
@@ -85,7 +86,7 @@ suite "RFC-0005 s1 — case-expression: the disjoint-sibling target is reachable
       if classify(modeStr) == 99:
         symexTarget("s1_impossible_arm")
 
-    let r = symexFind(sut, tLabel("s1_impossible_arm"))
+    let r = pinFind(sut, tLabel("s1_impossible_arm"))
     check r.status == sxUnsat
 
 suite "RFC-0005 s1 — B7-2's verbatim shape, runnable on Linux":
@@ -110,7 +111,7 @@ suite "RFC-0005 s1 — B7-2's verbatim shape, runnable on Linux":
         if blockNum == 5:
           symexTarget("s1_verbatim_sibling_reached")
 
-    let r = symexFind(sut, tLabel("s1_verbatim_sibling_reached"))
+    let r = pinFind(sut, tLabel("s1_verbatim_sibling_reached"))
     check r.status == sxSat
     for e in r.errors:
       check not (e.kind == feUnsupportedExprKind and "nnkCaseStmt" in e.msg)

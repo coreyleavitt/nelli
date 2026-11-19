@@ -11,6 +11,7 @@
 ## under 60 s on the Windows legs (the whole file took 64 s).
 import std/[unittest, strutils, sets, tables]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/canonicalize
 import nelli/engine/markers
 from nelli/smt/replayproc import hasMethodTable, hasSubtypeTable
@@ -28,7 +29,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 template declined(fn: typed, lbl: string) =
   ## The route's store is unseen: no definite verdict, with the reason in band.
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(feGlobalRouteUnproved)
@@ -394,7 +395,7 @@ suite "RFC-0005 S8cs: the value that holds the hook":
   test "a generic routine, per instance":
     declined(gen1, "gen1")
     # Read first, so a later instance sharing its cache entry would miss the hook.
-    check symexFind(gen2first, tLabel("gen2first")).status == sxUnsat
+    check pinFind(gen2first, tLabel("gen2first")).status == sxUnsat
     declined(gen2, "gen2")
 
 suite "RFC-0005 S8cs: code the analysis cannot list":
@@ -407,7 +408,7 @@ suite "RFC-0005 S8cs: code the analysis cannot list":
       # so the route of `gH3` stands and the walk reaches the label the native
       # run reaches.
       block:
-        let r = symexFind(open3, tLabel("open3"))
+        let r = pinFind(open3, tLabel("open3"))
         checkpoint "open3 " & $r.status & " " & show(r.errors)
         check r.status == sxSat
         check r.trusted

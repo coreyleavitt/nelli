@@ -37,7 +37,10 @@ proc sutHooked(v: int) =
 
 suite "PRC-07 slice B: the union image needs supportsCopyMem":
   test "a plain-bits variant stays exact on a branch-changing write":
-    let r = symexFind(sutPlain, tLabel("hit"))
+    # c holds the union image, so its verdict is pinned (the witness replays
+    # with field checks off); cpp's havoc model is not a definite verdict
+    let r = when defined(cpp): symexFind(sutPlain, tLabel("hit"))
+            else: pinFind(sutPlain, tLabel("hit"))
     checkpoint show(r.errors)
     when defined(cpp):
       # cpp holds no image: the havoc model, and the read is an inactive member

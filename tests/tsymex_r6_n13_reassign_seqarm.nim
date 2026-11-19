@@ -40,6 +40,7 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # 1. Primary shape: reassignment into an arm with BOTH a backed scalar field
@@ -69,7 +70,7 @@ proc sutReassignNoCrash(v: var Rec) =
 suite "symex N13 -- reassignment into a placeholder-seq-carrying arm does not crash":
 
   test "N13-1: reassigning into the opts-carrying arm reaches the target (sxSat), no crash":
-    let r = symexFind(sutReassignNoCrash, tLabel("reassign_no_crash"))
+    let r = pinFind(sutReassignNoCrash, tLabel("reassign_no_crash"))
     check r.status == sxSat
 
 # --- (ii) the arm's OTHER (backed) field remains fully modeled: exactly
@@ -88,14 +89,14 @@ proc sutCountNonzeroUnreachable(v: var Rec) =
 suite "symex N13 -- sibling backed field (count) unaffected by the placeholder sibling":
 
   test "N13-2a: count == 0 after reassignment is reachable (sxSat)":
-    let r = symexFind(sutCountZeroSat, tLabel("count_zero_sat"))
+    let r = pinFind(sutCountZeroSat, tLabel("count_zero_sat"))
     check r.status == sxSat
 
   test "N13-2b: count != 0 after a same-branch reassignment is reachable (S8f)":
     ## Nim keeps `count` from an input already on `rkB` (and raises on
     ## `rkA`), so the label IS reachable -- the old `sxUnsat` pinned the
     ## zero-init Nim does not do.
-    let r = symexFind(sutCountNonzeroUnreachable, tLabel("count_nonzero_unreachable"))
+    let r = pinFind(sutCountNonzeroUnreachable, tLabel("count_nonzero_unreachable"))
     check r.status == sxSat
     var v = Rec(kind: rkB, count: 3)
     reassignToB(v)
@@ -120,7 +121,7 @@ proc sutReadOptsAfterReassign(v: var Rec) =
 suite "symex N13 -- reading the reassigned-in placeholder field classifies decline":
 
   test "N13-3: reading opts after reassignment classifies sxUnknown via seNestedSeqUnsupported, not a crash":
-    let r = symexFind(sutReadOptsAfterReassign, tLabel("read_opts_after_reassign"))
+    let r = pinFind(sutReadOptsAfterReassign, tLabel("read_opts_after_reassign"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -158,11 +159,11 @@ proc sutCtlLenNonzeroUnreachable(v: var Ctl) =
 suite "symex N13 -- control: backed-elem seq field reassignment is fully modelled":
 
   test "N13-4a: bytes.len == 0 after reassignment is reachable (sxSat)":
-    let r = symexFind(sutCtlLenZeroSat, tLabel("ctl_len_zero_sat"))
+    let r = pinFind(sutCtlLenZeroSat, tLabel("ctl_len_zero_sat"))
     check r.status == sxSat
 
   test "N13-4b: bytes.len != 0 after a same-branch reassignment is reachable (S8f)":
-    let r = symexFind(sutCtlLenNonzeroUnreachable, tLabel("ctl_len_nonzero_unreachable"))
+    let r = pinFind(sutCtlLenNonzeroUnreachable, tLabel("ctl_len_nonzero_unreachable"))
     check r.status == sxSat
     var v = Ctl(kind: ckB, bytes: @[1'u8])
     reassignCtlToB(v)

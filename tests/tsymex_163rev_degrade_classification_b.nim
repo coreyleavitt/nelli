@@ -93,6 +93,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 # =============================================================================
 # Item 2 -- maxCallDepth bail classification
@@ -125,7 +126,7 @@ suite "#161/#163 handoff -- maxCallDepth bail names its own budget":
     ## here; what matters is the VERDICT is the real sxSat, never masked by
     ## an unrelated exhausted path, and never misattributed as an internal
     ## fault.
-    let r = symexFind(probeBottom, tLabel("bottom12"), roomyDeep)
+    let r = pinFind(probeBottom, tLabel("bottom12"), roomyDeep)
     var internalFault = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)

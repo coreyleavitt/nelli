@@ -39,6 +39,7 @@ import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
 import nelli/smt/[string_lower_support]   ## R2-3: the leaves are no longer re-exported by the facade
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -98,7 +99,7 @@ proc rFindEmpty(s: string) =
 
 template split(fn: typed, lbl: string, want: SymexStatusKind): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0

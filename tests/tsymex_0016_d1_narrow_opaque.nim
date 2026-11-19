@@ -47,7 +47,7 @@ proc sMod32(x, y: int32) =
   mod32(x, y)
 
 template kinds(sut: untyped): untyped =
-  let r = symexFind(sut, tLabel("hit"), pinSettingsConst)
+  let r = pinFind(sut, tLabel("hit"), pinSettingsConst)
   checkpoint show(r.errors) & " " & $r.soundness
   check r.status == sxSat
   r.soundness.undefinedKinds

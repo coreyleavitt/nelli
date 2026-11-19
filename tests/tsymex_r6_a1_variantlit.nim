@@ -41,6 +41,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs
@@ -140,20 +141,20 @@ proc sutRefVariantConstrDeclines(x: int) =
 suite "symex round-6 A1 — iekVariantLit literal-discriminant construction":
 
   test "A1-1: Shape(kind: skCircle, radius: r); r==7 reachable -> sxSat, witness r==7":
-    let res = symexFind(sutCircleRadiusHit, tLabel("circle_radius_7"))
+    let res = pinFind(sutCircleRadiusHit, tLabel("circle_radius_7"))
     check res.status == sxSat
     check res.witness[0] == 7
 
   test "A1-2: UNSAT companion — s.radius is always r+1, s.radius==r is impossible":
-    let res = symexFind(sutCircleRadiusUnsat, tLabel("circle_radius_unsat"))
+    let res = pinFind(sutCircleRadiusUnsat, tLabel("circle_radius_unsat"))
     check res.status == sxUnsat
 
   test "A1-3: the constructed discriminant equals the literal tag — s.kind != skCircle is unreachable":
-    let res = symexFind(sutCircleDiscProves, tLabel("disc_mismatch_unreachable"))
+    let res = pinFind(sutCircleDiscProves, tLabel("disc_mismatch_unreachable"))
     check res.status == sxUnsat
 
   test "A1-4: the OTHER active arm — Shape(kind: skSquare, side: sd); sd==11 -> sxSat":
-    let res = symexFind(sutSquareSideHit, tLabel("square_side_11"))
+    let res = pinFind(sutSquareSideHit, tLabel("square_side_11"))
     check res.status == sxSat
     check res.witness[0] == 11
 
@@ -162,11 +163,11 @@ suite "symex round-6 A1 — itMultiVariant construction regression pin":
   test "A1-5: multi-case-object constructor CONSTRUCTS — MIGRATED by RFC-0005 S8p (iekMultiVariantLit, walker 164)":
     ## Pre-S8p: a classified decline (`feUnsupportedExprKind`). Real Nim:
     ## x == 3 reaches the label, and the two axes' fields always agree.
-    let res = symexFind(sutMultiVariantConstrDeclines, tLabel("multivariant_hit"))
+    let res = pinFind(sutMultiVariantConstrDeclines, tLabel("multivariant_hit"))
     check res.status == sxSat
     if res.status == sxSat:
       check res.witness[0] == 3
-    let dead = symexFind(sutMultiVariantConstrDead, tLabel("multivariant_dead"))
+    let dead = pinFind(sutMultiVariantConstrDead, tLabel("multivariant_dead"))
     check dead.status == sxUnsat
 
 suite "symex round-6 A1 — out-of-scope shapes keep declining cleanly":
@@ -179,7 +180,7 @@ suite "symex round-6 A1 — out-of-scope shapes keep declining cleanly":
     ## feasible (under the default budget), and the shared `tag` field is set
     ## the same way regardless of which arm is active, so `s.tag == 7` proves
     ## reachable — a genuine, sound verdict upgrade, not a regression.
-    let res = symexFind(sutSymbolicDiscConstructs, tLabel("symbolic_disc_reached"))
+    let res = pinFind(sutSymbolicDiscConstructs, tLabel("symbolic_disc_reached"))
     check res.status == sxSat
     check res.witness[1] == 7
 
@@ -188,7 +189,7 @@ suite "symex round-6 A1 — out-of-scope shapes keep declining cleanly":
     ## covered": the ref variant was value-modelled, so its constructor had
     ## no heap to build on). S8l classifies `RVNode` as `itRef` and builds
     ## it on the ADR-0013 heap: `v.a == x`, so `x == 3` reaches the target.
-    let res = symexFind(sutRefVariantConstrDeclines, tLabel("ref_variant_hit"))
+    let res = pinFind(sutRefVariantConstrDeclines, tLabel("ref_variant_hit"))
     check res.status == sxSat
     if res.status == sxSat:
       check res.witness[0] == 3

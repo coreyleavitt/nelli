@@ -10,6 +10,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 proc sumDiff(a, b: int): tuple[x, y: int] =
   symexAssume(a >= 0 and a <= 100)
@@ -44,16 +45,16 @@ proc destructureClean(x, y: int) =
 suite "symex round-5 sello#2 — tuple returns from nested callees":
 
   test "values thread through the destructure (non-vacuous SAT)":
-    let r = symexFind(destructureSat, tLabel("through-the-tuple"))
+    let r = pinFind(destructureSat, tLabel("through-the-tuple"))
     check r.status == sxSat
 
   test "parity contradiction through the tuple is UNSAT (soundness)":
-    let r = symexFind(destructureUnsat, tLabel("impossible-parity"))
+    let r = pinFind(destructureUnsat, tLabel("impossible-parity"))
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == feUnsupportedOp)
 
   test "bind-and-discard shape: clean sxUnsat, no unsupported degrade":
-    let r = symexFind(destructureClean, tAssertionViolation())
+    let r = pinFind(destructureClean, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == feUnsupportedOp)
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)

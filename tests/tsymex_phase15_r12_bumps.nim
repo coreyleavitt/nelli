@@ -25,6 +25,7 @@ import std/unittest
 import std/options
 import std/strutils
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # --- sub-test 2 SUT: a `ref int` param dereffed against a target -------------
 proc derefHeap(p: ref int): bool =
@@ -50,7 +51,7 @@ suite "symex Phase 15 R12 — walker 9->10 + rendering 2->3 + heap-snapshot witn
     check parseInt(renderAsChoicesVersion) >= 3    # R12 bumped to 3; CR-2 bumped to 4
 
   test "R12 sub-test 2: a ref-param sat witness carries a POPULATED heapSnapshot":
-    let r = symexFind(derefHeap, tLabel("heap"))
+    let r = pinFind(derefHeap, tLabel("heap"))
     check r.status == sxSat
     # The heap-snapshot witness format (v3): one entry per ref/ptr param.
     check r.heapSnapshot.len == 1
@@ -66,7 +67,7 @@ suite "symex Phase 15 R12 — walker 9->10 + rendering 2->3 + heap-snapshot witn
     check r.witness[0][] == 42
 
   test "R12 sub-test 3: a non-heap (int) sat witness has NO heapSnapshot (absent)":
-    let r = symexFind(plainInt, tLabel("plain"))
+    let r = pinFind(plainInt, tLabel("plain"))
     check r.status == sxSat
     # Backward compat: every non-ref/ptr SUT's result has an EMPTY heap snapshot
     # (the v3 `heapSnapshot` key is ABSENT, not null) — prior clusters unchanged.

@@ -51,6 +51,7 @@
 ## `resolveRoutineImpl`'s doc comment for the full probe trail).
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/canonicalize
 import nelli/smt/[dsl, runtime]
 
@@ -142,8 +143,8 @@ proc sutC1PlainFunc(x: int) =
 
 suite "symex C1 — category 1: borrow op twin equality":
   test "C1-borrow: proc and func borrowed `+` agree on verdict AND witness":
-    let rProc = symexFind(sutC1BorrowProc, tLabel("c1-borrow-proc"))
-    let rFunc = symexFind(sutC1BorrowFunc, tLabel("c1-borrow-func"))
+    let rProc = pinFind(sutC1BorrowProc, tLabel("c1-borrow-proc"))
+    let rFunc = pinFind(sutC1BorrowFunc, tLabel("c1-borrow-func"))
     check rProc.status == sxSat
     check rFunc.status == sxSat
     check rProc.status == rFunc.status
@@ -159,8 +160,8 @@ suite "symex C1 — category 1: borrow op twin equality":
 
 suite "symex C1 — category 2: proc-as-value capture twin equality":
   test "C1-value: captured proc and captured func agree on verdict AND witness":
-    let rProc = symexFind(sutC1ValueProc, tLabel("c1-value-proc"))
-    let rFunc = symexFind(sutC1ValueFunc, tLabel("c1-value-func"))
+    let rProc = pinFind(sutC1ValueProc, tLabel("c1-value-proc"))
+    let rFunc = pinFind(sutC1ValueFunc, tLabel("c1-value-func"))
     check rProc.status == sxSat
     check rFunc.status == sxSat
     check rProc.status == rFunc.status
@@ -177,8 +178,8 @@ suite "symex C1 — category 2: proc-as-value capture twin equality":
 
 suite "symex C1 — category 3: string-param twin equality":
   test "C1-string: proc and func string-first-param callees agree on verdict AND witness shape":
-    let rProc = symexFind(sutC1StringProc, tLabel("c1-string-proc"))
-    let rFunc = symexFind(sutC1StringFunc, tLabel("c1-string-func"))
+    let rProc = pinFind(sutC1StringProc, tLabel("c1-string-proc"))
+    let rFunc = pinFind(sutC1StringFunc, tLabel("c1-string-func"))
     check rProc.status == sxSat
     check rFunc.status == sxSat
     check rProc.status == rFunc.status
@@ -194,8 +195,8 @@ suite "symex C1 — category 3: string-param twin equality":
 
 suite "symex C1 — category 4: generic callee twin equality":
   test "C1-generic: proc and func generic callees both monomorphize and agree on verdict":
-    let rProc = symexFind(sutC1GenericProc, tAssertionViolation())
-    let rFunc = symexFind(sutC1GenericFunc, tAssertionViolation())
+    let rProc = pinFind(sutC1GenericProc, tAssertionViolation())
+    let rFunc = pinFind(sutC1GenericFunc, tAssertionViolation())
     check rProc.status == sxUnsat   ## a + b == a + b always holds — unreachable
     check rFunc.status == sxUnsat
     check rProc.status == rFunc.status
@@ -209,8 +210,8 @@ suite "symex C1 — category 4: generic callee twin equality":
 
 suite "symex C1 — category 5: plain callee twin equality":
   test "C1-plain: proc and func plain interprocedural callees agree on verdict AND witness":
-    let rProc = symexFind(sutC1PlainProc, tAssertionViolation())
-    let rFunc = symexFind(sutC1PlainFunc, tAssertionViolation())
+    let rProc = pinFind(sutC1PlainProc, tAssertionViolation())
+    let rFunc = pinFind(sutC1PlainFunc, tAssertionViolation())
     check rProc.status == sxRaised
     check rFunc.status == sxRaised
     check rProc.raisedTypeId == "AssertionDefect"

@@ -19,6 +19,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 type
   K = enum kA, kB
@@ -36,5 +37,5 @@ proc reassignToComposite(v: var V) =
 
 suite "symex Phase 14 cycle A5 — composite arm-field zero-init":
   test "static reassignment to composite-payload arm doesn't crash":
-    let r = symexFind(reassignToComposite, tLabel("reassigned"))
+    let r = pinFind(reassignToComposite, tLabel("reassigned"))
     check r.status == sxSat

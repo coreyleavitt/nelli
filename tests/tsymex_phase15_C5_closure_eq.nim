@@ -45,6 +45,7 @@
 ## C5 is ADDITIVE under walker version "8" (no bump; Cluster C bumps at C6).
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # --- Sub-test 1: two DISTINCT lambda sites are ALWAYS unequal. ----------------
 #
@@ -137,30 +138,30 @@ suite "symex Phase 15 C5 — closure equality (nominal-site + structural-env)":
   test "C5-1: two distinct lambda sites are ALWAYS unequal (==) ⇒ sxUnsat":
     # nominal-for-site integer-pair short-circuit: distinct (siteHash,declOrder)
     # ⇒ `f == g` is false for every x ⇒ target unreachable.
-    let r = symexFind(sutDistinctSites, tLabel("distinct-sites-equal"))
+    let r = pinFind(sutDistinctSites, tLabel("distinct-sites-equal"))
     check r.status == sxUnsat
 
   test "C5-1b: two distinct lambda sites ⇒ `f != g` is ALWAYS true ⇒ sxSat":
-    let r = symexFind(sutDistinctSitesNe, tLabel("distinct-sites-unequal"))
+    let r = pinFind(sutDistinctSitesNe, tLabel("distinct-sites-unequal"))
     check r.status == sxSat
 
   test "C5-2: same site + same env → equal (structural-env svTupleEq branch) ⇒ sxSat":
-    let r = symexFind(sutSameSiteEqual, tLabel("same-site-equal"))
+    let r = pinFind(sutSameSiteEqual, tLabel("same-site-equal"))
     check r.status == sxSat
 
   test "C5-3: runtime-divergence — symex defines same-site env equality (sxSat)":
     # Documents the Nim-runtime divergence: symex's nominal-for-site +
     # structural-for-env `==` is the DEFINED semantics; Nim runtime closure `==`
     # is undefined (pointer identity). See ADR-0009 D7 / closures.md / determinism.md.
-    let r = symexFind(sutDivergenceDoc, tLabel("symex-defined-equal"))
+    let r = pinFind(sutDivergenceDoc, tLabel("symex-defined-equal"))
     check r.status == sxSat
 
   test "C5-4: lineInfo site keying — same-position lambda keys stably (sxSat, deterministic)":
     # lineInfo keying (NOT symBodyHash): a comment inside the body does not move
     # the declaration line:col, so the same-site closures compare equal; and the
     # verdict is stable across re-runs.
-    let r1 = symexFind(sutLineInfoStable, tLabel("lineinfo-stable-equal"))
-    let r2 = symexFind(sutLineInfoStable, tLabel("lineinfo-stable-equal"))
+    let r1 = pinFind(sutLineInfoStable, tLabel("lineinfo-stable-equal"))
+    let r2 = pinFind(sutLineInfoStable, tLabel("lineinfo-stable-equal"))
     check r1.status == sxSat
     check r2.status == sxSat
     check r1.status == r2.status   ## deterministic lineInfo keying across runs

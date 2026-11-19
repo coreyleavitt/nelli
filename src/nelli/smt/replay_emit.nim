@@ -17,6 +17,7 @@ import ./routine_table   # needed: `emitRoutineTable`, named in the replay child
 from ./scoped_names import isModuleGlobal, isRoutineGlobal, globalIRName
 import ./replay_footprint
 import ./witness_fidelity
+import ./witness_emit   ## RFC-0016 INT-81: `witnessCellTypes`
 
 proc wireTarget*(w: var WireWriter; t: SymexTarget) =
   ## RFC-0005 S8ct. A case object, so outside the generic encoding.
@@ -70,6 +71,11 @@ proc paramsFidelity*(params: seq[IRParam]): WitnessFidelity =
   for p in params: collectNominals(p.ty, noms, seenNoms)
   result = wfFaithful
   for p in params: result = max(result, witnessFidelity(p.ty, noms))
+  # RFC-0016 INT-81: a dynamic type a cell may have that no symbol names is
+  # built as its deepest nameable ancestor (`cellDynBuild`): not the model.
+  for t in witnessCellTypes(params):
+    if hierChain(t).len >= 2 and not cellTypeNameable(t):
+      result = max(result, wfLossy)
 
 proc emitStartReplay*(fn: NimNode; params: seq[IRParam];
                         witness, target, pathTaint: NimNode;

@@ -11,6 +11,7 @@ import std/[unittest, strutils, sequtils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 const SidecarExt = ".md5"
 const Radix = 16'i32
@@ -49,26 +50,26 @@ proc constIntWidth(x: int32) =
 suite "symex round-5 — const-symbol folding":
 
   test "concat with const suffix: length lemma proves (was sxUnknown)":
-    let r = symexFind(constSuffixLen, tAssertionViolation())
+    let r = pinFind(constSuffixLen, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "concat with const suffix: witness through the fold (non-vacuous SAT)":
-    let r = symexFind(constSuffixSat, tLabel("suffix-lands"))
+    let r = pinFind(constSuffixSat, tLabel("suffix-lands"))
     check r.status == sxSat
 
   test "const referenced inside a walked callee proves":
-    let r = symexFind(constInCallee, tAssertionViolation())
+    let r = pinFind(constInCallee, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "`&=` with const suffix proves":
-    let r = symexFind(constInPlace, tAssertionViolation())
+    let r = pinFind(constInPlace, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
   test "fixed-width int const folds at declared width (no svBV64 leak)":
-    let r = symexFind(constIntWidth, tAssertionViolation())
+    let r = pinFind(constIntWidth, tAssertionViolation())
     check r.status == sxUnsat
     check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 

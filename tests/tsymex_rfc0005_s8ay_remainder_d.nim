@@ -41,6 +41,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/regex_parser
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 when not defined(symexQueryStats):
   {.error: "tsymex_rfc0005_s8ay_remainder needs -d:symexQueryStats (its .nim.cfg)".}
@@ -56,7 +57,7 @@ proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   false
 
 template verdict(sut: untyped; label: string): SymexResult =
-  let r = symexFind(sut, tLabel(label))
+  let r = pinFind(sut, tLabel(label))
   checkpoint $r.status & " " & show(r.errors)
   r
 
@@ -234,7 +235,7 @@ suite "S8ay (6): step 1c decides before the full-theory search":
 
   test "the join walk is sxUnsat at the default budget, within factsFirstRLimit":
     symexQueryStats = @[]
-    let r = symexFind(joinFoundExceedsLast, tLabel("ay_join"))
+    let r = pinFind(joinFoundExceedsLast, tLabel("ay_join"))
     let units = unitsSpent()
     checkpoint $r.status & " " & show(r.errors) & " units=" & $units
     check r.status == sxUnsat
@@ -242,7 +243,7 @@ suite "S8ay (6): step 1c decides before the full-theory search":
 
   test "from a symbolic start too":
     symexQueryStats = @[]
-    let r = symexFind(joinFromI, tLabel("ay_join_i"))
+    let r = pinFind(joinFromI, tLabel("ay_join_i"))
     let units = unitsSpent()
     checkpoint $r.status & " " & show(r.errors) & " units=" & $units
     check r.status == sxUnsat

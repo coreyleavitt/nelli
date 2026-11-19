@@ -33,6 +33,7 @@
 
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # --- helper proc called with a parsed argument ---
 proc addOne(n: int): int = n + 1
@@ -65,14 +66,14 @@ suite "Phase 15 CR-21 — isCall arg-lowering drains parseIntRaiseConds":
     ## Before fix: sxUnsat (parseInt raise dropped; callee unreachable because
     ## s=="abc" is non-digit so calleeReachable is never hit, but the RAISE is
     ## what should be found here). After fix: sxRaised(ValueError).
-    let r = symexFind(callWithParseIntArg, tRaisedExn("ValueError"))
+    let r = pinFind(callWithParseIntArg, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
 
   test "CR-21: parseInt in arg position, digit string → callee reachable (sxSat)":
     ## The digits-continuation still flows through to the callee.
     ## Must not regress after the drain is added.
-    let r = symexFind(callWithParseIntArgDigits, tLabel("hit"))
+    let r = pinFind(callWithParseIntArgDigits, tLabel("hit"))
     check r.status == sxSat
 
   test "CR-21: parseInt in second arg of two-arg call → sxRaised(ValueError)":
@@ -80,6 +81,6 @@ suite "Phase 15 CR-21 — isCall arg-lowering drains parseIntRaiseConds":
     ## twoArgHelper(1, parseInt("abc")) must raise ValueError.
     ## Before fix: AssertionDefect crash (binBV width mismatch) or sxUnsat.
     ## After fix: sxRaised(ValueError).
-    let r = symexFind(callTwoArgParseInt, tRaisedExn("ValueError"))
+    let r = pinFind(callTwoArgParseInt, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"

@@ -4,6 +4,7 @@
 ## to the right exit or next-iteration entry.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex Phase 6 — break / continue":
   test "break exits loop early":
@@ -17,7 +18,7 @@ suite "symex Phase 6 — break / continue":
         i = i + 1
       if found == 3:
         symexTarget("found-at-2")
-    let r = symexFind(findFirst, tLabel("found-at-2"))
+    let r = pinFind(findFirst, tLabel("found-at-2"))
     check r.status == sxSat
     check r.witness[0].len >= 3
     check r.witness[0][2] == 7
@@ -34,7 +35,7 @@ suite "symex Phase 6 — break / continue":
         i = i + 1
       if count == 2 and s.len == 2:
         symexTarget("two-evens")
-    let r = symexFind(countEvens, tLabel("two-evens"))
+    let r = pinFind(countEvens, tLabel("two-evens"))
     check r.status == sxSat
     check r.witness[0].len == 2
     check (r.witness[0][0] mod 2) == 0

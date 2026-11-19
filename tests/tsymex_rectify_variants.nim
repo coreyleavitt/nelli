@@ -14,6 +14,7 @@
 ## `itInt(8, unsigned)`, never `itVariant`.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 type Color = enum red, green, blue
 
@@ -40,7 +41,7 @@ proc isMatchingSquare(s: Shape) =
 
 suite "symex variant objects #141 + Phase 11 migration":
   test "enum-typed param dispatch":
-    let r = symexFind(isRed, tLabel("hit-red"))
+    let r = pinFind(isRed, tLabel("hit-red"))
     check r.status == sxSat
     # Issue #163: the witness reader now emits a correctly-typed `Color`
     # value directly (see `IRType.enumName`), so `r.witness[0]` is already
@@ -49,14 +50,14 @@ suite "symex variant objects #141 + Phase 11 migration":
     check ord(r.witness[0]) == ord(red)
 
   test "variant — discriminator-gated arm-field constraint reaches target":
-    let r = symexFind(isLargeCircle, tLabel("big-circle"))
+    let r = pinFind(isLargeCircle, tLabel("big-circle"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.kind == skCircle
     check s.radius > 100
 
   test "variant — different arm tag also works (skSquare)":
-    let r = symexFind(isMatchingSquare, tLabel("forty-two-square"))
+    let r = pinFind(isMatchingSquare, tLabel("forty-two-square"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.kind == skSquare

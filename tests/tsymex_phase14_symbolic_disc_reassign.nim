@@ -16,6 +16,7 @@
 import std/unittest
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 type
   K = enum kA, kB, kC
@@ -35,7 +36,7 @@ proc reassignThenCheck(box: var Box, t: K) =
 
 suite "symex Phase 14 A4 — symbolic-RHS disc reassignment":
   test "obj.kind = symbolicVar: walker forks across arms, finds witness":
-    let r = symexFind(reassignThenCheck, tLabel("kB-reached"))
+    let r = pinFind(reassignThenCheck, tLabel("kB-reached"))
     check r.status == sxSat
     # witness[0] is the `box: var Box` param; witness[1] is `t: K`,
     # which is the symbolic RHS the walker forked over. Enum params

@@ -24,6 +24,7 @@
 ## would abort this process.
 import std/[unittest, strutils]
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -59,7 +60,7 @@ suite "S8aa (1): a division that traps in C is not a Defect (checked build)":
     try: sutCheckedZero(1, 0)
     except DivByZeroDefect: real = "DivByZeroDefect"
     check real == "DivByZeroDefect"
-    let r = symexFind(sutCheckedZero, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(sutCheckedZero, tRaisedExn("DivByZeroDefect"))
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -192,7 +193,7 @@ suite "S8aa (2): the short-circuit join covers store shapes":
   test "an operand that writes a string joins (6 pairs)":
     ## RED: 117 Z3 calls (2^m paths).
     symexZ3CallCount = 0
-    let r = symexFind(sutStr, tLabel("s8aa_str"))
+    let r = pinFind(sutStr, tLabel("s8aa_str"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -201,14 +202,14 @@ suite "S8aa (2): the short-circuit join covers store shapes":
       let d = r.witness[0]
       check d[0] != 1 and d[2] == 3 and d[4] == 5 and d[6] != 7 and
             d[8] == 9 and d[10] == 11
-    let r2 = symexFind(sutStr, tLabel("s8aa_str_dead"))
+    let r2 = pinFind(sutStr, tLabel("s8aa_str_dead"))
     checkpoint show(r2.errors)
     check r2.status == sxUnsat
 
   test "an operand that appends to a seq joins (6 pairs)":
     ## RED: 117 Z3 calls.
     symexZ3CallCount = 0
-    let r = symexFind(sutSeq, tLabel("s8aa_seq"))
+    let r = pinFind(sutSeq, tLabel("s8aa_seq"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -220,7 +221,7 @@ suite "S8aa (2): the short-circuit join covers store shapes":
 
   test "an operand that writes a heap cell joins (6 pairs)":
     symexZ3CallCount = 0
-    let r = symexFind(sutHeap, tLabel("s8aa_heap"), heapRoom)
+    let r = pinFind(sutHeap, tLabel("s8aa_heap"), heapRoom)
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -233,7 +234,7 @@ suite "S8aa (2): the short-circuit join covers store shapes":
   template refChain(fn: typed, lbl: string, st: static SymexSettings) =
     block:
       symexZ3CallCount = 0
-      let r = symexFind(fn, tLabel(lbl), st)
+      let r = pinFind(fn, tLabel(lbl), st)
       checkpoint lbl & " " & show(r.errors)
       checkpoint "z3 calls: " & $symexZ3CallCount
       check r.status == sxSat
@@ -256,7 +257,7 @@ suite "S8aa (2): the short-circuit join covers store shapes":
   test "an operand with two surviving paths joins (6 pairs)":
     ## RED: 731 Z3 calls.
     symexZ3CallCount = 0
-    let r = symexFind(sutMulti, tLabel("s8aa_multi"))
+    let r = pinFind(sutMulti, tLabel("s8aa_multi"))
     checkpoint show(r.errors)
     checkpoint "z3 calls: " & $symexZ3CallCount
     check r.status == sxSat
@@ -272,7 +273,7 @@ suite "S8aa (2): the short-circuit join covers store shapes":
     try: sutMultiRead("", 4, 0)
     except IndexDefect: raised = true
     check raised
-    let r = symexFind(sutMultiRead, tIndexError())
+    let r = pinFind(sutMultiRead, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -281,7 +282,7 @@ suite "S8aa (2): the short-circuit join covers store shapes":
       try: sutMultiRead(s, i, j)
       except IndexDefect: again = true
       check again
-    let r2 = symexFind(sutMultiRead, tLabel("s8aa_multi_read"))
+    let r2 = pinFind(sutMultiRead, tLabel("s8aa_multi_read"))
     checkpoint show(r2.errors)
     check r2.status == sxSat
     if r2.status == sxSat:
@@ -333,7 +334,7 @@ suite "S8aa (3): B6 with a negative offset":
   test "a negative start is an IndexDefect witness":
     ## RED: `sxUnknown` (`beBudgetExhausted`): the member branch took the
     ## negative start (`str.substr` at -1 is "", a member).
-    let r = symexFind(readOptionsSut, tIndexError())
+    let r = pinFind(readOptionsSut, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -347,7 +348,7 @@ suite "S8aa (3): B6 with a negative offset":
       check got == "IndexDefect"
 
   test "a short region: the IndexDefect is found, not a false sxUnsat":
-    let r = symexFind(readOptionsShort, tIndexError())
+    let r = pinFind(readOptionsShort, tIndexError())
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
@@ -393,7 +394,7 @@ suite "S8aa (4): len and find reinterpreted as uint":
 
   test "an unsigned B4 scan: the hit, with no decline, and it replays":
     ## RED: `feUnsupportedOpHavoc` from `lowerConvIntReinterpret`.
-    let r = symexFind(sutU, tLabel("s8aa_u_hit"))
+    let r = pinFind(sutU, tLabel("s8aa_u_hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check not r.errors.hasKind(feUnsupportedOpHavoc)
@@ -405,7 +406,7 @@ suite "S8aa (4): len and find reinterpreted as uint":
   test "find's -1 as uint is high(uint)":
     ## Probe: `"bb".find('a').uint == high(uint)`.
     check "bb".find('a').uint == high(uint)
-    let r = symexFind(sutFindU, tLabel("s8aa_findu"))
+    let r = pinFind(sutFindU, tLabel("s8aa_findu"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check not r.errors.hasKind(feUnsupportedOpHavoc)
@@ -413,13 +414,13 @@ suite "S8aa (4): len and find reinterpreted as uint":
       check r.witness[0].len == 2 and 'a' notin r.witness[0]
 
   test "len as uint keeps its value":
-    let r = symexFind(sutLenU, tLabel("s8aa_lenu"))
+    let r = pinFind(sutLenU, tLabel("s8aa_lenu"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check not r.errors.hasKind(feUnsupportedOpHavoc)
     if r.status == sxSat:
       check r.witness[0].len == 3
-    let r2 = symexFind(sutLenU, tLabel("s8aa_lenu_dead"))
+    let r2 = pinFind(sutLenU, tLabel("s8aa_lenu_dead"))
     checkpoint show(r2.errors)
     check r2.status == sxUnsat
 

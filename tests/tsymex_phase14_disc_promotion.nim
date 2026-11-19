@@ -17,6 +17,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
+import ./s8cu_helpers
 
 type
   K = enum kA, kB, kC
@@ -32,7 +33,7 @@ proc hitKB(v: V) =
 
 suite "symex Phase 14 cycle A6 — Z3Int disc promotion":
   test "isOptimised: walker reaches target AND logs aeVariantDisc":
-    let r = symexFind(hitKB, tLabel("kB-found"))
+    let r = pinFind(hitKB, tLabel("kB-found"))
     check r.status == sxSat
     var sawPromotion = false
     for ab in r.abstractions:
@@ -48,7 +49,7 @@ suite "symex Phase 14 cycle A6 — Z3Int disc promotion":
       var s = defaultSymexSettings()
       s.integerSemantics = isExact
       s
-    let r = symexFind(hitKB, tLabel("kB-found"), exactSettings)
+    let r = pinFind(hitKB, tLabel("kB-found"), exactSettings)
     check r.status == sxSat
     for ab in r.abstractions:
       check ab.evidence != aeVariantDisc

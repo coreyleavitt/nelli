@@ -28,6 +28,7 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -85,30 +86,30 @@ const injected = "S8bx synthetic extraction fault"
 suite "S8bx (1): a raise from in-walk witness extraction":
 
   test "after a loop: a named decline (was a false sxUnsat on C)":
-    let r = symexFind(afterLoop, tLabel("after_loop"))
+    let r = pinFind(afterLoop, tLabel("after_loop"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status != sxUnsat
     check namedFault(r, injected)
 
   test "two iterations of one table: a named decline (was a false sxUnsat on C)":
-    let r = symexFind(twoIters, tLabel("two_iters"))
+    let r = pinFind(twoIters, tLabel("two_iters"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status != sxUnsat
     check namedFault(r, injected)
 
   test "no loop: a named decline":
-    let r = symexFind(flat, tLabel("flat"))
+    let r = pinFind(flat, tLabel("flat"))
     checkpoint $r.status & " " & show(r.errors)
     check namedFault(r, injected)
 
   test "lost inside extraction: a named decline, never a winner":
-    let r = symexFind(swallowedInside, tLabel("swallowed"))
+    let r = pinFind(swallowedInside, tLabel("swallowed"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status != sxSat
     check namedFault(r, "S8bx synthetic swallowed extraction fault")
 
   test "a clean string parameter extracts":
-    let r = symexFind(clean, tLabel("clean"))
+    let r = pinFind(clean, tLabel("clean"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:
@@ -116,7 +117,7 @@ suite "S8bx (1): a raise from in-walk witness extraction":
       check r.witness[1] == 3
 
   test "a later run is not declined by an earlier run's fault":
-    discard symexFind(afterLoop, tLabel("after_loop"))
-    let r = symexFind(clean, tLabel("clean"))
+    discard pinFind(afterLoop, tLabel("after_loop"))
+    let r = pinFind(clean, tLabel("clean"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat

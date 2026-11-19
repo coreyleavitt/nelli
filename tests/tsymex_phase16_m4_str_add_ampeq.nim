@@ -25,6 +25,7 @@
 ## string, same shape the binary `&` expression form already produces.
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 
 # --- `&=` happy path: SND-1's exact repro, now correctly modeled -----------
 proc ampEqHappy() =
@@ -108,36 +109,36 @@ proc seqAddUnchanged(v: var seq[int]) =
 suite "symex Phase 16 M4 — string `.add`/`&=` via iekStrConcat in-place assign":
 
   test "&= happy path (SND-1 repro): \"a\" &= \"x\" == \"ax\" is real sxSat":
-    let r = symexFind(ampEqHappy, tLabel("hit"))
+    let r = pinFind(ampEqHappy, tLabel("hit"))
     check r.status == sxSat
 
   test "&= UNSAT: \"a\" &= \"x\" != \"ay\" (proves the concat is modeled, not a no-op)":
-    let r = symexFind(ampEqUnsat, tLabel("hit"))
+    let r = pinFind(ampEqUnsat, tLabel("hit"))
     check r.status == sxUnsat
 
   test ".add parity: \"a\".add(\"x\") == \"ax\" is real sxSat":
-    let r = symexFind(addHappy, tLabel("hit"))
+    let r = pinFind(addHappy, tLabel("hit"))
     check r.status == sxSat
 
   test ".add UNSAT: \"a\".add(\"x\") != \"ay\"":
-    let r = symexFind(addUnsat, tLabel("hit"))
+    let r = pinFind(addUnsat, tLabel("hit"))
     check r.status == sxUnsat
 
   test "&= SND-1 no-longer-tainted: symbolic-param LHS yields a definite sxSat (never sxUnknown), witness round-trips":
-    let r = symexFind(ampEqSymbolicParam, tLabel("hit"))
+    let r = pinFind(ampEqSymbolicParam, tLabel("hit"))
     check r.status == sxSat
     check r.status != sxUnknown
     check r.witness[0] == "a"
     check r.witness[0] & "x" == "ax"   ## round-trip vs real Nim `&`
 
   test "&= symbolic RHS operand: witness s == \"bc\", round-trips against real Nim":
-    let r = symexFind(ampEqSymbolicRhs, tLabel("hit"))
+    let r = pinFind(ampEqSymbolicRhs, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "bc"
     check "a" & r.witness[0] == "abc"
 
   test ".add symbolic RHS operand: witness s == \"bc\", round-trips against real Nim":
-    let r = symexFind(addSymbolicRhs, tLabel("hit"))
+    let r = pinFind(addSymbolicRhs, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "bc"
     var expected = "a"
@@ -145,21 +146,21 @@ suite "symex Phase 16 M4 — string `.add`/`&=` via iekStrConcat in-place assign
     check expected == "abc"
 
   test "regression: numeric `+=` unaffected":
-    let r = symexFind(numericPlusEqUnchanged, tLabel("hit"))
+    let r = pinFind(numericPlusEqUnchanged, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == 5
 
   test "regression: numeric `*=` unaffected":
-    let r = symexFind(numericTimesEqUnchanged, tLabel("hit"))
+    let r = pinFind(numericTimesEqUnchanged, tLabel("hit"))
     check r.status == sxSat
 
   test "regression: binary `s & x` expression form unaffected":
-    let r = symexFind(binaryConcatUnchanged, tLabel("hit"))
+    let r = pinFind(binaryConcatUnchanged, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "x"
 
   test "regression: seq[T].add unaffected (not rerouted through string concat)":
-    let r = symexFind(seqAddUnchanged, tLabel("hit"))
+    let r = pinFind(seqAddUnchanged, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len == 0
 

@@ -2067,6 +2067,24 @@ task test, "Run the test suite":
             "tsymex_0016_k9cg_unbacked_l",
             "tsymex_0016_k9cg_unbacked_n",
             "tsymex_0016_k9cg_unbacked_p",
+            # RFC-0016 K9d: no verdict suite without a native pin (the census of tsymex_* files asserting sxSat/sxUnsat/sxRaised with no native idiom), ratcheted at its ceiling; pinFind, the generator that pins a suite's own symexFind call.
+            "tsymex_0016_k9d_census",
+            "tsymex_0016_k9d_pinfind",
+            # RFC-0016 INT-72: a free Rune ranges over int32; $r, toUTF8, size and Rune(n) follow std/unicode out of range; decoded runes are the decoder's.
+            "tsymex_0016_int72_runedomain",
+            # RFC-0016 INT-77: a float range is the closed IEEE interval in its width, NaN excluded.
+            "tsymex_0016_int77_floatrange",
+            # RFC-0016 INT-82: an allocation is distinct from every object of the walk's entry state (parameters, what they reach, globals).
+            "tsymex_0016_int82_paramfresh",
+            # RFC-0016 INT-81: a witness cell is built once per model address, as the dynamic type its run-type tags name, and shared upcast by every position holding it.
+            "tsymex_0016_int81_witnesstag",
+            "tsymex_0016_int83_pointerparam",
+            # RFC-0016 INT-84: a holey enum input ranges over its declared ordinals; a hole the program makes stays a value.
+            "tsymex_0016_int84_holeyenum",
+            # RFC-0016 INT-85: a zero-initialised slot of an enum or range without 0 holds 0; a caller's value stays in the declared domain.
+            "tsymex_0016_int85_zeroinit",
+            "tsymex_0016_k9cg_unbacked",
+            "tsymex_0016_k9cg_unbacked_np",
             "tsymex_0016_k9cg_unbacked_table",
             "tsymex_0016_d3b_walklog",
             # RFC-0016 0.10.0 review D3c: the include surface census (include list, no import in runtime_*.nim, symbol-coupling ceilings, the heap-only forward-declaration block, the symval leaf).

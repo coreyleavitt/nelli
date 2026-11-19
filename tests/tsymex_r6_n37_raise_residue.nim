@@ -165,6 +165,7 @@
 import std/[unittest, sequtils, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -212,7 +213,7 @@ suite "symex N37 -- iekSeqSlice base-kind decline (call-boundary svString mismat
     ## only the free-form wording improved -- so this is the HONEST-decline
     ## case: the pin updates to the new shape rather than the source
     ## reverting.
-    let r = symexFind(n37SliceCallerNoBlock, tLabel("n37_slice_basekind_noblock"))
+    let r = pinFind(n37SliceCallerNoBlock, tLabel("n37_slice_basekind_noblock"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -224,7 +225,7 @@ suite "symex N37 -- iekSeqSlice base-kind decline (call-boundary svString mismat
   test "N37-1: post-block target reachable honestly (sxUnknown), never a false sxUnsat":
     ## See N37-1-noblock's note (item 4b, walker v114) -- same fef2dc0
     ## message-wording update, pin follows the new honest shape.
-    let r = symexFind(n37SliceCallerBlockAfter, tLabel("n37_slice_basekind_block_after"))
+    let r = pinFind(n37SliceCallerBlockAfter, tLabel("n37_slice_basekind_block_after"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -256,7 +257,7 @@ proc n37SeqSliceBoundBlockAfter(data: seq[byte]) =
 suite "symex N37 -- iekSeqSlice CR-17 bound decline (two-hop seeded local)":
 
   test "N37-2-noblock: same shape without the block -- honest sxUnknown, unaffected by this slice's fix":
-    let r = symexFind(n37SeqSliceBoundNoBlock, tLabel("n37_seqslice_bound_noblock"))
+    let r = pinFind(n37SeqSliceBoundNoBlock, tLabel("n37_seqslice_bound_noblock"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -266,7 +267,7 @@ suite "symex N37 -- iekSeqSlice CR-17 bound decline (two-hop seeded local)":
     check saw
 
   test "N37-2: post-block target reachable honestly (sxUnknown), never a false sxUnsat":
-    let r = symexFind(n37SeqSliceBoundBlockAfter, tLabel("n37_seqslice_bound_block_after"))
+    let r = pinFind(n37SeqSliceBoundBlockAfter, tLabel("n37_seqslice_bound_block_after"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -312,7 +313,7 @@ suite "symex N37 -- isRaise bare-reraise decline (walk-level generalization)":
     ## PRE-FIX (stash-confirmed): sxUnsat with ZERO errors -- lost, same as
     ## the block-wrapped shape below. POST-FIX: honest classified
     ## `sxUnknown`.
-    let r = symexFind(n37BareRaiseNoBlock, tLabel("n37_bareraise_noblock"))
+    let r = pinFind(n37BareRaiseNoBlock, tLabel("n37_bareraise_noblock"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -322,7 +323,7 @@ suite "symex N37 -- isRaise bare-reraise decline (walk-level generalization)":
     check saw
 
   test "N37-3: block+loop wrapping the call -- post-block target reachable honestly, never a false sxUnsat":
-    let r = symexFind(n37BareRaiseBlockAfter, tLabel("n37_bareraise_block_after"))
+    let r = pinFind(n37BareRaiseBlockAfter, tLabel("n37_bareraise_block_after"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -373,7 +374,7 @@ suite "symex N37 -- lowerSeqLit non-empty literal, unbacked tuple elem":
     ## verbatim; it now routes through `plainEnglishTypeKind` ("tuple type")
     ## instead, so this pin checks for the plain-language phrase, not the
     ## internal IR vocabulary token. `.kind` itself is unchanged.
-    let r = symexFind(n37SeqLitTupleElem, tLabel("n37_seqlit_tuple"))
+    let r = pinFind(n37SeqLitTupleElem, tLabel("n37_seqlit_tuple"))
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -409,7 +410,7 @@ proc n37LenCallerNoBlock(data: seq[byte]) =
 suite "symex N37 -- iekSeqLen unsupported-receiver-kind: verified-unreachable companion":
 
   test "N37-5: the only reachable cross-representation mismatch resolves via the ALREADY-HANDLED svString arm (a correct answer, not the target arm)":
-    let r = symexFind(n37LenCallerNoBlock, tLabel("n37_len_recvkind_noblock"))
+    let r = pinFind(n37LenCallerNoBlock, tLabel("n37_len_recvkind_noblock"))
     check r.status == sxSat
     check r.errors.len == 0
 
@@ -439,7 +440,7 @@ proc n37SliceNormalBlockAfterUnsat(a: int) =
 suite "symex N37 -- UNSAT companion: no over-degrade":
 
   test "N37-6: a data-independent false condition after a NON-degrading slice still proves sxUnsat":
-    let r = symexFind(n37SliceNormalBlockAfterUnsat,
+    let r = pinFind(n37SliceNormalBlockAfterUnsat,
                        tLabel("n37_slice_normal_unreachable_after"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -492,7 +493,7 @@ proc n37HofMapTupleElem(a: int) =
 suite "symex N37 -- lowerHofCall inline map, unbacked tuple return elem (N29-unblocked, honest decline)":
 
   test "N37-4: N29-unblocked closure construction hits a SECOND, orthogonal gap (multi-leaf closure return type) -- now an honest classified decline (feUnsupportedOp), never a crash":
-    let r = symexFind(n37HofMapTupleElem, tLabel("n37_hof_map_tuple"))
+    let r = pinFind(n37HofMapTupleElem, tLabel("n37_hof_map_tuple"))
     var sawNested = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)

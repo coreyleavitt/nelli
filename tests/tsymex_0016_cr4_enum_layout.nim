@@ -119,23 +119,23 @@ suite "CR-4 H6: an enum's C size in a variant layout is Nim's":
 
   test "foreign bytes read as a negative-ordinal enum: no trusted UNSAT":
     check nativeReadNeg(-1) == 255   # the native answer
-    let r = symexFind(sutReadNeg, tLabel("hit"))
+    let r = pinFind(sutReadNeg, tLabel("hit"))
     checkpoint show(r.errors) & " " & $r.status
     check not (r.status == sxUnsat and r.trusted)
 
   test "foreign bytes read as a {.size: 4.} enum: no trusted UNSAT":
     let o = Ps(k: true, b0: 0, b1: 1, b2: 0, b3: 0)
     check ord(o.e) == 256            # the native answer
-    let r = symexFind(sutReadSized, tLabel("hit"))
+    let r = pinFind(sutReadSized, tLabel("hit"))
     checkpoint show(r.errors) & " " & $r.status
     check not (r.status == sxUnsat and r.trusted)
 
   test "a negative-ordinal enum's own bytes through another arm are exact":
     check nativeWriteNeg(enM) == -1
     check nativeWriteNeg(en1) == 0
-    let r = symexFind(sutWriteNeg, tLabel("hit"))
+    let r = pinFind(sutWriteNeg, tLabel("hit"))
     checkpoint show(r.errors) & " " & $r.status
-    let r2 = symexFind(sutWriteNegZero, tLabel("hit"))
+    let r2 = pinFind(sutWriteNegZero, tLabel("hit"))
     checkpoint show(r2.errors) & " " & $r2.status
     when defined(cpp):
       # cpp: reading a union member that is not the active one is undefined
@@ -154,7 +154,7 @@ suite "CR-4 H6: an enum's C size in a variant layout is Nim's":
       check r2.trusted
 
   test "a one-byte enum keeps its exact read":
-    let r = symexFind(sutReadByte, tLabel("hit"))
+    let r = pinFind(sutReadByte, tLabel("hit"))
     checkpoint show(r.errors) & " " & $r.status
     when defined(cpp):
       check r.status != sxUnsat

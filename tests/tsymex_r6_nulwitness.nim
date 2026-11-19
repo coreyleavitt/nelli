@@ -51,6 +51,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # 1. The headline repro: a solved string with an embedded NUL at a known
@@ -67,11 +68,11 @@ proc sutEmbeddedNulAtIndex1(s: string) =
 suite "symex round-6 B4-rider -- embedded NUL at a known position":
 
   test "NW-1: s.len==3, s[1]=='\\0' is reachable (sxSat)":
-    let r = symexFind(sutEmbeddedNulAtIndex1, tLabel("hit"))
+    let r = pinFind(sutEmbeddedNulAtIndex1, tLabel("hit"))
     check r.status == sxSat
 
   test "NW-1-content: the witness is the exact 3 raw bytes, not the 5-char escape text":
-    let r = symexFind(sutEmbeddedNulAtIndex1, tLabel("hit"))
+    let r = pinFind(sutEmbeddedNulAtIndex1, tLabel("hit"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.len == 3
@@ -110,11 +111,11 @@ proc sutAccNulPayloadAB(s: string, start: int) =
 suite "symex round-6 B4-rider -- NUL-delimited B4-shape scan, content strengthened":
 
   test "NW-2: real '\\0' delimiter, payload==\"AB\" is reachable (sxSat)":
-    let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
+    let r = pinFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
     check r.status == sxSat
 
   test "NW-2-content: the witness's terminator byte is a real single NUL, not the 5-char escape text":
-    let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
+    let r = pinFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
     check r.status == sxSat
     # Model-independent (RFC-0005 S8w2): the path fixes `s[start ..
     # start+2]` only; Z3 may put any bytes after the terminator (4.13.4
@@ -140,7 +141,7 @@ suite "symex round-6 B4-rider -- NUL-delimited B4-shape scan, content strengthen
           check esc notin extracted
 
   test "NW-2-cross: the witness, replayed through the real function, reproduces the exact found outcome":
-    let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
+    let r = pinFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
     check r.status == sxSat
     let (s, start) = r.witness
     let (payload, q) = readCStringNulTracer(s, start)
@@ -158,7 +159,7 @@ proc sutLowByte(s: string) =
 suite "symex round-6 B4-rider -- low byte (0x01)":
 
   test "NW-3: a solved single-byte string 0x01 round-trips exactly":
-    let r = symexFind(sutLowByte, tLabel("hit"))
+    let r = pinFind(sutLowByte, tLabel("hit"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.len == 1
@@ -175,7 +176,7 @@ proc sutBackslash(s: string) =
 suite "symex round-6 B4-rider -- backslash byte":
 
   test "NW-4: a solved single-byte backslash string round-trips exactly":
-    let r = symexFind(sutBackslash, tLabel("hit"))
+    let r = pinFind(sutBackslash, tLabel("hit"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.len == 1
@@ -206,17 +207,17 @@ proc sutFF(s: string) =
 suite "symex round-6 B4-rider -- standalone quote / 0x7f / 0xff":
 
   test "NW-4b: a solved single-byte double-quote string round-trips exactly":
-    let r = symexFind(sutQuote, tLabel("hit"))
+    let r = pinFind(sutQuote, tLabel("hit"))
     check r.status == sxSat
     check ord(r.witness[0][0]) == ord('"')
 
   test "NW-4c: a solved single-byte 0x7f string round-trips exactly":
-    let r = symexFind(sut7f, tLabel("hit"))
+    let r = pinFind(sut7f, tLabel("hit"))
     check r.status == sxSat
     check ord(r.witness[0][0]) == 0x7f
 
   test "NW-4d: a solved single-byte 0xff string round-trips exactly":
-    let r = symexFind(sutFF, tLabel("hit"))
+    let r = pinFind(sutFF, tLabel("hit"))
     check r.status == sxSat
     check ord(r.witness[0][0]) == 0xff
 
@@ -241,7 +242,7 @@ proc sutMixedEscapeBytes(s: string) =
 suite "symex round-6 B4-rider -- mixed escaped-byte class in one witness":
 
   test "NW-5: every flagged byte class round-trips in a single witness":
-    let r = symexFind(sutMixedEscapeBytes, tLabel("hit"))
+    let r = pinFind(sutMixedEscapeBytes, tLabel("hit"))
     check r.status == sxSat
     let s = r.witness[0]
     check s.len == 9
@@ -267,7 +268,7 @@ proc sutPlainAscii(s: string) =
 suite "symex round-6 B4-rider -- plain-ASCII regression":
 
   test "NW-6: an unaffected plain-ASCII witness still round-trips exactly":
-    let r = symexFind(sutPlainAscii, tLabel("hit"))
+    let r = pinFind(sutPlainAscii, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "hello"
 

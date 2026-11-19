@@ -13,6 +13,7 @@
 import std/unittest
 import nelli
 import nelli/symex
+import ./s8cu_helpers
 
 type ScanError = object of CatchableError
 
@@ -64,32 +65,32 @@ proc plAfter(s: string) =
 suite "RFC-0005 S8bl item 2 -- targets inside the pair loop":
   test "in-body targets: reached ones are sxSat, dead ones sxUnsat, all exact (was a hang past 900 s)":
     block:
-      let r = symexFind(plBody, tLabel("pl_top_c3"))
+      let r = pinFind(plBody, tLabel("pl_top_c3"))
       checkpoint $r.status & " " & $r.soundness & " " & $r.errors
       check r.status == sxSat
     block:
-      let r = symexFind(plBody, tLabel("pl_key_c3"))
+      let r = pinFind(plBody, tLabel("pl_key_c3"))
       checkpoint $r.status & " " & $r.soundness & " " & $r.errors
       check r.status == sxSat
     block:
-      let r = symexFind(plBody, tLabel("pl_top_c3_dead"))
+      let r = pinFind(plBody, tLabel("pl_top_c3_dead"))
       checkpoint $r.status & " " & $r.soundness & " " & $r.errors
       check r.status == sxUnsat
     block:
-      let r = symexFind(plBody, tLabel("pl_key_c3_dead"))
+      let r = pinFind(plBody, tLabel("pl_key_c3_dead"))
       checkpoint $r.status & " " & $r.soundness & " " & $r.errors
       check r.status == sxUnsat
     block:
-      let r = symexFind(plBody, tLabel("pl_key_c4_dead"))
+      let r = pinFind(plBody, tLabel("pl_key_c4_dead"))
       checkpoint $r.status & " " & $r.soundness & " " & $r.errors
       check r.status == sxUnsat
 
   test "after the loop: four pairs collected, exactly":
     block:
-      let r = symexFind(plAfter, tLabel("pl_four"))
+      let r = pinFind(plAfter, tLabel("pl_four"))
       checkpoint $r.status & " " & $r.soundness & " " & $r.errors
       check r.status == sxSat
     block:
-      let r = symexFind(plAfter, tLabel("pl_four_dead"))
+      let r = pinFind(plAfter, tLabel("pl_four_dead"))
       checkpoint $r.status & " " & $r.soundness & " " & $r.errors
       check r.status == sxUnsat

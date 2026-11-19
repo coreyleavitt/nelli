@@ -28,6 +28,7 @@
 
 import std/[unittest, strutils]
 import nelli/symex
+import ./s8cu_helpers
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -46,7 +47,7 @@ proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
 template clean(fn: typed, lbl: string, want: SymexStatusKind,
                st: SymexSettings = SymexSettings()): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl), st)
+    let r = pinFind(fn, tLabel(lbl), st)
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
@@ -84,7 +85,7 @@ suite "S8ba (1): a compiler temporary is never read as a global":
 
   test "a declined element read binds its temporary":
     template one(fn: typed, lbl: string) =
-      let r = symexFind(fn, tLabel(lbl))
+      let r = pinFind(fn, tLabel(lbl))
       checkpoint lbl & " " & $r.status & " " & show(r.errors)
       check r.status == sxUnknown
       check not r.errors.hasKind(feGlobalReadUnmodelled)
@@ -202,12 +203,12 @@ proc dParam(s: seq[Meters]) =
 suite "S8ba (2): a seq of a distinct type is modelled":
 
   test "a user `==` over the cells is never replaced by base equality":
-    for (st, lbl) in [(symexFind(uIn, tLabel("uin")).status, "uin"),
-                      (symexFind(uFind, tLabel("ufind")).status, "ufind"),
-                      (symexFind(uEq, tLabel("ueq")).status, "ueq")]:
+    for (st, lbl) in [(pinFind(uIn, tLabel("uin")).status, "uin"),
+                      (pinFind(uFind, tLabel("ufind")).status, "ufind"),
+                      (pinFind(uEq, tLabel("ueq")).status, "ueq")]:
       checkpoint lbl & " " & $st
       check st != sxUnsat
-    let d = symexFind(uIn, tLabel("uin_dead"))
+    let d = pinFind(uIn, tLabel("uin_dead"))
     checkpoint "uin_dead " & $d.status & " " & show(d.errors)
     check d.status != sxSat
 
@@ -243,7 +244,7 @@ suite "S8ba (2): a seq of a distinct type is modelled":
   test "a seq[distinct] parameter has a witness (RFC-0005 S8bd)":
     ## S8ba pinned this as a scoped `feUnsupportedWitnessType` decline;
     ## S8bd renders it (`tsymex_rfc0005_s8bd_remainder.nim`).
-    let r = symexFind(dParam, tLabel("dp"))
+    let r = pinFind(dParam, tLabel("dp"))
     checkpoint show(r.errors)
     check r.status == sxSat
     check r.errors.len == 0

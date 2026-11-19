@@ -1,4 +1,4 @@
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/unittest
 import nelli/symex
 
@@ -18,19 +18,19 @@ proc i2f32(x: int) =
 suite "symex Phase 15 — F5 int<->float conversions":
 
   test "int->float: float(x) > 1.5 -> sat":
-    check symexFind(i2f, tLabel("i2f")).status == sxSat
+    check pinFind(i2f, tLabel("i2f")).status == sxSat
 
   test "float->int: unconstrained int(x) never raises; int(x)==3 is sat (S8g)":
     ## RFC-0005 S8g: Nim's int(f) never raises (probed: int(1e30), int(NaN),
     ## int(Inf) give low(int)); the R16-2 RangeDefect fork was fictional.
     ## K10a-float: the out-of-range side halts (undefined), so sxUnknown.
     block:
-      let k9r = symexFind(f2i, tRaisedExn("RangeDefect"))
+      let k9r = pinFind(f2i, tRaisedExn("RangeDefect"))
       check k9r.status == sxUnknown
       check k9r.errors.named(ubFloatToIntRange)
-    let r = symexFind(f2i, tLabel("f2i"))
+    let r = pinFind(f2i, tLabel("f2i"))
     check r.status == sxSat
     if r.status == sxSat: check int(r.witness[0]) == 3
 
   test "int->float32: float32(x) == 5.0 -> sat":
-    check symexFind(i2f32, tLabel("i2f32")).status == sxSat
+    check pinFind(i2f32, tLabel("i2f32")).status == sxSat

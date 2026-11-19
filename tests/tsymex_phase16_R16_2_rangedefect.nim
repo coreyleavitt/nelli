@@ -1,4 +1,4 @@
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/unittest
 import nelli/symex
 import nelli/smt/types
@@ -34,13 +34,13 @@ suite "symex Phase 16 R16-2 — float→int RangeDefect (S8g: range targets only
 
   test "R16-2-1: unconstrained int(f) → no RangeDefect (sxUnsat)":
     ## K10a-float: sxUnknown, the out-of-range side is a halted undefined op.
-    let r = symexFind(rd_raiseOnly, tRaisedExn("RangeDefect"))
+    let r = pinFind(rd_raiseOnly, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
     check r.errors.named(ubFloatToIntRange)
     check not r.trusted
 
   test "R16-2-1b: unconstrained Natural(f) → sxRaised(RangeDefect)":
-    let r = symexFind(rd_natural, tRaisedExn("RangeDefect"))
+    let r = pinFind(rd_natural, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
@@ -69,13 +69,13 @@ suite "symex Phase 16 R16-2 — RangeDefect catchability":
   test "R16-2-2: int(f) in try/except RangeDefect: the handler is dead → sxUnsat":
     ## K10a-float: the handler is dead and the undefined side halts, so the
     ## run is an untrusted sxUnknown.
-    let r = symexFind(rd_caught, tLabel("rdCaughtHit"))
+    let r = pinFind(rd_caught, tLabel("rdCaughtHit"))
     check r.status == sxUnknown
     check r.errors.named(ubFloatToIntRange)
     check not r.trusted
 
   test "R16-2-2b: Natural(f) in try/except RangeDefect is caught → sxSat":
-    let r = symexFind(rd_caughtNatural, tLabel("rdCaughtNaturalHit"))
+    let r = pinFind(rd_caughtNatural, tLabel("rdCaughtNaturalHit"))
     check r.status == sxSat
     if r.status == sxSat:
       var caught = false
@@ -98,11 +98,11 @@ proc rd_inRange(f: float) =
 suite "symex Phase 16 R16-2 — in-range no false positive":
 
   test "R16-2-3: in-range constrained int(f) yields sxSat with no spurious RangeDefect":
-    let r = symexFind(rd_inRange, tLabel("rdInRangeHit"))
+    let r = pinFind(rd_inRange, tLabel("rdInRangeHit"))
     check r.status == sxSat
 
   test "R16-2-3b: in-range constrained → tRaisedExn(RangeDefect) is sxUnsat":
-    let r = symexFind(rd_inRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(rd_inRange, tRaisedExn("RangeDefect"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ proc rd_acRangeOff(f: float) =
 suite "symex Phase 16 R16-2 — acRange gate":
 
   test "R16-2-4: acRange on → Natural(f) raises RangeDefect":
-    let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"))
+    let r = pinFind(rd_acRangeOff, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
 
   test "R16-2-4c: RangeDefect excluded → no RangeDefect raise":
@@ -128,7 +128,7 @@ suite "symex Phase 16 R16-2 — acRange gate":
       var x = defaultSymexSettings()
       x.defectExclusions.incl dkRangeDefect
       x
-    let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"), s)
+    let r = pinFind(rd_acRangeOff, tRaisedExn("RangeDefect"), s)
     ## RFC-0016 K7b (W-16): no RangeDefect path raised, and the excluded raise
     ## is recorded (`feDefectExcluded`, dcOmitted), so the answer is not a
     ## trusted `sxUnsat` (it was, before K7b).
@@ -154,12 +154,12 @@ proc rd_int32exact(f: float) =
 suite "symex Phase 16 R16-2 — int32(float)":
 
   test "R16-2-5: int32(f) unconstrained → no RangeDefect (sxUnsat)":
-    let r = symexFind(rd_int32width, tRaisedExn("RangeDefect"))
+    let r = pinFind(rd_int32width, tRaisedExn("RangeDefect"))
     check r.status == sxUnknown
     check r.errors.named(ubFloatToIntRange)
     check not r.trusted
 
   test "R16-2-5b: int32(f) in range is exact":
-    let r = symexFind(rd_int32exact, tLabel("rdInt32Exact"))
+    let r = pinFind(rd_int32exact, tLabel("rdInt32Exact"))
     check r.status == sxSat
     if r.status == sxSat: check int32(r.witness[0]) == 7

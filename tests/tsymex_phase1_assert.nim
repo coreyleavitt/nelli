@@ -6,13 +6,14 @@
 ##     reach `not cond` and reports a witness if SAT.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 suite "symex Phase 1 — assertions":
   test "tAssertionViolation finds the falsifying input":
     ## Phase 16 D1a: sxSat→sxRaised; witness moves to raisedWitness.
     proc mustBeNonneg(x: int) =
       symexAssert(x >= 0)
-    let r = symexFind(mustBeNonneg, tAssertionViolation())
+    let r = pinFind(mustBeNonneg, tAssertionViolation())
     check r.status == sxRaised
     check r.raisedTypeId == "AssertionDefect"
     check r.raisedWitness[0] < 0
@@ -21,7 +22,7 @@ suite "symex Phase 1 — assertions":
     # `x*0 == 0` is always true; no violation is possible.
     proc trivial(x: int) =
       symexAssert(x * 0 == 0)
-    let r = symexFind(trivial, tAssertionViolation())
+    let r = pinFind(trivial, tAssertionViolation())
     check r.status == sxUnsat
 
   test "label target after assertion sees the assertion tighten pc":
@@ -31,6 +32,6 @@ suite "symex Phase 1 — assertions":
       symexAssert(x >= 100)
       if x > 0:
         symexTarget("positive")
-    let r = symexFind(afterAssert, tLabel("positive"))
+    let r = pinFind(afterAssert, tLabel("positive"))
     check r.status == sxSat
     check r.witness[0] >= 100

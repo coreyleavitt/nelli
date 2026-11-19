@@ -34,7 +34,7 @@ suite "symex Phase 16 R16-4 — signed add OverflowDefect raise fork":
   test "R16-4-1: unconstrained a + b (signed) → sxRaised(OverflowDefect)":
     ## Before R16-4: tRaisedExn("OverflowDefect") yields sxUnsat.
     ## After R16-4: the raise fork is opened → sxRaised.
-    let r = symexFind(sa, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sa, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
@@ -52,7 +52,7 @@ proc ss(a, b: int) =
 suite "symex Phase 16 R16-4 — signed sub OverflowDefect raise fork":
 
   test "R16-4-2: unconstrained a - b (signed) → sxRaised(OverflowDefect)":
-    let r = symexFind(ss, tRaisedExn("OverflowDefect"))
+    let r = pinFind(ss, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
@@ -70,7 +70,7 @@ proc sm(a, b: int) =
 suite "symex Phase 16 R16-4 — signed mul OverflowDefect raise fork":
 
   test "R16-4-3: unconstrained a * b (signed) → sxRaised(OverflowDefect)":
-    let r = symexFind(sm, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sm, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
@@ -91,7 +91,7 @@ suite "symex Phase 16 R16-4 — OverflowDefect catchability":
 
   test "R16-4-4: a+b in try/except OverflowDefect is caught → sxSat":
     ## The raise-fork enters the except handler; handler body reaches the target.
-    let r = symexFind(sc_caught, tLabel("tcaught"))
+    let r = pinFind(sc_caught, tLabel("tcaught"))
     check r.status == sxSat
 
 # ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ suite "symex Phase 16 R16-4 — unsigned wraps (no OverflowDefect)":
 
   test "R16-4-5: a + b (unsigned) → NO OverflowDefect (Nim wraps silently)":
     ## Unsigned BV: no overflow fork. Critical Nim-semantics gate.
-    let r = symexFind(su, tRaisedExn("OverflowDefect"))
+    let r = pinFind(su, tRaisedExn("OverflowDefect"))
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ suite "symex Phase 16 R16-4 — guarded short-circuit (primary acceptance gate)"
   test "R16-4-6: a < 100 and a+1 > 50 → NO OverflowDefect (a<100 guards)":
     ## Without the rhsHasInlineDefectFork bAdd guard: false-positive sxRaised.
     ## With the guard: a+1 is in the guarded path where a<100 constrains it.
-    let r = symexFind(sg, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sg, tRaisedExn("OverflowDefect"))
     check r.status != sxRaised
 
 # ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ suite "symex Phase 16 R16-4 — LHS arith raises (not over-guarded)":
 
   test "R16-4-7: a+1 > 50 and a < 100 → OverflowDefect still reachable (LHS arith)":
     ## a+1 is in the LHS — evaluated unconditionally → raise is reachable.
-    let r = symexFind(sl, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sl, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
@@ -169,10 +169,10 @@ suite "symex Phase 16 R16-4 — bounded operands no false positive":
 
   test "R16-4-9: a in [0,10) → a+1 cannot overflow → NO OverflowDefect":
     ## Confirms in-range arithmetic stays clean.
-    let r = symexFind(sb, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sb, tRaisedExn("OverflowDefect"))
     check r.status == sxUnsat
 
   test "R16-4-9b: a in [0,10) → named target tb is reachable (sxSat)":
     ## The non-overflow survivor path reaches the target.
-    let r = symexFind(sb, tLabel("tb"))
+    let r = pinFind(sb, tLabel("tb"))
     check r.status == sxSat

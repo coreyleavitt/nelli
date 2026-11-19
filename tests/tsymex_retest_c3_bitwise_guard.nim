@@ -21,6 +21,7 @@ import std/sets
 import std/strutils
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 type DecodeError = object of CatchableError
 
@@ -81,29 +82,29 @@ proc lenInSet(s: string, hs: HashSet[int]) =
 suite "symex re-test C3 — bitwise and/or vs the D1c short-circuit lift":
 
   test "inline shl/or combine + boolean guard (decode's own shape) no longer crashes; sxUnsat":
-    let r = symexFind(bitGuardCombo, tIndexError())
+    let r = pinFind(bitGuardCombo, tIndexError())
     check r.status == sxUnsat
 
   test "bitwise or with defect-forking RHS: SAT witness has both bytes zero":
-    let r = symexFind(orBothZeroSat, tLabel("both-zero"))
+    let r = pinFind(orBothZeroSat, tLabel("both-zero"))
     check r.status == sxSat
     check r.witness[0].len >= 2
     check (r.witness[0][0] or r.witness[0][1]) == 0'u8
 
   test "(3 or y) == 4 is UNSAT (soundness — a fabricated result would be SAT)":
-    let r = symexFind(orImpossibleUnsat, tLabel("impossible-or"))
+    let r = pinFind(orImpossibleUnsat, tLabel("impossible-or"))
     check r.status == sxUnsat
 
 suite "symex re-test C3 — prefix `not` on a BV operand (uNot arm)":
 
   test "bitwise complement models correctly: SAT witness byte is 0":
-    let r = symexFind(notComplementSat, tLabel("complement-hit"))
+    let r = pinFind(notComplementSat, tLabel("complement-hit"))
     check r.status == sxSat
     check r.witness[0].len >= 1
     check r.witness[0][0] == 0'u8
 
   test "(not x) == x is UNSAT (soundness)":
-    let r = symexFind(notSelfUnsat, tLabel("impossible-not"))
+    let r = pinFind(notSelfUnsat, tLabel("impossible-not"))
     check r.status == sxUnsat
 
 suite "symex re-test C3 — HashSet membership keyed by svInt":
@@ -115,7 +116,7 @@ suite "symex re-test C3 — HashSet membership keyed by svInt":
     ## key). v65 harvested the model's own store chain
     ## (`harvestSetStoreKeys`); RFC-0005 S8f renders the model value of every
     ## membership key term the run lowered, so the witness must be consistent.
-    let r = symexFind(lenInSet, tLabel("len-member"))
+    let r = pinFind(lenInSet, tLabel("len-member"))
     check r.status == sxSat
     check r.witness[0].len in r.witness[1]
 

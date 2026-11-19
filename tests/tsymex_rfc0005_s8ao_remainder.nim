@@ -33,7 +33,7 @@ import std/[unittest, strutils, sequtils, atomics]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
-from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric, pinFind
 
 const declKey = cellKey(faGeneric, "s8ao_remainder")
 
@@ -117,7 +117,7 @@ suite "S8ao (1): add through a field path":
 
   template run(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     block:
-      let r = symexFind(fn, tLabel(lbl))
+      let r = pinFind(fn, tLabel(lbl))
       checkpoint lbl & " " & $r.status & " " & show(r.errors)
       check r.status == want
       check not r.errors.hasKind(weInternalWalkerFault)
@@ -163,7 +163,7 @@ suite "S8ao (1): add through a field path":
     ## catch-all. This pins that it is no longer N49 specifically.
     ## RFC-0005 S8ap: the field is a leaf-split heap cell now, so the
     ## append is modelled outright.
-    let r = symexFind(zRefDotAdd, tLabel("refadd"))
+    let r = pinFind(zRefDotAdd, tLabel("refadd"))
     checkpoint $r.status & " " & show(r.errors)
     check not r.errors.anyIt(it.kind == feUnsupportedOp and "N49" in it.msg)
     check r.status == sxSat

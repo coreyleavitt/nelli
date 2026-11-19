@@ -41,6 +41,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/regex_parser
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 when not defined(symexQueryStats):
   {.error: "tsymex_rfc0005_s8ay_remainder needs -d:symexQueryStats (its .nim.cfg)".}
@@ -51,7 +52,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
   "[" & parts.join(", ") & "]"
 
 template verdict(sut: untyped; label: string): SymexResult =
-  let r = symexFind(sut, tLabel(label))
+  let r = pinFind(sut, tLabel(label))
   checkpoint $r.status & " " & show(r.errors)
   r
 
@@ -177,6 +178,6 @@ suite "S8ay (4): a rejected pattern is a RegexError raise":
     check verdict(rejectedNotReached, "ay_rejected_after").status == sxUnsat
 
   test "the raise is the routine's exit":
-    let r = symexFind(rejectedRaises, tRaisedExn("RegexError"))
+    let r = pinFind(rejectedRaises, tRaisedExn("RegexError"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxRaised

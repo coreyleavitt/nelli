@@ -11,6 +11,7 @@
 import std/[unittest, strutils, re]
 import ./s8bt_harness/member
 import nelli/symex
+from ./s8cu_helpers import pinFind
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 
@@ -61,16 +62,16 @@ suite "RFC-0016 F1: searchDfa sees a verifier declining on its last state":
         check member(lang.re, toSyms(s)) == native
 
   test "walker: find(...) == -1 on a symbolic one-byte subject `x`":
-    let r = symexFind(noOccX, tLabel("f1_noocc_x"))
+    let r = pinFind(noOccX, tLabel("f1_noocc_x"))
     echo "  walker: ", r.status
     check r.status != sxUnsat
 
   test "walker: find(...) == -1 on a symbolic two-byte subject `xx`":
-    let r = symexFind(noOccTwo, tLabel("f1_noocc_xx"))
+    let r = pinFind(noOccTwo, tLabel("f1_noocc_xx"))
     echo "  walker: ", r.status
     check r.status != sxUnsat
 
   test "walker: not contains on a symbolic one-byte subject `x`":
-    let r = symexFind(noContainsX, tLabel("f1_nocontains_x"))
+    let r = pinFind(noContainsX, tLabel("f1_nocontains_x"))
     echo "  walker: ", r.status
     check r.status != sxUnsat

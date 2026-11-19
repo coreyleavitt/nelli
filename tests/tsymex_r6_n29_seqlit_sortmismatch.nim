@@ -30,6 +30,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # =============================================================================
 # 1. Root-cause isolation: `seq[int]`, no closures at all.
@@ -50,13 +51,13 @@ proc sutIntLitAddUnsat(a: int) =
 suite "symex N29 -- seq[int] literal-then-add, root cause isolated (no closures)":
 
   test "N29-1: `var xs: seq[int] = @[]; xs.add(a)` then index-read proves sxSat, witness a == 5":
-    let r = symexFind(sutIntLitAdd, tLabel("intlit_add_sat"))
+    let r = pinFind(sutIntLitAdd, tLabel("intlit_add_sat"))
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
     check r.witness[0] == 5
 
   test "N29-2 UNSAT companion: a contradictory post-add read stays unreachable":
-    let r = symexFind(sutIntLitAddUnsat, tLabel("intlit_add_unsat"))
+    let r = pinFind(sutIntLitAddUnsat, tLabel("intlit_add_unsat"))
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnsat
     check r.errors.len == 0
@@ -76,7 +77,7 @@ proc sutBoolLitAdd(a: bool) =
 suite "symex N29 -- seq[bool] literal-then-add":
 
   test "N29-3: `var xs: seq[bool] = @[]; xs.add(a)` then index-read proves sxSat, witness a == true":
-    let r = symexFind(sutBoolLitAdd, tLabel("boollit_add_sat"))
+    let r = pinFind(sutBoolLitAdd, tLabel("boollit_add_sat"))
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
     check r.witness[0] == true
@@ -98,7 +99,7 @@ proc sutThreeAdds(a, b, c: int) =
 suite "symex N29 -- three sequential .add calls off an empty literal":
 
   test "N29-4: `xs.add a; xs.add b; xs.add c` then a full-content read proves sxSat":
-    let r = symexFind(sutThreeAdds, tLabel("three_adds_sat"))
+    let r = pinFind(sutThreeAdds, tLabel("three_adds_sat"))
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
     check r.witness[0] == 1
@@ -122,7 +123,7 @@ proc sutUnbackedLitAdd(a: string, b: string) =
 suite "symex N29 -- unbacked seq[(string,string)] literal-then-add: unaffected, still declines classified":
 
   test "N29-5: `.add` on an unbacked-element empty literal stays an honest classified decline, never a crash":
-    let r = symexFind(sutUnbackedLitAdd, tLabel("unbacked_add"))
+    let r = pinFind(sutUnbackedLitAdd, tLabel("unbacked_add"))
     check r.status == sxUnknown
     check r.errors.named(seNestedSeqUnsupported)
     var sawClassified = false
@@ -146,7 +147,7 @@ proc sutEmptyNeverMutated(a: int) =
 suite "symex N29 -- empty literal never mutated: unaffected by this fix":
 
   test "N29-6: an unmutated empty seq[int] literal still proves sxSat on .len == 0":
-    let r = symexFind(sutEmptyNeverMutated, tLabel("empty_never_mutated"))
+    let r = pinFind(sutEmptyNeverMutated, tLabel("empty_never_mutated"))
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
 

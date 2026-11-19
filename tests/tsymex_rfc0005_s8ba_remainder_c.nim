@@ -33,6 +33,7 @@ import nelli/smt/canonicalize
 import nelli/smt/runtime
 import z3
 import nelli/smt/[string_lower_support]   ## R2-3: the leaves are no longer re-exported by the facade
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -42,7 +43,7 @@ proc show(errs: seq[SymexErrorInfo]): string =
 template clean(fn: typed, lbl: string, want: SymexStatusKind,
                st: SymexSettings = SymexSettings()): untyped =
   block:
-    let r = symexFind(fn, tLabel(lbl), st)
+    let r = pinFind(fn, tLabel(lbl), st)
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     check r.errors.len == 0
@@ -177,7 +178,7 @@ suite "S8ba (5): split terms are built once, in a fixed order":
 
   test "B1-1 stays under its unit ceiling":
     symexQueryStats = @[]
-    let r = symexFind(opDataStyleSlice, tLabel("opdata_slice_sat"))
+    let r = pinFind(opDataStyleSlice, tLabel("opdata_slice_sat"))
     var units = 0
     for q in symexQueryStats: units += q.rlimitDelta
     checkpoint symexQueryStatsSummary()

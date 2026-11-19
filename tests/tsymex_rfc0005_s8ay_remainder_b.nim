@@ -41,6 +41,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/regex_parser
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 when not defined(symexQueryStats):
   {.error: "tsymex_rfc0005_s8ay_remainder needs -d:symexQueryStats (its .nim.cfg)".}
@@ -56,7 +57,7 @@ proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   false
 
 template verdict(sut: untyped; label: string): SymexResult =
-  let r = symexFind(sut, tLabel(label))
+  let r = pinFind(sut, tLabel(label))
   checkpoint $r.status & " " & show(r.errors)
   r
 

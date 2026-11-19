@@ -54,6 +54,7 @@ import std/unittest
 import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # Idiom 1 -- tryRecognizeScanIdiom (skip-while-and-clamp)
@@ -93,13 +94,13 @@ suite "#163 review R28 -- idiom 1: the recognized closed form keeps the counter'
     ## Before the fix: `mkAssign(iNode.strVal, boundIR)` /
     ## `mkAssign(iNode.strVal, mkVar(p))` carry no `aty` -- sxUnsat (nothing
     ## in the path space raises, the RangeDefect fork was never built).
-    let r = symexFind(scanCounterRangeIdiom, tRaisedExn("RangeDefect"))
+    let r = pinFind(scanCounterRangeIdiom, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the in-range survivor path still reaches the label":
-    let r = symexFind(scanCounterRangeIdiom, tLabel("t"))
+    let r = pinFind(scanCounterRangeIdiom, tLabel("t"))
     check r.status == sxSat
 
 # ---------------------------------------------------------------------------
@@ -147,13 +148,13 @@ suite "#163 review R28 -- idiom 2: the recognized closed form keeps the counter'
     ## Before the fix: `mkAssign(iNode.strVal, mkVar(p))` (found branch) and
     ## `mkAssign(iNode.strVal, boundIR)` (not-found branch) both carry no
     ## `aty` -- sxUnsat.
-    let r = symexFind(scanPairCounterRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(scanPairCounterRange, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the in-range survivor path still reaches the label":
-    let r = symexFind(scanPairCounterRange, tLabel("t"))
+    let r = pinFind(scanPairCounterRange, tLabel("t"))
     check r.status == sxSat
 
 # ---------------------------------------------------------------------------
@@ -202,13 +203,13 @@ suite "#163 review R28 -- the oracle (idiom 3: readCString accumulating scan)":
 suite "#163 review R28 -- idiom 3: the recognized closed form keeps the counter's range":
 
   test "a genuinely out-of-range scan counter is found as sxRaised(RangeDefect)":
-    let r = symexFind(accScanCounterRange, tRaisedExn("RangeDefect"))
+    let r = pinFind(accScanCounterRange, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
   test "the in-range survivor path still reaches the label":
-    let r = symexFind(accScanCounterRange, tLabel("t"))
+    let r = pinFind(accScanCounterRange, tLabel("t"))
     check r.status == sxSat
 
 

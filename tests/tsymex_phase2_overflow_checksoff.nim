@@ -17,7 +17,7 @@ suite "symex Phase 2 -- ADR-0001, checks-off build (signed overflow is undefined
     check validateSymexSettings(defaultSymexSettings()).len == 0
 
   test "isExact (rule a): the int8 wrap is an exact witness (RFC-0016 WA-B, P1)":
-    let r = symexFind(wrapNeeded, tLabel("wrap-needed"),
+    let r = pinFind(wrapNeeded, tLabel("wrap-needed"),
                       SymexSettings(integerSemantics: isExact))
     check r.status == sxSat
     check r.trusted
@@ -25,7 +25,7 @@ suite "symex Phase 2 -- ADR-0001, checks-off build (signed overflow is undefined
     check not r.errors.named(ubSignedOverflow)
 
   test "isOptimised (rule a): the same":
-    let r = symexFind(wrapNeeded, tLabel("wrap-needed"), SymexSettings(integerSemantics: isOptimised))
+    let r = pinFind(wrapNeeded, tLabel("wrap-needed"), SymexSettings(integerSemantics: isOptimised))
     check r.status == sxSat
     check r.trusted
     check r.witness[0] == 127'i8

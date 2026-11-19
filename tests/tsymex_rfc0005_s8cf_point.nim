@@ -11,6 +11,7 @@
 import std/[unittest, re, strutils]
 import nelli/symex
 import nelli/smt/runtime
+import ./s8cu_helpers
 
 proc units(): int =
   for st in symexQueryStats: result += st.rlimitDelta
@@ -42,7 +43,7 @@ proc capRefuted(s: string) =
 
 template measured(f: untyped; l: string): untyped =
   symexQueryStats = @[]
-  let res = symexFind(f, tLabel(l))
+  let res = pinFind(f, tLabel(l))
   echo "  ", l, ": ", res.status, " ", units(), " units"
   check units() < 3_000_000
   res.status

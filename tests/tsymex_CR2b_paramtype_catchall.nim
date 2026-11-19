@@ -45,6 +45,7 @@ from ./s8cu_helpers import named
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 # ---------------------------------------------------------------------------
 # SUTs
@@ -72,7 +73,7 @@ suite "symex RFC-chapulin-hardening CR-2b — param-type catch-all degrade":
 
   test "CR-2b-1: cstring param compiles and degrades to whole-run sxUnknown + feUnsupportedParamType":
     ## Strong form: assert the classified KIND, not just the verdict.
-    let r = symexFind(sutCstringParam, tLabel("cstring_target"))
+    let r = pinFind(sutCstringParam, tLabel("cstring_target"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
@@ -88,7 +89,7 @@ suite "symex RFC-chapulin-hardening CR-2b — param-type catch-all degrade":
     ## `nim c`/`nim cpp` process would abort natively. Reaching this
     ## assertion at all is part of the proof; the status must never be a
     ## silently-wrong verdict.
-    let r = symexFind(sutCstringParam, tLabel("cstring_target"))
+    let r = pinFind(sutCstringParam, tLabel("cstring_target"))
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedParamType)
     check r.status != sxSat
@@ -97,7 +98,7 @@ suite "symex RFC-chapulin-hardening CR-2b — param-type catch-all degrade":
 suite "symex RFC-chapulin-hardening CR-2b — regression guard":
 
   test "CR-2b-3: plain supported scalar param types unaffected — sxSat with exact witness":
-    let r = symexFind(sutPlainSupported, tLabel("plain_supported"))
+    let r = pinFind(sutPlainSupported, tLabel("plain_supported"))
     check r.status == sxSat
     check r.witness[0] == 7
 

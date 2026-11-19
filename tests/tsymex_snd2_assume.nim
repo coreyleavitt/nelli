@@ -16,6 +16,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/db
 import nelli/smt/[types, canonicalize]
+import ./s8cu_helpers
 
 suite "SND-2 — flagship repro: symexAssume must not mask sxUnsat with false sxRaised":
 
@@ -29,7 +30,7 @@ suite "SND-2 — flagship repro: symexAssume must not mask sxUnsat with false sx
     proc unreachableAlone(s: string) =
       if s.len == 3 and s.len == 4:
         symexTarget("bug")
-    let r = symexFind(unreachableAlone, tLabel("bug"))
+    let r = pinFind(unreachableAlone, tLabel("bug"))
     check r.status == sxUnsat
 
   test "FLAGSHIP: same unreachable target, with a prepended violatable symexAssume, STILL sxUnsat":
@@ -42,7 +43,7 @@ suite "SND-2 — flagship repro: symexAssume must not mask sxUnsat with false sx
       symexAssume(s.len <= 5)
       if s.len == 3 and s.len == 4:
         symexTarget("bug")
-    let r = symexFind(unreachableWithAssume, tLabel("bug"))
+    let r = pinFind(unreachableWithAssume, tLabel("bug"))
     check r.status == sxUnsat
 
 suite "SND-2 — scan trap (a): assume-only SUT must not auto-discover tAssertionViolation":
@@ -63,7 +64,7 @@ suite "SND-2 — cond-eval raise (b): symexAssume still surfaces raises from eva
     proc assumeDiv(x: int) =
       symexAssume(1 div x == 0)
       symexTarget("reached")
-    let r = symexFind(assumeDiv, tRaisedExn("DivByZeroDefect"))
+    let r = pinFind(assumeDiv, tRaisedExn("DivByZeroDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "DivByZeroDefect"
@@ -96,8 +97,8 @@ suite "SND-2 — abstraction narrowing: symexAssume narrows the abstraction like
       symexAssume(x >= 0)
       if x == 42:
         symexTarget("hit")
-    let rA = symexFind(withAssert, tLabel("hit"), optimisedSymexSettings())
-    let rB = symexFind(withAssume, tLabel("hit"), optimisedSymexSettings())
+    let rA = pinFind(withAssert, tLabel("hit"), optimisedSymexSettings())
+    let rB = pinFind(withAssume, tLabel("hit"), optimisedSymexSettings())
     check rA.status == sxSat
     check rB.status == sxSat
     check rA.abstractions.len == 1

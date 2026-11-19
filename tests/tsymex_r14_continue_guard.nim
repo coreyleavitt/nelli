@@ -49,7 +49,7 @@
 ## Every test in this file is checked on BOTH the `c` and `cpp` backends
 ## (`scripts/dt-bounded.sh c|cpp`) per project convention.
 
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -183,34 +183,34 @@ suite "symex R14 — continue-safety of the and-split short-circuit while guard"
     ## normally after exactly 3 real iterations.
     ## GREEN (post-fix, mkShortCircuitWhile and-split): sxSat — `while i <
     ## s.len` is a REAL guard re-checked fresh after every `continue`.
-    let r = symexFind(fCont, tLabel("hit"))
+    let r = pinFind(fCont, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len >= 3
     check 'z' notin r.witness[0][0 .. 2]
 
   test "R14-2: guard-flag mutated immediately before continue is re-evaluated fresh next pass":
-    let r = symexFind(fContFlagGuard, tLabel("stopped"))
+    let r = pinFind(fContFlagGuard, tLabel("stopped"))
     check r.status == sxSat
     check r.witness[0].len >= 3
     check 'z' notin r.witness[0][0 .. 2]
 
   test "R14-3: break inside a guarded (and-split) while still exits exactly like real Nim":
-    let r = symexFind(fBreakGuard, tLabel("brokeOnY"))
+    let r = pinFind(fBreakGuard, tLabel("brokeOnY"))
     check r.status == sxSat
     check r.witness[0].len > 0
     check 'y' in r.witness[0]
 
   test "R14-4a: for-nested guarded while with continue -> IndexDefect NOT reachable":
-    let r = symexFind(sutForNestedContinueOob, tRaisedExn("IndexDefect"), nestedLoopBudget)
+    let r = pinFind(sutForNestedContinueOob, tRaisedExn("IndexDefect"), nestedLoopBudget)
     check r.status != sxRaised
 
   test "R14-4b: for-nested guarded while with continue -> \"forNestImpossible\" degrades to sxUnknown, never a false sxRaised":
-    let r = symexFind(sutForNestedContinueOob, tLabel("forNestImpossible"), nestedLoopBudget)
+    let r = pinFind(sutForNestedContinueOob, tLabel("forNestImpossible"), nestedLoopBudget)
     check r.status == sxUnknown
     check r.errors.named(beBudgetExhausted)
 
   test "R14-4c (reachable companion): for-nested guarded while with continue still finds a real target":
-    let r = symexFind(sutForNestedContinueFindX, tLabel("forNestFoundX"), nestedLoopBudget)
+    let r = pinFind(sutForNestedContinueFindX, tLabel("forNestFoundX"), nestedLoopBudget)
     check r.status == sxSat
     check r.witness[0].len > 0
     check 'x' in r.witness[0]
@@ -219,7 +219,7 @@ suite "symex R14 — continue-safety of the and-split short-circuit while guard"
     ## No `continue` in the body -> the rotation fallback is safe -> the
     ## walker computes the actual reachable verdict (real Nim: the loop exits
     ## with 0 iterations whenever s.len>0 and s[0]!='x', e.g. s=="a").
-    let r = symexFind(sutOrGuardFaultWhile, tLabel("afterOrGuard"))
+    let r = pinFind(sutOrGuardFaultWhile, tLabel("afterOrGuard"))
     check r.status == sxSat
     check r.witness[0].len > 0
     check r.witness[0][0] != 'x'
@@ -229,7 +229,7 @@ suite "symex R14 — continue-safety of the and-split short-circuit while guard"
     ## (Invariant 3). S8w's continue-retargeting rotation re-evaluates the
     ## guard after every `continue`, so it gets R14-5's verdict: the loop
     ## exits with 0 iterations whenever s.len>0 and s[0]!='x'.
-    let r = symexFind(sutOrGuardFaultContinueWhile, tLabel("afterOrGuardContinue"))
+    let r = pinFind(sutOrGuardFaultContinueWhile, tLabel("afterOrGuardContinue"))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0].len > 0

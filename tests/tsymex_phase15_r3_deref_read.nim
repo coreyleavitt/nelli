@@ -28,6 +28,7 @@
 ## version "9" (no bump; Cluster R bumps at R12).
 import std/unittest
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 # Test 1 SUT: write-then-read. The write is a no-op stub at R3, so `p[] == 99`
 # is sxSat purely via the free heap array (the read can pick 99). R4 makes this a
@@ -66,7 +67,7 @@ suite "symex Phase 15 R3 — p[] deref read + seq[ref T] element path":
   test "R3 test 1: write-then-read p[]==99 is sxSat (write is a no-op stub at R3; free heap)":
     # The `p[] = 99` write is STUBBED to a no-op at R3 — the read picks 99 from
     # the free heap array regardless. R4 makes this real read-after-write.
-    let r = symexFind(writeThenRead, tLabel("hit"))
+    let r = pinFind(writeThenRead, tLabel("hit"))
     check r.status == sxSat
 
   test "R3 test 2: seq[ref int] element xs[0][]==7 is sxSat (svRef element derefs through heap)":
@@ -74,15 +75,15 @@ suite "symex Phase 15 R3 — p[] deref read + seq[ref T] element path":
     # `Z3Array[Z3Int, Ref_T]`; `[]` derefs it via `select(path.heaps[T], elem)`.
     # The free heap can map the element to 7 → a witness exists. Must NOT hang
     # (both selects are GROUND — no ∀ over the uninterpreted Ref_T sort).
-    let r = symexFind(seqRefElem, tLabel("seqhit"))
+    let r = pinFind(seqRefElem, tLabel("seqhit"))
     check r.status == sxSat
 
   test "R3 test 3a: forked branch A derefs p==11 on its own free heap → sxSat":
-    let r = symexFind(branchA, tLabel("isoA"))
+    let r = pinFind(branchA, tLabel("isoA"))
     check r.status == sxSat
 
   test "R3 test 3b: forked branch B derefs p==22 independently → sxSat":
     # Independent free heaps: branch B is sxSat regardless of branch A's
     # constraint (the fork carries independent per-path heap bindings).
-    let r = symexFind(branchB, tLabel("isoB"))
+    let r = pinFind(branchB, tLabel("isoB"))
     check r.status == sxSat

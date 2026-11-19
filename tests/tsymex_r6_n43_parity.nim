@@ -104,7 +104,7 @@
 ## float value, so this file's poison tables (`Table[int, string]`,
 ## `Table[string, string]`) became modelled. Each was swapped for a shape
 ## still unbacked: a `float` key and a `seq[int]` value.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils, tables, sets, options, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -286,7 +286,7 @@ proc n43HeapOwnershipBlock(p: ref N43Outer) =
 suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded allocateSym reach)":
 
   test "N43-H0: an untouched sibling GOOD field stays sxSat, zero errors (no over-degrade from bad siblings on the same object)":
-    let r = symexFind(n43HeapGoodBlock, tLabel("n43_heap_good"))
+    let r = pinFind(n43HeapGoodBlock, tLabel("n43_heap_good"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
@@ -294,7 +294,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
 
   test "N43-H1: Table bad-KEY field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, seUnsupportedTableKeyType, no crash":
     check unallocatableFieldIssue(tTable(tTuple(@[tInt(), tInt()]), tString())).isSome
-    let r = symexFind(n43HeapTableKeyBlock, tLabel("n43_heap_table_key"))
+    let r = pinFind(n43HeapTableKeyBlock, tLabel("n43_heap_table_key"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -315,7 +315,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     ## itInt value type now reaches the SAME `allocDegrade` path as every
     ## other unsupported value type. Predicate and allocator agree.
     check unallocatableFieldIssue(tTable(tString(), tDistinct("S8bzDistinctTup", tTuple(@[tInt(), tInt()])))).isSome
-    let r = symexFind(n43HeapTableValBlock, tLabel("n43_heap_table_val"))
+    let r = pinFind(n43HeapTableValBlock, tLabel("n43_heap_table_val"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -323,7 +323,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
 
   test "N43-H3: HashSet bad-elem field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, seUnsupportedSetCharInterop, no crash":
     check unallocatableFieldIssue(tSet(tString())).isSome
-    let r = symexFind(n43HeapSetBlock, tLabel("n43_heap_set"))
+    let r = pinFind(n43HeapSetBlock, tLabel("n43_heap_set"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -331,7 +331,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
 
   test "N43-H4: ownership-wrapped field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, heUnsupportedOwnership, no crash":
     check unallocatableFieldIssue(tUninterp("__ownership:Atomic")).isSome
-    let r = symexFind(n43HeapOwnershipBlock, tLabel("n43_heap_ownership"))
+    let r = pinFind(n43HeapOwnershipBlock, tLabel("n43_heap_ownership"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -365,12 +365,12 @@ proc n43ClosureNestedArrayBlock(n: int) =
 suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nesting recursion parity)":
 
   test "N43-C0: an ordinary, fully-backed lambda param is unaffected (no over-degrade)":
-    let r = symexFind(n43ClosureGoodBlock, tLabel("n43_closure_good"))
+    let r = pinFind(n43ClosureGoodBlock, tLabel("n43_closure_good"))
     check r.status == sxSat
 
   test "N43-C1: tuple nesting a bad-key Table field, as a lambda param -- predicted unallocatable (Part 1's itTuple recursion), allocator confirms honest sxUnknown, no crash":
     check unallocatableFieldIssue(tTuple(@[tInt(), tTable(tTuple(@[tInt(), tInt()]), tString())])).isSome
-    let r = symexFind(n43ClosureNestedTupleBlock, tLabel("n43_closure_nested_tuple"))
+    let r = pinFind(n43ClosureNestedTupleBlock, tLabel("n43_closure_nested_tuple"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -378,7 +378,7 @@ suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nes
 
   test "N43-C2: array nesting a bad-key Table field, as a lambda param -- predicted unallocatable (Part 1's itArray recursion), allocator confirms honest sxUnknown, no crash":
     check unallocatableFieldIssue(tArray(tTable(tTuple(@[tInt(), tInt()]), tString()), 2)).isSome
-    let r = symexFind(n43ClosureNestedArrayBlock, tLabel("n43_closure_nested_array"))
+    let r = pinFind(n43ClosureNestedArrayBlock, tLabel("n43_closure_nested_array"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
@@ -411,14 +411,14 @@ suite "symex N43 -- companion: param-boundary confirmation for the two structura
 
   test "N43-P1: an unresolved parameter type (__unsupported:) -- predicted unallocatable (Part 1), raiseParamAllocIssue confirms: whole-run sxUnknown, feUnsupportedParamType":
     check unallocatableFieldIssue(tUninterp("__unsupported:cstring")).isSome
-    let r = symexFind(n43ParamUnsupported, tLabel("n43_param_unsupported"))
+    let r = pinFind(n43ParamUnsupported, tLabel("n43_param_unsupported"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
     check feUnsupportedParamType in errorKinds(r)
 
   test "N43-P2: an unrenderable witness shape (__unsupported_witness:, a plain-object seq element) -- predicted unallocatable (Part 1), raiseParamAllocIssue confirms: whole-run sxUnknown, feUnsupportedWitnessType":
-    let r = symexFind(n43ParamUnsupportedWitness, tLabel("n43_param_unsupported_witness"))
+    let r = pinFind(n43ParamUnsupportedWitness, tLabel("n43_param_unsupported_witness"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown

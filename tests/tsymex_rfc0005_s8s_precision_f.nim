@@ -27,6 +27,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -105,52 +106,52 @@ proc tupPos(x, y: int) =
 
 suite "S8s (4) variant arm field writes and positional tuple writes":
   test "a plain variant field write":
-    let r = symexFind(plainWrite, tLabel("s8s_pw"))
+    let r = pinFind(plainWrite, tLabel("s8s_pw"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 7
-    let d = symexFind(plainWrite, tLabel("s8s_pw_dead"))
+    let d = pinFind(plainWrite, tLabel("s8s_pw_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
 
   test "a variant in an object, and a tuple in a variant arm":
-    let r = symexFind(nestedVariant, tLabel("s8s_nv"))
+    let r = pinFind(nestedVariant, tLabel("s8s_nv"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 4
-    let d = symexFind(nestedVariant, tLabel("s8s_nv_dead"))
+    let d = pinFind(nestedVariant, tLabel("s8s_nv_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
 
   test "an arm field written through a var parameter":
-    let r = symexFind(varParamVariant, tLabel("s8s_vpv"))
+    let r = pinFind(varParamVariant, tLabel("s8s_vpv"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 9
-    let d = symexFind(varParamVariant, tLabel("s8s_vpv_dead"))
+    let d = pinFind(varParamVariant, tLabel("s8s_vpv_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
 
   test "arm field writes on a multi-variant":
-    let r = symexFind(mvArmWrite, tLabel("s8s_mvw"))
+    let r = pinFind(mvArmWrite, tLabel("s8s_mvw"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 8
-    let d = symexFind(mvArmWrite, tLabel("s8s_mvw_dead"))
+    let d = pinFind(mvArmWrite, tLabel("s8s_mvw_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
 
   test "positional tuple-element writes (was feUnsupportedStmtKind)":
-    let r = symexFind(tupPos, tLabel("s8s_tp"))
+    let r = pinFind(tupPos, tLabel("s8s_tp"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == 4
       check r.witness[1] == 5
-    let d = symexFind(tupPos, tLabel("s8s_tp_dead"))
+    let d = pinFind(tupPos, tLabel("s8s_tp_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat

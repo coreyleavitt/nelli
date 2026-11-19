@@ -20,6 +20,7 @@ import nelli/smt/admission
 import nelli/smt/magic_rows
 import nelli/smt/canonicalize
 import s8cu_helpers
+import ./s8cu_helpers
 
 proc at(site: MagicSite): seq[string] =
   for k in magicAxis.keysAt(site): result.add k
@@ -99,24 +100,24 @@ proc sutSucc(v: int) =
 
 suite "K4a-guard: the scan forks each defect, through symexFind":
   test "div and mod by zero raise DivByZeroDefect":
-    let r1 = symexFind(sutDiv, tRaisedExn("DivByZeroDefect"))
+    let r1 = pinFind(sutDiv, tRaisedExn("DivByZeroDefect"))
     checkpoint $r1.status
     check r1.status == sxRaised
-    let r2 = symexFind(sutMod, tRaisedExn("DivByZeroDefect"))
+    let r2 = pinFind(sutMod, tRaisedExn("DivByZeroDefect"))
     checkpoint $r2.status
     check r2.status == sxRaised
 
   test "an overflowing add raises OverflowDefect":
-    let r = symexFind(sutAdd, tRaisedExn("OverflowDefect"))
+    let r = pinFind(sutAdd, tRaisedExn("OverflowDefect"))
     checkpoint $r.status
     check r.status == sxRaised
 
   test "chr past 255 raises RangeDefect":
-    let r = symexFind(sutChr, tRaisedExn("RangeDefect"))
+    let r = pinFind(sutChr, tRaisedExn("RangeDefect"))
     checkpoint $r.status
     check r.status == sxRaised
 
   test "succ past the last enum value raises RangeDefect":
-    let r = symexFind(sutSucc, tRaisedExn("RangeDefect"))
+    let r = pinFind(sutSucc, tRaisedExn("RangeDefect"))
     checkpoint $r.status
     check r.status == sxRaised

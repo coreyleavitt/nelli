@@ -45,7 +45,7 @@ suite "0.10.0 review H1: closures sharing one environment (" & cr1Mode & ")":
       skipUnadmitted()
     else:
       mkShared()
-      let r = symexFind(sutShared, tLabel("t"))
+      let r = pinFind(sutShared, tLabel("t"))
       checkpoint show(r.errors)
       check not (r.status == sxSat and r.trusted)
       check r.status == sxUnknown
@@ -61,7 +61,7 @@ suite "0.10.0 review H1: closures sharing one environment (" & cr1Mode & ")":
       skipUnadmitted()
     else:
       mkSharedStr()
-      let r = symexFind(sutSharedStr, tLabel("t"))
+      let r = pinFind(sutSharedStr, tLabel("t"))
       checkpoint show(r.errors)
       check not (r.status == sxSat and r.trusted)
       check r.status == sxUnknown
@@ -83,7 +83,7 @@ suite "0.10.0 review H1: closures sharing one environment (" & cr1Mode & ")":
       skipUnadmitted()
     else:
       mkSharedBox()
-      let r = symexFind(sutSharedBox, tLabel("t"))
+      let r = pinFind(sutSharedBox, tLabel("t"))
       checkpoint show(r.errors)
       check not (r.status == sxSat and r.trusted)
       check r.status == sxUnknown

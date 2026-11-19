@@ -58,7 +58,7 @@ on:
         required: false
         default: "dry-run"
         type: choice
-        options: [off, dry-run, live]
+        options: ['off', dry-run, live]  # quoted: a bare off is YAML 1.1 false, and dispatch rejects it
 
 permissions:
   contents: read

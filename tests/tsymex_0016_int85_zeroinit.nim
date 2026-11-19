@@ -14,6 +14,14 @@
 ## their explicit initialization), so those shapes are pinned for the enum
 ## only; a range field reaches 0 through `default(Obj)` and `new`.
 ##
+## A float range excluding 0.0 (`range[1.0..2.0]`, its float32 twin)
+## behaves the same (probed): `newSeq`, `setLen` growth, `new`'s fields,
+## `default(T)`, `default(Obj)`, a local array and a local left
+## uninitialised all hold +0.0 (signbit false); an object constructor
+## omitting the field and an untouched `result` do not compile. Before the
+## fix the container reads (`newSeq`, `setLen`, `new`, a caller's seq
+## grown) asserted INT-77's interval and were a false sxUnsat.
+##
 ## The bar: each target a zeroed slot reaches is sxSat, its witness replayed
 ## natively; a twin over a caller's value (a parameter, its element or
 ## field) stays sxUnsat, since no caller can pass a value outside the
@@ -299,3 +307,5 @@ suite "INT-85: a caller's seq grown by the program":
 suite "INT-85: version floor":
   test "the walker version is at least INT-85's":
     check parseInt(symexWalkerVersion) >= 445
+  test "the walker version is at least INT-85 float's":
+    check parseInt(symexWalkerVersion) >= 446

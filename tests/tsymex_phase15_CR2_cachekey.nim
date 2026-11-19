@@ -1284,7 +1284,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## provisional): 443->444.
     ## RFC-0016 INT-85 (a zeroed slot of a type without 0 holds 0;
     ## provisional): 444->445.
-    check symexWalkerVersion == "445"
+    ## RFC-0016 INT-85 float (a zeroed float-range slot holds 0.0;
+    ## provisional): 445->446.
+    check symexWalkerVersion == "446"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

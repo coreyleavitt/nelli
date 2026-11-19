@@ -1758,12 +1758,19 @@ proc readRangeConds*(v: SymVal; ty: IRType): seq[Z3Bool] =
   ## domain (`rangeCondsIfNeeded`) unless the slot holds a value the program
   ## made (`madeValueCond`). A slot the program created starts at 0, an
   ## exact value the walk already models; only a value from a caller (an
-  ## input's backing, a havoc) is bounded to the declared values.
+  ## input's backing, a havoc) is bounded to the declared values. A float
+  ## range's zeroed slot holds +0.0 (INT-77's interval is its caller
+  ## domain): the same rule, over the FP numeral.
   result = rangeCondsIfNeeded(v, ty)
-  if result.len == 0 or v.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
+  if result.len == 0 or v.kind notin {svInt, svBV8, svBV16, svBV32, svBV64,
+                                       svFloat32, svFloat64}:
     return
   let ctx = requireCurrentContext()
-  let m = madeValueCond(ctx, rawAstOf(v))
+  let t = case v.kind
+          of svFloat32: v.fp32.raw
+          of svFloat64: v.fp64.raw
+          else: rawAstOf(v)
+  let m = madeValueCond(ctx, t)
   if m.known:
     if m.holds: result = @[]
     return

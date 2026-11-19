@@ -18799,12 +18799,12 @@ proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
           let typed = wrap[Z3Array[Z3Int, Z3Float32]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
           indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
-          rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)   # INT-77
+          rangeConds = readRangeConds(indexed, arrSV.seqElemTy)   # INT-77, INT-85
         of itFloat64:   ## Phase 15 F9b
           let typed = wrap[Z3Array[Z3Int, Z3Float64]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
           indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
-          rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)   # INT-77
+          rangeConds = readRangeConds(indexed, arrSV.seqElemTy)   # INT-77, INT-85
         of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
           let typed = wrap[Z3Array[Z3Int, Z3String]](
             arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]

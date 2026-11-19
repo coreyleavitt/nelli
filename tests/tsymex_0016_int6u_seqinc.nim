@@ -19,11 +19,12 @@
 ## Without the exemption (dc5d1d11) every one of these callees is
 ## `{ubTailUnverified}` alone.
 ##
-## Not exempt, and pinned unreadable: `count`, which steps `result` (the
-## region's shape admits a local `var` only; on aaa74c4b it was
-## `{ubSignedOverflow}`). The exported templates `findIt`, `keepItIf` and
-## `toSeq` expand the step into the caller's own routine and are not exempt
-## either.
+## RFC-0016 int6-w2: `count`, which steps `result`, is exempt too (the
+## region's shape admits the routine's `result` as well as a local `var`):
+## `result` starts at 0 and is stepped at most once per item of `s`, so it
+## stays below `len(s)`. Its verdict is aaa74c4b's, `{ubSignedOverflow}`.
+## The exported templates `findIt`, `keepItIf` and `toSeq` expand the step
+## into the caller's own routine and are not exempt.
 
 import std/[unittest, strutils, sequtils]
 import nelli
@@ -90,13 +91,6 @@ template preT(fn: untyped; kinds: set[UbKind]) =
   check not r.trusted
   check r.soundness.undefinedKinds == kinds
 
-template unreadable(fn: untyped) =
-  let r = pinFind(fn, tLabel("hit"), pinSettingsConst)
-  checkpoint $r.status & " " & show(r.errors) & " " & $r.soundness
-  check r.status == sxSat
-  check not r.trusted
-  check r.soundness.undefinedKinds == {UbKind(ubTailUnverified)}
-
 suite "int6-u: sequtils' own loop-counter step is read through":
   test "an opaque concat":
     check native(sutConcat(5)) == "hit"
@@ -123,10 +117,10 @@ suite "int6-u: sequtils' own loop-counter step is read through":
     check native(sutDelete(5)) == "hit"
     preT(sutDelete, {UbKind(ubSignedOverflow), ubTailUnverified})
 
-suite "int6-u: the sequtils step the exemption does not admit":
+suite "int6-w2: the sequtils step of result":
   test "count steps result":
     check native(sutCount(5)) == "hit"
-    unreadable(sutCount)
+    preT(sutCount, {UbKind(ubSignedOverflow)})
 
 suite "int6-u: the exemption allowlist":
   test "sequtils' template is on it":
@@ -135,5 +129,5 @@ suite "int6-u: the exemption allowlist":
     check "pure/collections/sequtils.nim:unCheckedInc" in known
 
 suite "int6-u: walker version":
-  test "walker version floor >= 482":
-    check parseInt(symexWalkerVersion) >= 482
+  test "walker version floor >= 483":
+    check parseInt(symexWalkerVersion) >= 483

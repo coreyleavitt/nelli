@@ -922,7 +922,7 @@ const defsUnreadKinds = {
     nnkChckRange64, nnkChckRange, nnkStringToCString, nnkCStringToString,
     nnkAsgn, nnkFastAsgn, nnkGenericParams, nnkFormalParams, nnkOfInherit,
     nnkImportAs, nnkOfBranch, nnkElifBranch, nnkExceptBranch, nnkElse,
-    nnkAsmStmt, nnkPragma, nnkPragmaBlock, nnkIfStmt, nnkForStmt,
+    nnkAsmStmt, nnkPragma, nnkIfStmt, nnkForStmt,
     nnkParForStmt, nnkWhileStmt, nnkCaseStmt, nnkTypeSection, nnkVarSection,
     nnkLetSection, nnkConstSection, nnkConstDef, nnkTypeDef, nnkYieldStmt,
     nnkDefer, nnkTryStmt, nnkFinally, nnkRaiseStmt, nnkReturnStmt,
@@ -939,7 +939,8 @@ const defsUnreadKinds = {
   ## name: what a module-level statement of one of them defines is not read.
   ## They are the statements that define nothing by name (sections, pragmas,
   ## comments, assignments, `discard`), the ones whose body opens its own
-  ## scope (`block`, `if`, `case`, the loops, `try`, `static`), the kinds the
+  ## scope (`block`, `if`, `case`, the loops, `try`, `static`; a pragma block
+  ## opens none and is followed, RFC-0016 int6-w2), the kinds the
   ## parser never puts at a module's level, and the calls: a definition a
   ## macro or template call expands to is not read, as `moduleDefs`
   ## documents, and declining every module-level call would leave every
@@ -993,6 +994,12 @@ proc defsWalk(sc: var Scanner; md: var ModuleDefs; n: NimNode;
                      target: t)
     if sc.res.unknown.len > 0 and md.unknown.len == 0:
       md.unknown = sc.res.unknown
+  of nnkPragmaBlock:
+    # RFC-0016 int6-w2: `{.cast(gcsafe).}: body` opens no scope: what its body
+    # defines is visible at the module's level after it, natively. Not read,
+    # a template there named by a proc's name too was taken for the proc
+    # alone, and a call that expands it to an import was replayed past.
+    if n.len > 1: defsWalk(sc, md, n[1], imports, exports)
   of nnkExportStmt, nnkExportExceptStmt:
     exports.add n
   of nnkIncludeStmt:

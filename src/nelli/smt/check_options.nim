@@ -808,7 +808,8 @@ proc loopIncRegion(s, owner: NimNode): bool =
   ## RFC-0016 int6-t. Is the statement list `s`, in the typed body of the
   ## routine definition `owner`, exactly an audited loop-counter step: `{.push
   ## overflowChecks: off.}` (no other option), `inc` (`system.inc`, by its
-  ## magic) of a local variable by one, `{.pop.}`, whose push is a
+  ## magic) of a local variable or the routine's `result` by one, `{.pop.}`,
+  ## whose push is a
   ## `check_options.loopIncExemptions` template's as its own module expands it
   ## (`loopIncExempt`)? Its counter's loop bounds it (the allowlist's audit),
   ## so it neither overflows nor leaves its range: reading the routine as one
@@ -823,7 +824,10 @@ proc loopIncRegion(s, owner: NimNode): bool =
   let step = s[1]
   if step.kind notin {nnkCall, nnkCommand} or step.len notin 2 .. 3 or
      not magicIs(routineMagic(step[0]), "Inc"): return false
-  if step[1].kind != nnkSym or step[1].symKind != nskVar: return false
+  # RFC-0016 int6-w2: `result` is a local slot of the routine as a `var` is
+  # (`sequtils.count` steps it); a parameter, a global or a path is not.
+  if step[1].kind != nnkSym or step[1].symKind notin {nskVar, nskResult}:
+    return false
   if step.len == 3 and
      (step[2].kind notin {nnkIntLit .. nnkInt64Lit} or step[2].intVal != 1):
     return false
@@ -889,7 +893,8 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   ##
   ## RFC-0016 int6-a5: a routine declared inside a body that pushes is
   ## unreadable here: its position is that push's; RFC-0016 int6-u: that body
-  ## is read typed as well as by text (`typedPushingHost`). (A push among the
+  ## is read typed as well as by text (`typedPushingHost`); RFC-0016 int6-w2:
+  ## the typed read holds for a stdlib routine too. (A push among the
   ## routine's own statements is the parser's: it walks each pair as a
   ## region, and the opaque defect scan finds it in the typed body, int6-t.)
   let off = scopedChecks - buildSemantics.checks
@@ -909,10 +914,16 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
         return "it is declared inside " & host & ", whose body pushes " &
                "check options: it takes that push's where it stands, which " &
                "the scan of the module's statements does not read"
-    # RFC-0016 int6-u: the host found in the typed body, where a template's
-    # or a macro's push is (the text above holds the written ones alone).
-    let typed = typedPushingHost(impl)
-    if typed.len > 0: return typed
+  # RFC-0016 int6-u: the host found in the typed body, where a template's or a
+  # macro's push is (the text above holds the written ones alone). RFC-0016
+  # int6-w2: for a stdlib routine too. The typed body keeps every push as a
+  # pragma statement, the written ones included, so this alone places a stdlib
+  # routine declared inside a pushing stdlib body, sound by construction and
+  # not by a census of the toolchain (none on 2.2.10, by its text). A routine
+  # declared at its module's level, every stdlib one on 2.2.10, has a module
+  # owner and costs one step.
+  let typed = typedPushingHost(impl)
+  if typed.len > 0: return typed
 
 proc stdlibDefClean(impl: NimNode; file: string; line: int;
                     m: ModuleScan): bool =

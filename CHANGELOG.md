@@ -152,6 +152,33 @@ where that note does not yet cover it.
   `count` (it steps `result`, which the region's shape does not admit) and
   the exported templates `findIt`, `keepItIf` and `toSeq`, which expand the
   step into the caller's own routine; a callee using them stays unreadable.
+- **An opaque `toSeq(s.items)` builds** (int6-w2; walker 483). The opaque
+  effect summary read a declaration's type slot as code, and `toSeq` leaves
+  `seq[typeof(iter)]` untyped there in the typed body: the build stopped with
+  `Error: node has no type`. A type slot and a conversion's target type are
+  no longer read (they run nothing), and an expression whose type the
+  summary would read but which has none makes the call non-inert (the
+  caller keeps the opaque call's taint), never a compile failure.
+- **`sequtils.count` under the opaque scan** (int6-w2; walker 483). The
+  audited loop-counter step's shape admitted a local `var` only, and `count`
+  steps `result`, a local slot of the routine as well: `result` starts at 0
+  and is stepped at most once per item, so it stays below `len(s)`. The
+  step is read through, and a callee reaching `count` has its verdict from
+  before int6-t again.
+- **A stdlib routine declared inside a pushing stdlib body** (int6-w2;
+  walker 483). The placement of a routine declared inside a body that pushes
+  check options (int6-a5, int6-u) skipped the stdlib, which was then read
+  under its module's checks alone. The typed read (`typedPushingHost`) now
+  holds for a stdlib routine too, sound by construction: no such routine
+  exists on 2.2.10 (by a scan of its `lib/` text), and the pin is a module
+  classified as the stdlib by its path.
+- **Definitions inside a module-level pragma block** (int6-w2; walker 483).
+  `{.cast(gcsafe).}: body` opens no scope, so what it defines is visible at
+  the module's level, but the module-level call rule (int6-m6) did not read
+  it: a template there sharing a proc's name was taken for the proc alone,
+  and a call expanding it to an import was replayed past, a trusted `sxSat`
+  through a module natively first compiled unpushed (`RangeDefect`). The
+  block is read; the call keeps the coarse reading, and the routine declines.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

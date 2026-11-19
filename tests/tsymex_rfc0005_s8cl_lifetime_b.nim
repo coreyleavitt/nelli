@@ -225,7 +225,10 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
     declines(sutCreate, "cr", "create"):
       check r.status == sxUnknown
       check r.errors.named(feUnsupportedOp)
-    declines(sutGcRef, "gr", "nnkCast"):
+    # RFC-0016 INT-65: arc.nim's `cast[pointer]` keeps the address now, so
+    # GC_ref declines one statement later, at `nimIncRef`'s write through an
+    # integer-computed address (`cast[Cell](cast[int](p) -% ...).rc = ...`).
+    declines(sutGcRef, "gr", "nnkAsgn shape: cast[Cell]"):
       check r.status == sxUnknown
       check r.errors.named(feLocalPragma)
     declines(sutWhenMember, "wn", "WhenMember"):
@@ -235,7 +238,7 @@ suite "S8cl (2): wasMoved, and what cannot be read declines":
       check r.errors.named(feUnsupportedStmtKind)
     # RFC-0016 CRH-02: the two compile stops as K9 pins.
     pinDecline(sutCreate, cellKey(faCallShape, "lifetime/create"), feUnsupportedOp, tLabel("cr"))
-    pinDecline(sutGcRef, cellKey(axMagic, "GCref"), feUnsupportedExprKind, tLabel("gr"), needle = "nnkCast")
+    pinDecline(sutGcRef, cellKey(axMagic, "GCref"), feUnsupportedStmtKind, tLabel("gr"), needle = "cast[Cell]")
 
 suite "S8cl (2b): a pointer to a type the bridge declines (RFC-0016 K9c follow-up)":
   test "nim":

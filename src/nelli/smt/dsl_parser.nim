@@ -29,6 +29,7 @@
 # RFC-0005 S8bl: `dsl_typebridge`'s `typeKind` / `getTypeInst` /
 # `getTypeImpl` read a borrowed routine's argument at its base type.
 import std/macros except strVal, typeKind, getTypeInst, getTypeImpl
+{.experimental: "dynamicBindSym".}  ## RFC-0016 INT-66: `userMagicRewrite`
 from std/typetraits import supportsCopyMem   ## RFC-0005 S8cs: a type with no copy hook to hide
 import std/compilesettings   ## RFC-0016 W3-z P8: `projectFull`, the main module of the build
 import std/effecttraits   ## RFC-0005 S8ax: an opaque routine's inferred `raises`
@@ -1104,8 +1105,14 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isUndefined:
     newCall(bindSym"mkUndefined", newLit(s.udKind), newLit(s.udSite))
   of isUnsupported:
-    newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
-            newLit(s.unMarker))
+    # RFC-0016 INT-76: the halt flag is emitted only when set, so a
+    # tainting marker keeps its four-argument shape.
+    if s.unHalt:
+      newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
+              newLit(s.unMarker), newLit(true))
+    else:
+      newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
+              newLit(s.unMarker))
   of isUnsafeCast:
     newCall(bindSym"mkUnsafeCast", newLit(s.ucReason), newLit(s.ucMarker))
 
@@ -1585,6 +1592,33 @@ proc declineMarker(ctx: ParseCtx; kind: SymexErrorKind; reason: string): IRStmt 
   mkUnsupported(kind, reason, ctx.nextMarker())
 
 proc isNilPtrCast(n: NimNode): bool   ## RFC-0016 W3-z P16 (defined with unsafeCastReason)
+
+proc siteMsg*(n: NimNode, note: string): string   ## fwd decl (RFC-0016 INT-76)
+
+const longDoubleReason = "`c_longdouble` is the C target's `long double` " &
+  "(x87 80-bit extended under gcc and clang on x86-64, a 64-bit double " &
+  "under MSVC and on some ARM targets): its precision is the target's, " &
+  "which the walk does not model"
+
+proc declineLongDouble(ctx: ParseCtx; site: NimNode; what: string): IRStmt =
+  ## RFC-0016 INT-76. A `c_longdouble` value: its type classifies as the
+  ## `__unsupported:c_longdouble` placeholder (K2c STY-06, the `float128`
+  ## type-class row), so it has no sort to compute in. Every site that makes
+  ## one (a declared local, an expression of the type) declines with the
+  ## parameter site's kind, `feUnsupportedParamType`, and the marker HALTS
+  ## the path: nothing is bound, so no later comparison or arithmetic can
+  ## meet a value of the wrong sort (it was a `weInternalWalkerFault` in
+  ## `eqBV`/`cmpBV`), and no float64 stand-in computes a trusted answer the
+  ## target may not give (an initialised local was walked as an IEEE
+  ## double; Nim's arithmetic is a double's, but a conversion from an
+  ## integer stores the C value, exact in x87's 64-bit mantissa).
+  let m = ctx.nextMarker()
+  ctx.parseErrors.add SymexErrorInfo(kind: feUnsupportedParamType,
+    severity: declineSeverity,
+    msg: siteMsg(site, what & ": " & longDoubleReason & " (feUnsupportedParamType)"),
+    scope: siteAnchored(m))
+  mkUnsupported(feUnsupportedParamType, what & ": " & longDoubleReason, m,
+                halt = true)
 
 proc declineUnsafeCast(ctx: ParseCtx; msg, reason: string): IRStmt =
   ## RFC-0005 S8. `heUnsafeCast`'s `declineAtSite`: the marker is the
@@ -5227,6 +5261,83 @@ proc borrowRoutineRewrite(n: NimNode):
     if retBase == nil: return
     views.add (rw, retBase)
   (rw, views)
+
+proc stubBody(body: NimNode): bool  ## defined below (RFC-0005 S8bo)
+
+const userMagicInfix = {
+  "AddI": "+", "SubI": "-", "MulI": "*", "DivI": "div", "ModI": "mod",
+  "AddF64": "+", "SubF64": "-", "MulF64": "*", "DivF64": "/",
+  "EqI": "==", "LeI": "<=", "LtI": "<", "EqF64": "==", "LeF64": "<=",
+  "LtF64": "<", "EqB": "==", "LeB": "<=", "LtB": "<", "EqCh": "==",
+  "LeCh": "<=", "LtCh": "<", "EqEnum": "==", "LeEnum": "<=", "LtEnum": "<",
+  "And": "and", "Or": "or", "Xor": "xor", "BitandI": "and", "BitorI": "or",
+  "BitxorI": "xor", "ShlI": "shl", "ShrI": "shr"}.toTable
+  ## RFC-0016 INT-66. The binary magics the infix arm models, by the system
+  ## operator that carries each (`binopForInfix`).
+
+proc sameRoutineSig(a, b: NimNode): bool =
+  ## The two routine symbols take formals of the same types, in order, and
+  ## return the same type.
+  let ta = a.getTypeInst
+  let tb = b.getTypeInst
+  if ta.kind != nnkProcTy or tb.kind != nnkProcTy or ta.len < 1 or
+     tb.len < 1 or ta[0].kind != nnkFormalParams or
+     tb[0].kind != nnkFormalParams:
+    return false
+  var fa, fb: seq[NimNode]
+  for fp in [ta[0], tb[0]]:
+    var acc: seq[NimNode]
+    acc.add fp[0]
+    for i in 1 ..< fp.len:
+      if fp[i].kind != nnkIdentDefs: return false
+      for _ in 0 ..< fp[i].len - 2: acc.add fp[i][^2]
+    if fa.len == 0: fa = acc else: fb = acc
+  if fa.len != fb.len: return false
+  for i in 0 ..< fa.len:
+    if fa[i].kind == nnkEmpty or fb[i].kind == nnkEmpty:
+      if fa[i].kind != fb[i].kind: return false
+    elif not sameType(fa[i], fb[i]): return false
+  true
+
+proc userMagicRewrite(n: NimNode):
+    tuple[rw: NimNode, views: seq[tuple[node, baseTy: NimNode]]] =
+  ## RFC-0016 INT-66. A call of a routine the program declares with a binary
+  ## `{.magic.}` and no body (`proc plus(x, y: int): int {.magic: "AddI".}`)
+  ## is the compiler's operation, the one the system routine of that magic
+  ## and signature performs (`+`): the code generator emits the magic, not a
+  ## call. `rw` is the call as an infix of the system routine over the same
+  ## typed arguments, typed as the call is (a view, `borrowBaseViews`), so
+  ## the infix arm models it as it models `t + u`. Nil (the call is left to
+  ## the routine path, which declines `feUnsupportedOp`) for a magic the
+  ## infix arm does not model, or one no system routine of the same
+  ## signature carries. It declined at every site before INT-66: the walk
+  ## dispatched a magic on the system routine's name.
+  if n.kind notin {nnkCall, nnkCommand, nnkInfix} or n.len != 3: return
+  let head = n[0]
+  if head.kind != nnkSym or not isUserRoutine(head): return
+  let impl = resolveRoutineImpl(head)
+  if impl == nil or hasBorrowPragma(impl) or impl.len < 7 or
+     not stubBody(impl[6]):
+    return
+  let magic = implMagic(impl)
+  if magic notin userMagicInfix: return
+  let op = userMagicInfix[magic]
+  let cands = bindSym(op, brForceOpen)
+  var sys: NimNode = nil
+  var syms: seq[NimNode]
+  if cands.kind == nnkSym: syms.add cands
+  else:
+    for c in cands: syms.add c
+  for s in syms:
+    if s.kind != nnkSym or isUserRoutine(s): continue
+    let si = resolveRoutineImpl(s)
+    if si == nil or implMagic(si) != magic: continue
+    if sameRoutineSig(head, s):
+      sys = s
+      break
+  if sys == nil: return
+  let rw = nnkInfix.newTree(sys, n[1], n[2])
+  (rw, @[(rw, n.getTypeInst)])
 
 proc isUserCallee(sym: NimNode): bool =
   ## RFC-0005 S8c. The gate every builtin-by-name dispatch site consults: a
@@ -11674,6 +11785,13 @@ var miElemGuards {.compileTime.}: seq[tuple[mark: string; loc, site: NimNode;
   ## the element is preceded by a check that the length is still `L`
   ## (`miElemGuard`).
 
+proc pointerNilTy*(): IRType =
+  ## RFC-0016 INT-65. The type a `pointer`'s `nil` is lowered at: Nim's
+  ## `pointer` is an untyped address, and the walk holds a non-nil one as the
+  ## `ptr`/`ref` it was converted from (whose pointee sort it keeps). Its nil
+  ## is the nil of `ptr uint8`; `refEq` compares across pointee sorts.
+  tPtr(tUInt(8))
+
 proc nilSideCore(refNode: NimNode): NimNode =
   ## RFC-0005 S8bo. The operand a nil comparison or `isNil` decides, seen
   ## through a conversion or a cast to `pointer` (`pointer(p)`,
@@ -11715,13 +11833,23 @@ proc parseNilCompare(op: IRBinop; refNode0: NimNode; nilIsLhs: bool;
   # this arm `nil` fell to the generic unsupported-literal dummy (an int
   # 0), and the walker compared an `svClosure` against it: a
   # `weInternalWalkerFault` whenever the closure path was walked first.
+  # RFC-0016 INT-65: a proc value is the routine or closure it was built
+  # from, or nil (`nilClosureSite`); the walk compares it with nil as it
+  # compares two proc values (`closureEq`), and a value it holds only as a
+  # placeholder declines there (`ceUnsupportedHof`).
   if refCls.ty.kind == itUninterp and refCls.ty.uninterpName == "__closure":
-    preamble.add ctx.declineAtSite(
-      ceUnsupportedHof,
-      "a proc value compared with nil in `" & site.repr &
-        "` is not modelled -- degraded to sxUnknown (ceUnsupportedHof)",
-      "proc value compared with nil (ceUnsupportedHof)")
-    return mkBoolLit(false)
+    let cloIR = parseAtomicOperand(refNode, preamble, ctx)
+    let nilIR = mkNil(refCls.ty)
+    return (if nilIsLhs: mkBinop(op, nilIR, cloIR)
+            else:        mkBinop(op, cloIR, nilIR))
+  # RFC-0016 INT-65: a `pointer` holds the address it was converted from (a
+  # `ptr` or a `ref`), or its own nil (`pointerNilTy`); `refEq` compares
+  # addresses of different pointee types.
+  if refNode.typeKind == ntyPointer:
+    let pIR = parseAtomicOperand(refNode, preamble, ctx)
+    let nilIR = mkNil(pointerNilTy())
+    return (if nilIsLhs: mkBinop(op, nilIR, pIR)
+            else:        mkBinop(op, pIR, nilIR))
   nil
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -11751,6 +11879,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           break
   if n.kind != nnkSym and n.len == 0 and byRefName(n).len > 0:
     return mkVar(byRefName(n))
+  # RFC-0016 INT-76: a `c_longdouble` value declines and halts the path
+  # (`declineLongDouble`); the float stand-in returned is never evaluated.
+  if isLongDoubleTyped(n):
+    preamble.add ctx.declineLongDouble(n, "a `c_longdouble` value")
+    return mkFloatLit(0.0)
   # RFC-0005 S8bu: an `openArray` actual is the seq it views.
   if isToOpenArray(n) or
      (n.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and n.len == 2 and
@@ -11760,6 +11893,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   # base routine's call on the unwrapped arguments (`borrowRoutineRewrite`).
   block borrowRoutine:
     let (rw, views) = borrowRoutineRewrite(n)
+    if rw != nil: return parseBorrowViewedExpr(rw, views, preamble, ctx)
+  # RFC-0016 INT-66: a user-declared binary magic is the system operator's
+  # infix (`userMagicRewrite`).
+  block userMagic:
+    let (rw, views) = userMagicRewrite(n)
     if rw != nil: return parseBorrowViewedExpr(rw, views, preamble, ctx)
   # RFC-0005 S8bc (item 7): `mgetOrPut(t, k[, d])` read as a value is the
   # get-or-insert (`parseMGetOrPut`). Hooked ahead of the `nnkHiddenDeref`
@@ -11777,6 +11915,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let t = classifyType(n).ty
     if t != nil and t.kind in {itRef, itPtr}:
       mkNil(t)
+    elif n.typeKind == ntyPointer:
+      mkNil(pointerNilTy())   # RFC-0016 INT-65
+    elif t != nil and t.kind == itUninterp and t.uninterpName == "__closure":
+      mkNil(t)                # RFC-0016 INT-65: a nil proc value
     else:
       preamble.add ctx.declineAtSite(feUnsupportedExprKind,
         siteMsg(n, "`nil` of a type the walk holds no nil for (" & $t &
@@ -12077,6 +12219,25 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # RFC-0016 W3-z P16. `cast[ptr T](0)` is the target's nil (no address).
     if isNilPtrCast(n):
       return mkNil(classifyType(n).ty)
+    # RFC-0016 INT-65. `cast[pointer](r)` of a `ref`/`ptr`/`pointer` keeps
+    # the address (`nilSideCore`); a `pointer` holds the address it was
+    # converted from.
+    if nilSideCore(n) != n:
+      return parseExpr(nilSideCore(n), preamble, ctx)
+    # RFC-0016 INT-65. `cast[ptr T](q)` of a `pointer`: what `q` addresses is
+    # not known to be a `T`, so the reinterpretation declines. The stand-in
+    # is let-bound so a dereference of it reads a variable.
+    if n.len == 2 and n[1].typeKind == ntyPointer and
+       n.typeKind in {ntyPtr, ntyRef}:
+      preamble.add ctx.declineUnsafeCast(
+        siteMsg(n, "`" & n.repr & "` reinterprets a `pointer` as a typed " &
+                "address; what it addresses is not known to be that type " &
+                "(RFC-0016 INT-65; heUnsafeCast)"),
+        "cast of a pointer to a typed address (heUnsafeCast)")
+      let tmp = freshSynth(ctx, "ptrcast")
+      let ty = classifyType(n).ty
+      preamble.add mkLet(tmp, ty, mkNil(ty))
+      return mkVar(tmp)
     # RFC-0005 S8m. `cast[ref Obj](p)` with `p: ref Obj` reinterprets a ref as
     # the very type it already has: the same address, the same `Ref_<id>`
     # sort, so it is the identity and keeps `p`'s heap identity. Before, the
@@ -13170,6 +13331,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           return mkVar(synth)
     let lhsCls = classifyType(n[0])
     let fieldName = n[1].strVal
+    # RFC-0016 INT-67. A field read through a distinct object: Nim admits it
+    # only through a borrowed `.` (`type D {.borrow: `.`.} = distinct O`),
+    # which is `O(d).x`. The operand is viewed at its base type
+    # (`borrowBaseViews`, as a borrowed routine's argument is), so the read
+    # is the base object's field read; the conversion is a value pass-through.
+    # It declined `feUnsupportedExprKind` ("`.` on unsupported type distinct").
+    if lhsCls.ty.kind == itDistinct and n[1].kind == nnkSym and
+       symKind(n[1]) == nskField:
+      let baseTy = distinctBaseTypeNode(n[0].getTypeInst)
+      if baseTy != nil and classifyType(baseTy).ty.kind != itDistinct:
+        return parseBorrowViewedExpr(n, @[(n[0], baseTy)], preamble, ctx)
     case lhsCls.ty.kind
     of itTuple:
       var ix = -1
@@ -13467,6 +13639,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let arrTy = classifyType(n[1]).ty
       return mkIntLit(if calleeSym.strVal == "low": arrTy.lo
                        else: arrTy.lo + int64(arrTy.size) - 1)
+    # RFC-0016 INT-60: `len(a)` of an array VALUE (magic `LengthArray`) is
+    # its type's element count, folded like `low`/`high` above. Before, only
+    # the call-form `len` arm for seqs, tables and sets reached a model, and
+    # an array fell through to the magic's stub-body decline
+    # (`feUnsupportedOp`) wherever its value was used. As Nim's code
+    # generator (`genArrayLen`, `tyArray`: the constant `lengthOrd`), the
+    # argument is not evaluated.
+    if n.len == 2 and isBuiltinNamed(calleeSym, ["len"]) and
+       n[1].typeKind != ntyNone and classifyType(n[1]).ty.kind == itArray:
+      return mkIntLit(int64(classifyType(n[1]).ty.size))
     # RFC-0005 S8at: `zeroDefault(T)` -- what the compiler fills an omitted
     # field of an object constructor with (Nim 2, e.g. the injected
     # `bv: BV(kind: 0, a: zeroDefault(int))` of `BVH(n: n)`) -- and
@@ -22009,12 +22191,35 @@ proc parseStmtInner(n: NimNode,
       # single-variable `pairs` binds a `(key, val)` tuple, which this
       # desugaring does not build: a scoped decline.
       let isPairs = iterExpr[0].strVal == "pairs"
-      if (isPairs and n.len != 4) or (not isPairs and n.len != 3):
+      # RFC-0016 INT-64: `for a, b in items(c)` over a seq or an array of
+      # tuples unpacks each element into the variables (`tables.toTable`'s
+      # `for key, val in items(pairs)`): the element is bound to a fresh
+      # name, then each variable to its field.
+      var unpack: seq[NimNode]
+      if not isPairs and n.len > 3 and recvCls.ty.kind in {itSeq, itArray}:
+        let et = if recvCls.ty.kind == itArray: recvCls.ty.elemTy
+                 else: recvCls.ty.seqElemTy
+        if et != nil and et.kind == itTuple and et.fields.len == n.len - 2:
+          for i in 0 ..< n.len - 2:
+            if n[i].kind != nnkSym:
+              unpack.setLen(0)
+              break
+            unpack.add n[i]
+      if unpack.len == 0 and
+         ((isPairs and n.len != 4) or (not isPairs and n.len != 3)):
         return ctx.declineMarker(feUnsupportedStmtKind,
           &"for-loop over `{iterExpr[0].strVal}` with {n.len - 2} loop " &
-          "variable(s): only `for x in c` and `for i, x in pairs(c)` are modelled")
+          "variable(s): only `for x in c`, `for a, b in c` over tuples and " &
+          "`for i, x in pairs(c)` are modelled")
       if isPairs: n[1].expectKind nnkSym
-      let valName = if isPairs: n[1].strVal else: iterName
+      let valName = if isPairs: n[1].strVal
+                    elif unpack.len > 0: freshSynth(ctx, "fup")
+                    else: iterName
+      proc unpackLets(ety: IRType): seq[IRStmt] =
+        for i, v in unpack:
+          let fname = if ety.fieldNames.len > i: ety.fieldNames[i] else: ""
+          result.add mkLet(v.strVal, ety.fields[i],
+                           mkField(mkVar(valName), i, fname))
       if recvCls.ty.kind == itString:
         # Phase 15 S3 (ADR-0006): `for c in s` over a *symbolic* string is
         # unsupported — NOT for a byte/codepoint reason (byte-faithful makes
@@ -22048,9 +22253,15 @@ proc parseStmtInner(n: NimNode,
         let elemTy = if recvCls.ty.kind == itArray: recvCls.ty.elemTy
                      else: recvCls.ty.seqElemTy
         if recvCls.ty.kind == itSeq and not isPairs or not alwaysCopied(elemTy):
-          let d = lentLoopDecline(n, container, (if isPairs: n[1] else: iterVar),
-                                  bodyNode, ctx, iterExpr[0].strVal)
-          if d != nil: return d
+          if unpack.len > 0:
+            for v in unpack:
+              let d = lentLoopDecline(n, container, v, bodyNode, ctx,
+                                      iterExpr[0].strVal)
+              if d != nil: return d
+          else:
+            let d = lentLoopDecline(n, container, (if isPairs: n[1] else: iterVar),
+                                    bodyNode, ctx, iterExpr[0].strVal)
+            if d != nil: return d
       # RFC-0005 S8m: an array is unrolled (a `break` leaves the block
       # around the whole unroll); a seq is a `while` whose increment follows
       # the body (a `continue` leaves the body's block).
@@ -22096,6 +22307,7 @@ proc parseStmtInner(n: NimNode,
           if isPairs:
             iters.add mkLet(iterName, idxTy, mkIntLit(lo + int64(k)))
           iters.add mkLet(valName, recvCls.ty.elemTy, mkVar(synth))
+          iters.add unpackLets(recvCls.ty.elemTy)
           iters.add body
         if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
         else: stmts.add iters
@@ -22135,7 +22347,9 @@ proc parseStmtInner(n: NimNode,
         var loopStmts = @[idxStmt]
         if isPairs:   # RFC-0005 S8z: `i` is the position
           loopStmts.add mkLet(iterName, intTy, mkVar(ivName))
-        loopStmts.add @[bindIter, body, incIv]
+        loopStmts.add bindIter
+        loopStmts.add unpackLets(recvCls.ty.seqElemTy)
+        loopStmts.add @[body, incIv]
         loopStmts.add mkIf(@[mkBranch(
           mkBinop(bNe, mkSeqLen(seqIR), mkVar(lenName)),
           seqIterLenChanged(ctx, n, container, iterExpr[0].strVal))])
@@ -22553,6 +22767,15 @@ proc parseStmtInner(n: NimNode,
             "a type pragma the object model does not represent")
           break
       let valNode = id[id.len - 1]
+      # RFC-0016 INT-76: a `c_longdouble` local, initialised or not, declines
+      # where its sort would be chosen and halts the path.
+      var longDouble = false
+      for j in 0 ..< id.len - 2:
+        if not longDouble and isLongDoubleTyped(id[j]):
+          stmts.add ctx.declineLongDouble(id[j],
+            "the local `" & id[j].strVal & "` of type `c_longdouble`")
+          longDouble = true
+      if longDouble: continue
       # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe POINTER MATERIALISATION RHS
       # (`cast[ptr T](...)`, `addr x`, `unsafeAddr x`) is unmodelable in the
       # logical-heap model — classify `heUnsafeCast` (sevError) so the verdict
@@ -22633,6 +22856,14 @@ proc parseStmtInner(n: NimNode,
           let zero = zeroValueForType(classified.ty)
           if zero != nil:
             stmts.add mkLet(id[j].strVal, classified.ty, zero)
+          elif id[j].typeKind == ntyPointer:
+            # RFC-0016 INT-65: a `pointer` is nil.
+            stmts.add mkLet(id[j].strVal, classified.ty, mkNil(pointerNilTy()))
+          elif classified.ty.kind == itUninterp and
+               classified.ty.uninterpName == "__closure" and
+               id[j].typeKind == ntyProc:
+            # RFC-0016 INT-65: a proc variable is nil.
+            stmts.add mkLet(id[j].strVal, classified.ty, mkNil(classified.ty))
           elif classified.ty.kind == itUninterp:
             # RFC-0005 S8ap (S8ao's remainder): an `itUninterp` local has
             # no zero (`zeroValueForType`'s own argument), and the decline
@@ -24702,7 +24933,7 @@ proc collectEmittedAnchors(n: NimNode; markers: var HashSet[int];
       keys.incl n.strVal
   of nnkCall:
     let nm = callNameOf(n)
-    if nm == "mkUnsupported" and n.len == 4 and
+    if nm == "mkUnsupported" and n.len in {4, 5} and   # 5: INT-76's halt
        n[3].kind in nnkIntLit..nnkInt64Lit:
       markers.incl int(n[3].intVal)
     elif nm == "mkUnsafeCast" and n.len == 3 and n[2].kind in nnkIntLit..nnkInt64Lit:
@@ -25184,6 +25415,11 @@ proc routeType(run: var RouteRun; t: NimNode; storage: bool) =
   if t.kind == nnkSym and symKind(t) != nskType:
     unlisted(t.repr)
     return
+  # RFC-0016 INT-70: a type symbol or instance with no type (an unexpanded
+  # template body's) cannot be read; never a compile error of the SUT.
+  if t.kind in {nnkSym, nnkBracketExpr} and t.typeKind == ntyNone:
+    unlisted(t.repr)
+    return
   let key = routeTypeKey(t) & (if storage: "!" else: "")
   if key in run.seenTypes: return
   run.seenTypes.add key
@@ -25260,8 +25496,10 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
   case n.kind
   of nnkBracketExpr:
     # `Gen[int]` as a type: the instance, whose head alone says nothing.
+    # RFC-0016 INT-70: an untyped one (a template body's) names no value; see
+    # the `nskType` arm.
     if n.len > 0 and n[0].kind == nnkSym and symKind(n[0]) == nskType:
-      acc.types.add (n, false)
+      if n.typeKind != ntyNone: acc.types.add (n, false)
     else:
       for c in n: routeScan(c, acc)
   of nnkSym:
@@ -25293,7 +25531,14 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
       if n.typeKind != ntyNone:
         acc.types.add (n.getTypeInst, false)
     of nskType:
-      acc.types.add (n, false)
+      # RFC-0016 INT-70. A type a template body declares (`template w() =
+      # type O = object ...`, inside the routine) is a symbol the semchecker
+      # never typed: the template is not instantiated where it is defined.
+      # `routeType`'s `getTypeImpl` on it stopped the compile ("node has no
+      # type"), as the `nskVar` arm's K8A-1 binding did. It names no value of
+      # a type this scan misses: the expanded copy of the body, where the
+      # template is called, declares the typed symbol and is scanned.
+      if n.typeKind != ntyNone: acc.types.add (n, false)
     of userRoutineSymKinds:
       if symKind(n) == nskMethod:
         # RFC-0016 PRC-02m. With the toolchain's dispatch table the override set

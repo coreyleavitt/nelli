@@ -951,8 +951,49 @@ const renderAsChoicesVersion* = "12"
   ##   (`symexCacheKeyPrefixFor`, `w416:`), not the fixed `sx2:`, so every
   ##   key changes and every entry an earlier walker stored is a miss. Those
   ##   entries are removed only on request (`pruneForeignSymexRecords`, R8-04).
+  ## - RFC-0016 INT-58 / INT-60 (381->417; 382-416 are reserved for other
+  ##   W4 work): an undefined side the pruning budget leaves undecided is
+  ##   asked again under `queryRLimit` before the path halts
+  ##   (`decideUndefined`), so an unreachable float -> int conversion past a
+  ##   rounding no longer ends the path untrusted; and `len` of an array
+  ##   value folds to its element count wherever it is used (it declined
+  ##   `feUnsupportedOp` as an arithmetic operand). Verdicts change from
+  ##   `sxUnknown` to exact. No key bytes change.
+  ## - RFC-0016 INT-64 (417->422; 418-421 are reserved for other W4 work):
+  ##   `for a, b in items(c)` over a seq or an array of tuples binds each
+  ##   element to a fresh name and each variable to its field, so
+  ##   `tables.toTable` (`for key, val in items(pairs)`) is walked; it
+  ##   declined `feUnsupportedStmtKind`. Verdicts change from `sxUnknown` to
+  ##   exact. No key bytes change.
+  ## - RFC-0016 INT-66 / INT-67 / INT-70 (422->423): a call of a routine the
+  ##   program declares with a binary `{.magic.}` and no body is the infix of
+  ##   the system routine of that magic and signature (`userMagicRewrite`);
+  ##   a field read through a distinct object that borrows `.` is the base
+  ##   object's field read; a type a template body in the routine declares
+  ##   (no type until expanded) is skipped by the route scan, which stopped
+  ##   the compile ("node has no type"). Verdicts change from `sxUnknown` to
+  ##   exact; a program that did not compile does. No key bytes change.
+  ## - RFC-0016 INT-65 (423->434; 424-433 are reserved for other W4 work): a
+  ##   `pointer` holds the address it was converted from (`addr`, a `cast` or
+  ##   conversion of a `ptr`/`ref`) or its nil (`pointerNilTy`, also an
+  ##   uninitialised one), and `refEq` compares addresses of different
+  ##   pointee sorts (nil against either side decides; two non-nil ones
+  ##   decline `heUnresolvedRef`); a `ptr` cast from a `pointer` declines
+  ##   `heUnsafeCast`. A proc value is its routine or closure or nil
+  ##   (`nilClosure`, also an uninitialised proc variable): compared with nil
+  ##   it is decided (`closureEq`), a call through nil declines
+  ##   `ceUnsupportedHof`. Verdicts change from `sxUnknown` to exact. No key
+  ## - RFC-0016 INT-76 (434->435): a `c_longdouble` value (a declared local,
+  ##   initialised or not, or an expression of the type) declines
+  ##   `feUnsupportedParamType` and halts the path (`declineLongDouble`, a
+  ##   halting `isUnsupported`, `unHalt`); its reads were a
+  ##   `weInternalWalkerFault` (`eqBV`/`cmpBV`, a field's `FieldDefect`), and
+  ##   an initialised local was walked as an IEEE double, a trusted answer
+  ##   on a type whose value is the C target's. Verdicts change from a fault or a trusted
+  ##   answer to `sxUnknown`. Key bytes change for a halting marker only
+  ##   (`;halt` in its `St<Un:...>`).
 
-const symexWalkerVersion* = "416"
+const symexWalkerVersion* = "435"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -7299,7 +7340,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # the reason -- once S4-S6 reclassify, the kind alone decides the node's
     # `DegradeClass` (and so the verdict), so two nodes differing only in
     # kind must never share a cache entry.
-    "St<Un:" & $s.unKind & ";" & s.reason.escape & ">"
+    "St<Un:" & $s.unKind & ";" & s.reason.escape &
+      (if s.unHalt: ";halt" else: "") & ">"   # RFC-0016 INT-76
   of isUndefined:
     "St<Ud:" & $s.udKind & ";" & s.udSite.escape & ">"
   of isUnsafeCast:

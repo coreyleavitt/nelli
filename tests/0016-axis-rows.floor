@@ -1,0 +1,12 @@
+# RFC-0016 K8b (section 12 item 4, first clause): exact rows
+# exercised by the axis suites (s0016_k8b_axes `axisFiles`), per axis.
+# axis<TAB>exercised<TAB>exact rows. K1 judges it per leg. It only rises;
+# a changed exact-row count must be re-measured.
+typeclass	36	37
+typeop	31	33
+pragma	146	153
+magic	130	141
+stdlib	28	29
+build	11	13
+readonly	13	13
+defined	21	21

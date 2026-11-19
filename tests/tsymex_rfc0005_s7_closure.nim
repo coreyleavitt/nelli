@@ -527,8 +527,10 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## variable). RFC-0005 S8bs adds the decline of a capture whose address
     ## is taken (a cell the body may also reach through the pointer);
     ## RFC-0005 S8bu replaces it with the decline of an actual the closure
-    ## descent cannot bind to such a cell (`bindVarLocs`).
-    check degradeSites == 20
+    ## descent cannot bind to such a cell (`bindVarLocs`). RFC-0016 INT-65
+    ## splits the unresolved-callee site: a call through the nil proc value
+    ## declines `ceUnsupportedHof` on its own site (natively a SIGSEGV).
+    check degradeSites == 21
 
   test "every closure-sink site's kind is a classified S7 kind, never a ⊤ default":
     for f in runtimeFiles():

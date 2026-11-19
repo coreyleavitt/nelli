@@ -1743,6 +1743,71 @@ task test, "Run the test suite":
             "tsymex_0016_k10ac_concolic_checksoff",
             "tsymex_0016_k8a_gen",
             "tsymex_0016_k8a_sink",
+            # RFC-0016 K8b: the fuzzer families and the pairwise figure.
+            "tsymex_0016_k8b_pairs",
+            # each family in two halves (s0016_k8b_pairs `familyFiles`)
+            "tsymex_0016_k8b_callshape_a",
+            "tsymex_0016_k8b_callshape_b",
+            "tsymex_0016_k8b_exnmemory_a",
+            "tsymex_0016_k8b_exnmemory_b",
+            "tsymex_0016_k8b_generic_a",
+            "tsymex_0016_k8b_generic_b",
+            # RFC-0016 K8b INT-56: the admission-axis suites (s0016_k8b_axes `axisFiles`)
+            "tsymex_0016_k8b_axes",
+            "tsymex_0016_k8b_axes_typeclass_a",
+            "tsymex_0016_k8b_axes_typeclass_b",
+            "tsymex_0016_k8b_axes_typeop",
+            "tsymex_0016_k8b_axes_pragma_a",
+            "tsymex_0016_k8b_axes_pragma_b",
+            "tsymex_0016_k8b_axes_pragma_c",
+            "tsymex_0016_k8b_axes_pragma_d",
+            "tsymex_0016_k8b_axes_pragma_e",
+            "tsymex_0016_k8b_axes_pragma_f",
+            # the pragma rows with a suite of their own (s0016_k8b_snippets `ownRows`)
+            "tsymex_0016_k8b_axes_pragma_cpp",
+            "tsymex_0016_k8b_axes_pragma_dispatch",
+            "tsymex_0016_k8b_axes_pragma_foreign",
+            "tsymex_0016_k8b_axes_stdlib",
+            "tsymex_0016_k8b_axes_magic_a",
+            "tsymex_0016_k8b_axes_magic_b",
+            "tsymex_0016_k8b_axes_magic_c",
+            "tsymex_0016_k8b_axes_magic_d",
+            "tsymex_0016_k8b_axes_defined",
+            "tsymex_0016_k8b_axes_readonly",
+            # the build axis: the default build's libpcre rows, then one binary
+            # per switch row (each file's .nim.cfg or .nims)
+            "tsymex_0016_k8b_axes_build",
+            "tsymex_0016_k8b_axes_build_mm_arc",
+            "tsymex_0016_k8b_axes_build_mm_atomicarc",
+            "tsymex_0016_k8b_axes_build_usemalloc",
+            "tsymex_0016_k8b_axes_build_setjmp",
+            "tsymex_0016_k8b_axes_build_release",
+            "tsymex_0016_k8b_axes_build_fwrapv",
+            "tsymex_0016_k8b_axes_build_rangeoff",
+            "tsymex_0016_k8b_axes_build_boundoff",
+            "tsymex_0016_k8b_axes_build_objoff",
+            "tsymex_0016_k8b_axes_build_fieldoff",
+            # RFC-0016 INT-55: a by-reference base in a parsed routine.
+            "tsymex_0016_int55_parsedbyref",
+            # RFC-0016 INT-58 / INT-60: an unsat target past a float rounding;
+            # `len` of an array as an arithmetic operand.
+            "tsymex_0016_int58_roundunsat",
+            "tsymex_0016_int60_lenarrarith",
+            # RFC-0016 INT-63 / INT-64: a `let` copy of a closure local; a
+            # `toTable` table (a tuple-unpacking `items` loop).
+            "tsymex_0016_int63_closurelet",
+            "tsymex_0016_int64_totable",
+            # RFC-0016 INT-65: a `pointer` value and a proc value's nil.
+            "tsymex_0016_int65_ptrnil",
+            # RFC-0016 INT-66, INT-67, INT-69, INT-70: a user-declared magic;
+            # a borrowed `.`; an undefined answer native reproduces; a type
+            # section in a routine's template.
+            "tsymex_0016_int66_usermagic",
+            "tsymex_0016_int67_borrowdot",
+            "tsymex_0016_int69_undefinedaxis",
+            "tsymex_0016_int70_templatetype",
+            # RFC-0016 INT-76: a `c_longdouble` value declines, never faults.
+            "tsymex_0016_int76_longdouble",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",

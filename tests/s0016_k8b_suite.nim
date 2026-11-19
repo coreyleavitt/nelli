@@ -1,0 +1,297 @@
+## RFC-0016 K8b: what the family suites (`tsymex_0016_k8b_<family>_<half>`,
+## `familyFiles`) share: each runs one slice of its family's seeded stream
+## (`familyHalf`), reports the findings (native differential and metamorphic,
+## K8a-gen's `findings`), and writes the cells-exercised records. The pairwise
+## figure is judged against the floor by K1 (`tsymex_0016_universe`), over
+## the union of the family's halves (`exercisedJoinProblems`); a half reports
+## its own share.
+import std/[os, unittest, sets]
+import nelli/smt/admission
+import ./s8cu_helpers
+import ./s0016_k8a_gen
+
+func outcomeName*(k: OutKind): string =
+  case k
+  of okExact: "exact"
+  of okDecline: "declined"
+  of okDisagree: "disagree"
+
+proc exercisedOf*(progs: seq[Prog]; outs: seq[GenOutcome]; seed: int;
+                  file: string): seq[ExercisedRecord] =
+  ## One record per run (a program under one variant): the family, the
+  ## program's dimension cells, and how it ended. A run whose verdict differs
+  ## from its original's (a metamorphic finding) is a disagreement too.
+  for o in outs:
+    var p: Prog
+    for q in progs:
+      if q.id == o.progId: p = q
+    var outcome = outcomeName(o.kind)
+    if o.variant != "orig" and o.kind == okExact:
+      for q in outs:
+        if q.progId == o.progId and q.variant == "orig" and q.trusted and
+           (q.status != o.status or q.raised != o.raised):
+          outcome = "disagree"
+    result.add ExercisedRecord(testFile: file, variant: o.variant,
+      outcome: outcome, family: familyOf(o.shape), seed: seed,
+      progId: o.progId, cells: cellsOf(FamilyScope(familyOf(o.shape)), p.fam))
+
+type FamilyRun* = object
+  findings*: seq[string]
+  figure*: PairFigure   ## this half's share; the floor is on the union (K1)
+  exact*, declined*, disagree*: int
+
+proc runFamily*(fam: FamilyScope; progs: seq[Prog]; outs: seq[GenOutcome];
+                seed: int; file, realPins: string): FamilyRun =
+  ## Writes the cells-exercised records to the leg's record directory (where
+  ## K1 reads them) and to a private one, and computes this family's figure
+  ## from the private copy, so a stale record elsewhere cannot raise it.
+  result.findings = findings(progs, outs, seed)
+  let recs = exercisedOf(progs, outs, seed, file)
+  for r in recs:
+    case r.outcome
+    of "exact": inc result.exact
+    of "declined": inc result.declined
+    else: inc result.disagree
+  writeExercisedTo(realPins, recs)
+  let priv = getTempDir() / ("k8b_" & $fam & "_" & $getCurrentProcessId())
+  removeDir(priv)
+  writeExercisedTo(priv, recs)
+  let back = loadExercised(priv)
+  removeDir(priv)
+  doAssert back.len == recs.len, "the records read back are the records written"
+  result.figure = pairwiseFigure(back)
+
+proc report*(fam: FamilyScope; seed, count: int; r: FamilyRun;
+             outs: seq[GenOutcome]): string =
+  result = "k8b " & scopePrefix[fam] & " seed=" & $seed & " programs=" &
+    $count & " runs=" & $outs.len & " exact=" & $r.exact & " declined=" &
+    $r.declined & " disagree=" & $r.disagree & " pairwise=" &
+    $r.figure[fam].covered & "/" & $r.figure[fam].total & "\n" &
+    "k8b declines:\n" & declineSummary(outs)
+  for f in r.findings: result.add "FINDING " & f & "\n"
+
+template familyHalf*(family: static FamilyScope; tag: static string;
+                     runBatch: untyped; file: static string;
+                     seed, first, count, streamLen: static int) =
+  ## One half of a family's batch: programs `[first, first + count)` of the
+  ## family's stream (seed `seed`), each with one rotating relation, through
+  ## `symexFind` and the native differential. `streamLen` is the whole
+  ## stream both halves cover at the gate's counts. `runBatch` is
+  ## `runBatch_<tag>`, the proc `genFamilyBatch` emits.
+  let realPins = pinDir()
+  let pinTmp = getTempDir() / ("k8b_" & tag & "_" & $getCurrentProcessId())
+  createDir(pinTmp)
+  putEnv("NELLI_PIN_DIR", pinTmp)
+
+  const progs = genFamily(family, seed, count, first)
+  genFamilyBatch(progs, tag)
+
+  suite "K8b " & scopePrefix[family] & " programs " & $first & ".." &
+        $(first + count - 1):
+    test "the stream is deterministic, prefix-stable, one value per dimension":
+      check genFamily(family, 7, 5) == genFamily(family, 7, 9)[0 ..< 5]
+      check genFamily(family, 7, 3, 4) == genFamily(family, 7, 7)[4 ..< 7]
+      check progs == genFamily(family, seed, first + count)[first ..< first + count]
+      for p in progs:
+        check familyOf(p.shape) == family
+        check p.fam.len == famDims[family].len
+
+    test "every relation is a different source, and the halves run each one":
+      for p in progs:
+        let o = render(p, "g", twNone)
+        for tw in applicable(p):
+          check render(p, "g", tw) != o
+      let whole = genFamily(family, seed, streamLen)
+      var ran, all: set[Twin]
+      for p in whole:
+        for tw in applicable(p): all.incl tw
+      for c in familyCases(whole): ran.incl c.tw
+      check ran == all + {twNone}
+
+    test "generated programs and their relations agree with native":
+      let outs = runBatch()
+      let r = runFamily(family, progs, outs, seed, file, realPins)
+      echo report(family, seed, count, r, outs)
+      check r.findings.len == 0
+      check r.exact > 0
+
+# --- RFC-0016 K8b (INT-56): the admission-axis suites -------------------------
+
+proc axisExercisedOf*(progs: seq[Prog]; outs: seq[GenOutcome]; seed: int;
+                      file: string): seq[ExercisedRecord] =
+  ## One record per run: the axis, the rows the program packs, and how it
+  ## ended (a metamorphic difference is a disagreement, as for a family).
+  for o in outs:
+    var p: Prog
+    for q in progs:
+      if q.id == o.progId: p = q
+    var outcome = outcomeName(o.kind)
+    if o.variant != "orig" and o.kind == okExact:
+      for q in outs:
+        if q.progId == o.progId and q.variant == "orig" and q.trusted and
+           (q.status != o.status or q.raised != o.raised):
+          outcome = "disagree"
+    var cells: seq[CellKey]
+    for k in p.rows: cells.add CellKey(scope: p.axis, key: k)
+    result.add ExercisedRecord(testFile: file, variant: o.variant,
+      outcome: outcome, family: p.axis, seed: seed, progId: o.progId,
+      cells: cells)
+
+template axisBatch*(axis: static AxisScope; tag: static string;
+                    runBatch: untyped; file: static string;
+                    seed, first, count, per: static int) =
+  ## Programs `[first, first + count)` of the axis's stream (`genAxis`), each
+  ## packing `per` rows, with one rotating relation, through `symexFind` and
+  ## the native differential; the cells-exercised records go to the leg's
+  ## record directory, where K1 judges the axis figure (`axisJoinProblems`).
+  let realPins = pinDir()
+  let pinTmp = getTempDir() / ("k8b_" & tag & "_" & $getCurrentProcessId())
+  createDir(pinTmp)
+  putEnv("NELLI_PIN_DIR", pinTmp)
+
+  const progs = genAxis(axis, seed, count, per, first)
+  genFamilyBatch(progs, tag)
+
+  suite "K8b axis " & scopePrefix[axis] & " programs " & $first & ".." &
+        $(first + count - 1):
+    test "the axis stream is deterministic and every relation is a new source":
+      check genAxis(axis, 7, 3, per) == genAxis(axis, 7, 5, per)[0 ..< 3]
+      for p in progs:
+        check p.rows.len == min(per, streamRows(axis))
+        for k in p.rows: check not isBlocked(axis, k)
+        let o = render(p, "g", twNone)
+        for tw in applicable(p):
+          check render(p, "g", tw) != o
+
+    test "generated programs and their relations agree with native":
+      let outs = runBatch()
+      let fs = findings(progs, outs, seed)
+      let recs = axisExercisedOf(progs, outs, seed, file)
+      writeExercisedTo(realPins, recs)
+      var exact, declined, disagree: int
+      var rowsOk: HashSet[string]
+      for r in recs:
+        case r.outcome
+        of "exact":
+          inc exact
+          for c in r.cells: rowsOk.incl c.key
+        of "declined": inc declined
+        else: inc disagree
+      echo "k8b axis ", scopePrefix[axis], " seed=", seed, " programs=", count,
+        " runs=", outs.len, " exact=", exact, " declined=", declined,
+        " disagree=", disagree, " rows exercised here=", rowsOk.len, "\n",
+        "k8b declines:\n", declineSummary(outs)
+      for line in blockedReport(axis): echo line
+      for f in fs: echo "FINDING ", f
+      check fs.len == 0
+      check exact > 0
+
+proc skippedRecord*(file, why: string; axis: AxisScope = axBuild):
+    ExercisedRecord =
+  ## A suite whose rows cannot be built or decided on this leg (a build
+  ## switch, a backend or a toolchain table the leg lacks) ran and exercised
+  ## nothing: a record with no cell, so K1 sees the suite ran on the leg
+  ## (`axisJoinProblems` judges an axis only when all its suites did) and
+  ## counts no row.
+  ExercisedRecord(testFile: file, variant: "orig", outcome: "skipped",
+                  family: axis, cells: @[])
+
+template buildAxisBatch*(keys: static openArray[string]; applies: static bool;
+                         why: static string; tag: static string;
+                         runBatch: untyped; file: static string;
+                         seed: static int; hostKeys: seq[string]) =
+  ## The build axis: the one-row programs of the axis's stream whose row is
+  ## one of `keys` (`genAxisKeys`), each with one rotating relation, through
+  ## `symexFind` and the native differential, in a binary compiled under the
+  ## rows' switch (the file's `.nim.cfg`). Only the records of rows in
+  ## `hostKeys` are written: a libpcre row is exercised only on the library
+  ## the binary loaded. A build that is not the switch here (`applies` false)
+  ## writes one `skipped` record, naming `why`.
+  let realPins = pinDir()
+  let pinTmp = getTempDir() / ("k8b_" & tag & "_" & $getCurrentProcessId())
+  createDir(pinTmp)
+  putEnv("NELLI_PIN_DIR", pinTmp)
+
+  when applies:
+    const progs = genAxisKeys(axBuild, seed, keys)
+    genFamilyBatch(progs, tag)
+
+  suite "K8b axis build: " & tag:
+    when applies:
+      test "the programs are the stream's, one per row":
+        check progs.len == keys.len
+        for p in progs:
+          check p.rows.len == 1 and p.rows[0] in keys
+          check p == genAxis(axBuild, seed, p.id + 1, 1)[p.id]
+        for k in hostKeys: check k in keys
+
+      test "generated programs and their relations agree with native":
+        let outs = runBatch()
+        let fs = findings(progs, outs, seed)
+        var recs: seq[ExercisedRecord]
+        for r in axisExercisedOf(progs, outs, seed, file):
+          if r.cells.len == 1 and r.cells[0].key in hostKeys: recs.add r
+        writeExercisedTo(realPins, recs)
+        var exact, declined, disagree: int
+        for r in recs:
+          case r.outcome
+          of "exact": inc exact
+          of "declined": inc declined
+          else: inc disagree
+        echo "k8b axis build ", tag, " seed=", seed, " runs=", outs.len,
+          " recorded=", recs.len, " exact=", exact, " declined=", declined,
+          " disagree=", disagree, "\nk8b declines:\n", declineSummary(outs)
+        for f in fs: echo "FINDING ", f
+        check fs.len == 0
+        check exact > 0
+    else:
+      test "the switch cannot be built here":
+        echo "k8b axis build ", tag, " skipped: ", why
+        writeExercisedTo(realPins, @[skippedRecord(file, why)])
+
+template ownAxisBatch*(axis: static AxisScope; applies: static bool;
+                       why: static string; tag: static string;
+                       runBatch: untyped; file: static string;
+                       seed: static int) =
+  ## The rows of `axis` with a suite of their own (`ownRows`) whose suite is
+  ## `file`: one one-row program each (`genAxisOwn`), with one rotating
+  ## relation, through `symexFind` and the native differential. On a leg
+  ## that cannot build or decide them (`applies` false) the suite writes one
+  ## `skipped` record, naming `why` (which leg exercises them).
+  let realPins = pinDir()
+  let pinTmp = getTempDir() / ("k8b_" & tag & "_" & $getCurrentProcessId())
+  createDir(pinTmp)
+  putEnv("NELLI_PIN_DIR", pinTmp)
+
+  const ownRowKeys = ownKeys(axis, file)
+  when applies:
+    const progs = genAxisOwn(axis, seed, ownRowKeys)
+    genFamilyBatch(progs, tag)
+
+  suite "K8b axis " & scopePrefix[axis] & ": " & tag:
+    test "the suite runs the rows `ownRows` gives it, out of the stream":
+      check ownRowKeys.len > 0
+      for k in ownRowKeys: check not inStream(axis, k)
+    when applies:
+      test "generated programs and their relations agree with native":
+        let outs = runBatch()
+        let fs = findings(progs, outs, seed)
+        let recs = axisExercisedOf(progs, outs, seed, file)
+        writeExercisedTo(realPins, recs)
+        var exact, declined, disagree: int
+        for r in recs:
+          case r.outcome
+          of "exact": inc exact
+          of "declined": inc declined
+          else: inc disagree
+        echo "k8b axis ", scopePrefix[axis], " ", tag, " seed=", seed,
+          " runs=", outs.len, " exact=", exact, " declined=", declined,
+          " disagree=", disagree, "\nk8b declines:\n", declineSummary(outs)
+        for f in fs: echo "FINDING ", f
+        check fs.len == 0
+        check exact > 0
+    else:
+      test "the rows cannot be built or decided here":
+        echo "k8b axis ", scopePrefix[axis], " ", tag, " skipped (",
+          ownRowKeys.len, " rows): ", why
+        writeExercisedTo(realPins, @[skippedRecord(file, why, axis)])

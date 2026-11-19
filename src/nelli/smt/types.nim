@@ -1859,6 +1859,10 @@ type
                                  ## The walker's arm records its reach under
                                  ## the same anchor. Identity only: excluded
                                  ## from `canonicalize` (like a local's name).
+      unHalt*: bool              ## RFC-0016 INT-76: the decline ends every
+                                 ## path that reaches it (`walkUnsupported`
+                                 ## halts) instead of tainting it through: the
+                                 ## site binds no value a later read could use.
     of isTabKeys:
       tkRetName*: string         ## RFC-0005 S8bc: the fresh let-name bound to
                                  ## the key sequence.
@@ -4726,7 +4730,7 @@ proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
          dwInPlace: inPlace)
 
 proc mkUnsupported*(kind: SymexErrorKind; reason: string;
-                    marker: int): IRStmt =
+                    marker: int; halt = false): IRStmt =
   ## RFC-0005 S1b. An `isUnsupported` node now carries the classified `kind`
   ## the walker records when a path reaches it (§2.2). Reuse the kind the
   ## site already classifies under -- a Class-A site passes its parse-time
@@ -4736,7 +4740,9 @@ proc mkUnsupported*(kind: SymexErrorKind; reason: string;
   ## RFC-0005 S8: `marker` is the site's anchor (`unMarker`). The parser
   ## never calls this directly -- `declineAtSite`/`declineMarker`
   ## (`dsl_parser.nim`) mint the id; hand-built IR passes its own.
-  IRStmt(kind: isUnsupported, unKind: kind, reason: reason, unMarker: marker)
+  ## RFC-0016 INT-76: `halt` ends the reaching path (`unHalt`).
+  IRStmt(kind: isUnsupported, unKind: kind, reason: reason, unMarker: marker,
+         unHalt: halt)
 
 # ---- RFC-0005 S1b: unregistered-callee keys (§2.5 point 3) ------------------
 # The parser declines three kinds of callee by NOT registering a `ProcSig`

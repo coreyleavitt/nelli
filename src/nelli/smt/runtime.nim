@@ -4102,6 +4102,53 @@ var pendingPtrCompares {.threadvar.}: seq[Z3AnyAst]
   ## `drainPendingLowerEffects`, which declines the path when one may be a
   ## dead frame's address cell (`danglingCompareTaint`).
 
+proc refNilAst(v: SymVal): RawZ3Ast =
+  ## RFC-0016 INT-65. The nil of `v`'s pointee sort (`allocRefSort` mints it).
+  let ctx = requireCurrentContext()
+  let pointee = (if v.kind == svRef: v.refPointee else: v.ptrPointee)
+  discard allocRefSort(ctx, pointee)
+  currentNilConsts[refPointeeTypeId(pointee)].raw
+
+proc refEq(a, b: SymVal, op: IRBinop): SymVal
+proc refCrossSortEq(a, b: SymVal, op: IRBinop): SymVal =
+  ## RFC-0016 INT-65. `==`/`!=` over two addresses of different pointee
+  ## sorts: a `pointer` holds the `ptr`/`ref` it was converted from, so
+  ## `pointer(addr i) == pointer(addr f)` meets `Ref_i64` and `Ref_float64`.
+  ## Nil is one address in every sort, so a side that is ground nil decides
+  ## the comparison as the other side's nil test. Two non-nil addresses of
+  ## different sorts are distinct variables natively, but a `cast` may name
+  ## one location at two types, which the walk does not track: declined.
+  let ctx = requireCurrentContext()
+  let aAst = (if a.kind == svRef: a.refAst else: a.ptrAst)
+  let bAst = (if b.kind == svRef: b.refAst else: b.ptrAst)
+  let aNil = refNilAst(a)
+  let bNil = refNilAst(b)
+  let aIsNil = wrap[Z3Bool](ctx, checkedEq(ctx, aAst.raw, aNil))
+  let bIsNil = wrap[Z3Bool](ctx, checkedEq(ctx, bAst.raw, bNil))
+  if aAst.raw == aNil or bAst.raw == bNil:
+    let eq = if aAst.raw == aNil: bIsNil else: aIsNil
+    case op
+    of bEq: return ofBool(eq)
+    of bNe: return ofBool(not eq)
+    else: return refEq(a, a, op)   # the ordering decline, sorts aside
+  degradeAlloc(tBool(), heUnresolvedRef,
+    "ref/ptr " & $op & " between addresses of different pointee types (" &
+      $(if a.kind == svRef: a.refPointee else: a.ptrPointee) & ", " &
+      $(if b.kind == svRef: b.refPointee else: b.ptrPointee) & "): a `cast` " &
+      "may name one location at both, which the walk does not track " &
+      "(heUnresolvedRef)",
+    "__refCrossSortDegrade")
+
+proc closureMixedCmpDecline(a, b: SymVal, op: IRBinop): SymVal =
+  ## RFC-0016 INT-65. A proc value compared with a value the walk holds only
+  ## as a placeholder (a proc-typed parameter, a havocked proc variable): it
+  ## may be nil or any routine.
+  degradeAlloc(tBool(), ceUnsupportedHof,
+    "a proc value " & $op & " a " & plainEnglishSymValKind(
+      (if a.kind == svClosure: b.kind else: a.kind)) &
+      " operand the walk does not hold as a proc value (ceUnsupportedHof)",
+    "__closureMixedCmpDegrade")
+
 proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 R2 (ADR-0010). `==`/`!=` over two ref/ptr SymVals — a GROUND
   ## equality of the two `Ref_T`-sorted address consts (`Z3_mk_eq`, negated for
@@ -4113,6 +4160,9 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   if a.kind == svPtr: pendingPtrCompares.add aAst   # RFC-0005 S8ax
   if b.kind == svPtr: pendingPtrCompares.add bAst
   let ctx = requireCurrentContext()
+  # RFC-0016 INT-65: addresses of different pointee sorts (a `pointer`).
+  if sortOfRaw(ctx, aAst.raw) != sortOfRaw(ctx, bAst.raw):   # hash-consed
+    return refCrossSortEq(a, b, op)
   let eq = wrap[Z3Bool](ctx, checkedEq(ctx, aAst.raw, bAst.raw))
   case op
   of bEq: ofBool(eq)
@@ -7002,6 +7052,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         # MUST return before lowerCmp (short-circuit; lowerCmp has no closure branch).
         if l.kind == svClosure and r.kind == svClosure:
           return closureEq(l, r, e.bop)
+        if l.kind == svClosure or r.kind == svClosure:
+          return closureMixedCmpDecline(l, r, e.bop)   ## RFC-0016 INT-65
         # Phase 15 R2: ref/ptr ==/!= → ground address-const equality.
         # MUST return before lowerCmp (short-circuit; lowerCmp has no ref/ptr branch).
         if l.kind in {svRef, svPtr} and r.kind in {svRef, svPtr}:
@@ -7019,6 +7071,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         # MUST return before lowerCmp (short-circuit).
         if l.kind == svClosure and r.kind == svClosure:
           return closureEq(l, r, e.bop)
+        if l.kind == svClosure or r.kind == svClosure:
+          return closureMixedCmpDecline(l, r, e.bop)   ## RFC-0016 INT-65
         # Phase 15 R2: ref/ptr ==/!= → ground address-const equality.
         # MUST return before lowerCmp (short-circuit).
         if l.kind in {svRef, svPtr} and r.kind in {svRef, svPtr}:
@@ -7224,6 +7278,9 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     # (matching `isNew`/`allocateSym`). `refEq` then decides `p == nil` as a ground
     # equality of the two `Ref_T` consts.
     let ctx = requireCurrentContext()
+    # RFC-0016 INT-65: a nil proc value (`nilClosureSite`, no body).
+    if e.nilPointee.kind == itUninterp:
+      return nilClosure()
     let isPtr = e.nilPointee.kind == itPtr
     let pointee = if isPtr: e.nilPointee.ptrPointeeTy else: e.nilPointee.refPointeeTy
     discard allocRefSort(ctx, pointee)        ## ensure the sort + nilConst exist
@@ -15450,9 +15507,22 @@ proc decideUndefined(cur: Path; ub: UbKind; cond: Z3Bool; site: string;
     # RFC-0016 K10a-concolic: the flip solve must keep this op defined.
     w.definedFacts.add ConcolicDefinedFact(
       cond: cond, kind: ub, site: site, at: w.branchTrace.len)
-  let unsat = guardLiteral(cond) != glTrue and
-    checkCapped(w.z3, pathRoots(cur, [cond]), w.settings,
-                loopPruneRLimit(w.settings)).status == zsUnsat
+  # RFC-0016 INT-58: the side is decided first under the pruning budget,
+  # and a side that budget leaves undecided is asked again under the
+  # target query's own (`queryRLimit`), as the halt's own solve would be.
+  # The side's query is the path's plus one condition, as hard as the
+  # target's, and an undecided side ends the path untrusted: under the
+  # pruning budget alone a floating-point rounding (`int(round(float(a) /
+  # 4.0))`) ran out on every conversion and no unsat past one was trusted.
+  var unsat = false
+  if guardLiteral(cond) != glTrue:
+    let roots = pathRoots(cur, [cond])
+    let pruneLimit = loopPruneRLimit(w.settings)
+    var st = checkCapped(w.z3, roots, w.settings, pruneLimit).status
+    let q = w.settings.budget.queryRLimit
+    if st == zsUnknown and (q == 0 or q > pruneLimit):
+      st = checkCapped(w.z3, roots, w.settings, q).status
+    unsat = st == zsUnsat
   if unsat:
     logPrune(cur, [cond])
   else:
@@ -21168,7 +21238,9 @@ proc walkUnsupported(stmt: IRStmt, paths: seq[Path],
   for p in paths:
     if not pathInfeasible(w.z3, p, w.settings): live.add p
   if live.len == 0: return exact(live)
-  if classOf(stmt.unKind) == dcOmitted:
+  # RFC-0016 INT-76: a halting marker (`unHalt`) ends the path too: its
+  # site bound no value, so a later read has nothing of the right sort.
+  if classOf(stmt.unKind) == dcOmitted or stmt.unHalt:
     return w.halted(stmt.unKind, stmt.reason,
                     scope = siteAnchored(stmt.unMarker))
   let d = w.degrade(stmt.unKind, stmt.reason,
@@ -24289,13 +24361,22 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   ## (this proc runs in the `lower` evaluator, which has no `WalkCtx`).
   let ctx = requireCurrentContext()
   # ---- 1. Resolve the callee to an svClosure (Invariant 3 on failure). ----
-  if not env.hasKey(e.ccCallee) or env[e.ccCallee].kind != svClosure:
+  let nilCallee = env.hasKey(e.ccCallee) and isNilClosure(env[e.ccCallee])
+  if not env.hasKey(e.ccCallee) or env[e.ccCallee].kind != svClosure or
+     nilCallee:
     # RFC-0005 S7: `dcSubstituted` -- a stand-in returned before the call's
     # arguments are lowered (their raises are dropped). `closureDegrade` puts
     # ⊤ on the consuming path, not only in the closure sink.
-    closureDegrade(ceClosureUnknownCallee,
-      "closure call through `" & e.ccCallee &
-           "` does not resolve to a closure value in scope")
+    # RFC-0016 INT-65: a call through a nil proc value ends the process
+    # natively (SIGSEGV, c and cpp); the walk does not model that crash here.
+    if nilCallee:
+      closureDegrade(ceUnsupportedHof,
+        "a call through the nil proc value `" & e.ccCallee & "` (natively " &
+          "a SIGSEGV) is not modelled (ceUnsupportedHof)")
+    else:
+      closureDegrade(ceClosureUnknownCallee,
+        "closure call through `" & e.ccCallee &
+             "` does not resolve to a closure value in scope")
     havocUnknownClosureEffects(e, env)   ## RFC-0005 S8bh, S8bn
     # No semantics: a stand-in of the declared result type (RFC-0005 S8cd; it
     # was an `int64` whatever that type was, so `f(k).len` over a proc value
@@ -25841,7 +25922,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
   # Build the closure value (svClosure) from the lambda arg (C2a construction:
   # snapshots captures, stashes the body, declares the per-site funcSym).
   let cloSV = lower(env, e.hofClosure)
-  if cloSV.kind != svClosure:
+  if cloSV.kind != svClosure or isNilClosure(cloSV):   # RFC-0016 INT-65: nil
     # RFC-0005 S8bw (item 1): as the receiver above (a proc-typed global
     # read before any write); was a `doAssert`.
     return degradeAlloc(hofResTy, feUnsupportedExprKind,

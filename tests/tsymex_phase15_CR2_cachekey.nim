@@ -1309,7 +1309,6 @@ suite "Phase 15 CR-2 — version bumps":
     ## reaches the findings it filed; 409-412 reserved): 408->413.
     ## RFC-0016 W4 rv0005-lows part 6 (INT-34: a key starts with the walker
     ## version that wrote it, not `sx2:`; 414-415 reserved): 413->416.
-    check symexWalkerVersion == "416"
 
   test "CR-2 sub-test 5a: the key starts with the walker version":
     ## RFC-0016 INT-34. `w<walker>:` and a 64-digit SHA-256, so a key names
@@ -1327,6 +1326,19 @@ suite "Phase 15 CR-2 — version bumps":
     check walkerVersionOfKey(k) == some(symexWalkerVersion)
     check walkerVersionOfKey(key("415")) == some("415")
     check k[^64 .. ^1] != key("415")[^64 .. ^1]
+    ## RFC-0016 INT-58 / INT-60 (an undecided undefined side is asked again
+    ## under `queryRLimit`; `len` of an array folds; 382-416 reserved):
+    ## 381->417.
+    ## RFC-0016 INT-64 (`for a, b in items(c)` over tuples unpacks each
+    ## element, so `toTable` is walked; 418-421 reserved): 417->422.
+    ## RFC-0016 INT-66 / INT-67 / INT-70 (a user-declared binary magic is
+    ## the system operator; a borrowed `.` is the base field read; a template
+    ## body's type section no longer stops the route scan): 422->423.
+    ## RFC-0016 INT-65 (a `pointer` is an address with a nil; a proc value
+    ## is a routine or nil; 424-433 reserved): 423->434.
+    ## RFC-0016 INT-76 (a `c_longdouble` value declines and halts the
+    ## path): 434->435.
+    check symexWalkerVersion == "435"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

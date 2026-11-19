@@ -55,6 +55,21 @@
 ## (`freshnessProblems`, the clock `$NELLI_PIN_NOW` or the wall clock). The
 ## CI join job is K1a-ci's.
 ##
+## The second record kind (K8b, section 8.2). The same record files hold the
+## fuzzer families' cells-exercised records (`exercisedRecords`): one per
+## generated program and variant, naming the family cells it exercised and
+## whether the run was exact. The join reads them beside the pins: every
+## record must name real cells of its family, and each family with records
+## on the leg's row must be at or above `tests/0016-pairwise.floor` (the
+## pairwise figure, section 12 item 4; `tests/s0016_k8b_pairs.nim`), over
+## the union of the family's two suites (`familyFiles`); a family with one
+## suite's records and not the other's fails, unless the run is partial.
+## The admission-axis suites (INT-56) write the same record kind with the
+## axis as its family and exact rows as its cells; each axis whose suites all
+## ran on the leg must exercise at least `tests/0016-axis-rows.floor` of its
+## exact rows (`s0016_k8b_axes.axisJoinProblems`, section 12 item 4's first
+## clause).
+##
 ## The allowlists are `tests/0016-allowlist/<scope>.txt` for scope magic,
 ## build, errorkind and capkind. A line is `cell<TAB>slice<TAB>reason`; the
 ## slice is an id from the RFC's slice tables. `UNASSIGNED` is rejected: an
@@ -83,6 +98,8 @@ import nelli/smt/soundness
 import ./s8cu_helpers
 import ./worklist_toml
 import ./rfc0016_ids
+import ./s0016_k8b_pairs
+import ./s0016_k8b_axes
 
 const
   root = currentSourcePath().parentDir() / ".."
@@ -1191,10 +1208,77 @@ suite "RFC-0016 K1a-cells: the join over this run's records":
       checkpoint censusFails.join("\n")
       check censusFails.len == 0
       echo "universe census: " & $census
+      let ex = loadExercised(pinDirEnv)
+      let exFails = exercisedJoinProblems(ex, legRowEnv,
+                                          loadFloor(root / floorFile),
+                                          partialEnv)
+      checkpoint exFails.join("\n")
+      check exFails.len == 0
+      echo "universe: " & $ex.len & " cells-exercised records, " &
+           $pairwiseFigure(ex, legRowEnv)
+      let axFails = axisJoinProblems(ex, legRowEnv,
+                                     loadAxisFloor(root / axisFloorFile),
+                                     partialEnv)
+      checkpoint axFails.join("\n")
+      check axFails.len == 0
+      echo "universe: " & $axisFigure(ex, legRowEnv)
       let orphans = orphanCells(universe, recs)
       echo "universe: " & $universe.len & " cells, " & $recs.len &
            " records, " & $orphans.len & " cells that records name and no " &
            "table has yet (K1a-ids joins them): " & orphans.join(", ")
+
+suite "RFC-0016 K8b: the cells-exercised records, K1's second kind":
+  let exDir = getTempDir() / ("universe_k8b_" & $getCurrentProcessId())
+  proc exRec(fam: FamilyScope; choice: seq[int]; row = "linux-c"; half = 0):
+      ExercisedRecord =
+    ExercisedRecord(testFile: familyFiles[fam][half], family: fam,
+                    outcome: "exact", cells: cellsOf(fam, choice), row: row,
+                    variant: "orig")
+  proc bothHalves(fam: FamilyScope; a, b: seq[int]; row = "linux-c"):
+      seq[ExercisedRecord] =
+    @[exRec(fam, a, row, 0), exRec(fam, b, row, 1)]
+
+  test "the join reads them from the record directory beside the pins":
+    removeDir(exDir)
+    writeExercisedTo(exDir, bothHalves(faCallShape, @[0, 0, 0], @[0, 0, 0]))
+    let ex = loadExercised(exDir)
+    check ex.len == 2
+    check loadRecords(exDir).len == 0          # not a pin record
+    var floor = loadFloor(root / floorFile)
+    for fam in FamilyScope: floor[fam].covered = 0
+    check exercisedJoinProblems(ex, "", floor).len == 0
+    removeDir(exDir)
+
+  test "RED: a family below its floor fails the join; another row is not judged":
+    let ex = bothHalves(faGeneric, @[0, 0, 0], @[0, 0, 0]) &
+             bothHalves(faGeneric, @[1, 1, 1], @[1, 1, 1], "msvc")
+    var floor = loadFloor(root / floorFile)
+    for fam in FamilyScope: floor[fam].covered = 0
+    floor[faGeneric].covered = 4
+    let p = exercisedJoinProblems(ex, "", floor)
+    check p.len == 0                            # 6 pairs over both rows
+    let q = exercisedJoinProblems(ex, "linux-c", floor)
+    check q.len == 1                            # 3 pairs on linux-c
+    check "family:generic" in q[0]
+    check exercisedJoinProblems(ex, "mingw", floor).len == 0
+
+  test "RED: a family's halves are judged together; a missing half fails":
+    var floor = loadFloor(root / floorFile)
+    for fam in FamilyScope: floor[fam].covered = 0
+    floor[faGeneric].covered = 6                # neither half alone covers 6
+    check exercisedJoinProblems(
+      bothHalves(faGeneric, @[0, 0, 0], @[1, 1, 1]), "linux-c", floor).len == 0
+    let p = exercisedJoinProblems(@[exRec(faGeneric, @[0, 0, 0])], "linux-c",
+                                  floor)
+    check p.len == 1
+    check familyFiles[faGeneric][1] in p[0]
+
+  test "RED: a record naming no cell of its family fails the join":
+    var rs = bothHalves(faExnMemory, @[0, 0, 0, 0], @[0, 0, 0, 0])
+    rs[0].cells[1] = CellKey(scope: faExnMemory, key: "k8b/writeAt/never")
+    var floor = loadFloor(root / floorFile)
+    for fam in FamilyScope: floor[fam].covered = 0
+    check exercisedJoinProblems(rs, "", floor).len == 1
 
 suite "RFC-0016 W2-z: the record census":
   proc rec(target: string; v: PinVerdict): PinRecord =

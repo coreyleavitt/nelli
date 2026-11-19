@@ -232,6 +232,12 @@ proc zMultiNon(k: int) =
 proc zClosure(k: int) =
   var f: proc (x: int): int
   if f == nil: symexTarget("h")
+proc zClosureNon(k: int) =
+  var f: proc (x: int): int
+  if f != nil: symexTarget("h")
+proc zLongDouble(k: int) =
+  var x: c_longdouble
+  if k == 1: symexTarget("h")
 
 suite "RFC-0016 K3b: each modelled kind's zero, and the refused row":
   test "an uninitialised var is its kind's zero (native)":
@@ -266,6 +272,18 @@ suite "RFC-0016 K3b: each modelled kind's zero, and the refused row":
     both(zVariant, zVariantNon, "variant")
     both(zMulti, zMultiNon, "multiVariant")
 
+  test "a proc variable's zero is nil (RFC-0016 INT-65)":
+    # Until walker 434 this was the placeholder row's decline pin
+    # (`ceUnsupportedHof`): an uninitialised proc variable had no zero.
+    # INT-65 gives it Nim's (nil), so it is exact, through the `proc` row.
+    check pinExact(zClosure, cellKey(axTypeClass, "proc"),
+                   target = tLabel("h"), domain = dom).status == sxSat
+    check pinExact(zClosureNon, cellKey(axTypeClass, "proc"),
+                   target = tLabel("h"), domain = dom).status == sxUnsat
+
   test "a placeholder sort has no zero: a pinned decline":
-    pinDecline(zClosure, cellKey(axTypeOp, "fieldDefault/uninterp"),
-               ceUnsupportedHof)
+    # The `uninterp` row is still refused; since INT-65 the proc variable no
+    # longer reaches it, so the pin is the placeholder that does:
+    # `c_longdouble` (K2c STY-06), which declines with its own kind.
+    pinDecline(zLongDouble, cellKey(axTypeOp, "fieldDefault/uninterp"),
+               feUnsupportedParamType, target = tLabel("h"))

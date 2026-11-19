@@ -1706,7 +1706,7 @@ proc madeValueCond*(ctx: Z3Context; t: RawZ3Ast):
   var memoA: Table[(int, int), M]
   # One walk for both shapes, so it recurses without a forward declaration:
   # `arr` set, the element of array `a` at `i`; else, the value `a`.
-  proc walk(a, i: Z3AnyAst; arr: bool; level: int): M =
+  proc walkMade(a, i: Z3AnyAst; arr: bool; level: int): M =
     if level > termWalkMaxDepth: return no
     if not arr:
       if isNumeralAst(ctx, a.raw): return yes
@@ -1717,10 +1717,10 @@ proc madeValueCond*(ctx: Z3Context; t: RawZ3Ast):
       let (decl, args) = unpackApp(a)
       let k = ord(Z3_get_decl_kind(ctx.raw, decl))
       if k == kinds.select and args.len == 2:
-        result = walk(args[0], args[1], true, level + 1)
+        result = walkMade(args[0], args[1], true, level + 1)
       elif k == kinds.ite and args.len == 3:
-        result = iteM(args[0].raw, walk(args[1], i, false, level + 1),
-                      walk(args[2], i, false, level + 1))
+        result = iteM(args[0].raw, walkMade(args[1], i, false, level + 1),
+                      walkMade(args[2], i, false, level + 1))
       memoV[id] = result
       return
     let key = (astId(ctx, a.raw), astId(ctx, i.raw))
@@ -1734,23 +1734,23 @@ proc madeValueCond*(ctx: Z3Context; t: RawZ3Ast):
         let body = Z3_get_quantifier_body(ctx.raw, a.raw)
         let inst = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute_vars(ctx.raw,
           body, 1'u32, cast[ptr UncheckedArray[RawZ3Ast]](addr sub)))
-        result = walk(inst, i, false, level + 1)
+        result = walkMade(inst, i, false, level + 1)
     of akApp:
       let (decl, args) = unpackApp(a)
       let k = ord(Z3_get_decl_kind(ctx.raw, decl))
       if k == kinds.store and args.len == 3:
         let hit = wrap[Z3Bool](ctx, checkedEq(ctx, i.raw, args[1].raw))
-        result = iteM(hit.raw, walk(args[2], i, false, level + 1),
-                      walk(args[0], i, true, level + 1))
+        result = iteM(hit.raw, walkMade(args[2], i, false, level + 1),
+                      walkMade(args[0], i, true, level + 1))
       elif k == kinds.ite and args.len == 3:
-        result = iteM(args[0].raw, walk(args[1], i, true, level + 1),
-                      walk(args[2], i, true, level + 1))
+        result = iteM(args[0].raw, walkMade(args[1], i, true, level + 1),
+                      walkMade(args[2], i, true, level + 1))
       elif k == kinds.constArr and args.len == 1:
-        result = walk(args[0], i, false, level + 1)
+        result = walkMade(args[0], i, false, level + 1)
     else: discard
     memoA[key] = result
   let root = wrap[Z3AnyAst](ctx, t)
-  walk(root, root, false, 0)
+  walkMade(root, root, false, 0)
 
 proc readRangeConds*(v: SymVal; ty: IRType): seq[Z3Bool] =
   ## RFC-0016 INT-85. The declared-domain facts of a value read out of a
@@ -2483,8 +2483,8 @@ proc pointerAsTyped*(ctx: Z3Context; p: Z3AnyAst; pointee: IRType): Z3AnyAst =
 proc resetHeapModel*() =
   ## RFC-0016 review D3c-6. The per-run reset of the run-state threadvars of
   ## this module, called by `resetSymexRunState`. `storeDeclKind`,
-  ## `selectDeclKind`, `constArrayDeclKind`, `iteDeclKind`, `heapChainKinds` and `provKinds`
-  ## are the linked Z3's decl kinds, the same in every run and read in a probe
+  ## `selectDeclKind`, `constArrayDeclKind`, `iteDeclKind`, `heapChainKinds`, `provKinds` and
+  ## `madeKinds` are the linked Z3's decl kinds, the same in every run and read in a probe
   ## context, so they are process-stable and not reset (`probeContext`).
   allocEnumZeroLegal = false
   allocInputDomain = false               # RFC-0016 INT-84
@@ -2495,8 +2495,9 @@ proc resetHeapModel*() =
   globalEntryFacts = @[]
   pointerFacts = @[]                     # RFC-0016 INT-83
   pointerViews = @[]
-  pointerSortsUsed.clear()
-  pointerReadSorts.clear()
+  pointerSortsUsed = initHashSet[string]()
+  pointerReadSorts = initHashSet[string]()
+  pointerDecls = (ctx: nil, decls: initTable[string, RawZ3FuncDecl]())
   currentBorrowReboxCounter = 0
   heapKeyShapes = initTable[string, HeapKeyShape]()
   heapFieldOwners = initTable[string, tuple[code: int64; depth: int]]()   ## RFC-0016 INT-81

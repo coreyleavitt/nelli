@@ -28,3 +28,7 @@ tsymex_rfc0005_s8aa_remainder_checksoff
 tsymex_162_range_base_width
 # a promoted value keeps its overflow obligation (the discharge log)
 tsymex_161_overflow_obligation
+# K9e survivors, overflow / range / conversion cluster: int8 sub/mul, range conversions and assignment, unary minus
+tsymex_0016_k9e_kill_ovf
+# K9e survivors: the signed-overflow trap of a checks-off build
+tsymex_0016_k9e_kill_ovf_checksoff

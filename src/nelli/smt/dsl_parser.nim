@@ -3983,9 +3983,9 @@ proc isSystemRecordEq(sym: NimNode): bool =
   ## instance of this same routine, or a user's `==` on the field's type.
   ## Walked as a routine, it compares each field with the `==` Nim calls;
   ## a field-by-field model would bypass a user's.
-  if sym.kind != nnkSym or sym.symKind != nskProc: return false
-  let impl = sym.getImpl
-  impl.kind == nnkProcDef and
+  if sym.kind != nnkSym: return false
+  let impl = resolveRoutineImpl(sym)
+  impl != nil and
     impl.lineInfoObj.filename.replace('\\', '/').endsWith("/lib/system.nim")
 
 proc recordAtomEqIR(l, r: IRExpr; recTy: IRType): IRExpr =
@@ -5271,7 +5271,7 @@ proc hasPointerDeref(n: NimNode): bool =
 proc userRoutineCall(n: NimNode): bool =
   ## RFC-0016 INT-92. `n` calls a routine with a body that is no magic.
   n.kind in {nnkCall, nnkCommand, nnkInfix, nnkPrefix} and n.len > 0 and
-    n[0].kind == nnkSym and symKind(n[0]) in {nskProc, nskFunc} and
+    n[0].kind == nnkSym and resolveRoutineImpl(n[0]) != nil and
     routineMagic(n[0]).len == 0
 
 proc mayDeadRead(n: NimNode; depth = 3): bool =
@@ -5282,7 +5282,7 @@ proc mayDeadRead(n: NimNode; depth = 3): bool =
   if depth <= 0 or n.kind in RoutineNodes: return false
   if userRoutineCall(n):
     let impl = resolveRoutineImpl(n[0])
-    if impl != nil and impl.kind == nnkProcDef and impl.len > 6 and
+    if impl != nil and impl.len > 6 and
        mayDeadRead(impl[6], depth - 1):
       return true
   for c in n:
@@ -5303,7 +5303,7 @@ proc deadResultCandidate(impl: NimNode; live: seq[string] = @[]): bool =
   ## but the fields `live`), is provably dead in its own body too: it never
   ## reads that part, and some dereference in it, or in a routine it calls,
   ## may be a read only that part takes.
-  impl != nil and impl.kind == nnkProcDef and impl.len > 6 and
+  impl != nil and impl.len > 6 and
     impl[6].kind != nnkEmpty and not resultReadIn(impl[6], live) and
     (live.len == 0 or writesDeadField(impl[6], live)) and
     mayDeadRead(impl[6])
@@ -5402,7 +5402,7 @@ proc formalDeadIn(calleeSym: NimNode; k: int; ru: ResultUse;
   ## or a template's use counts as live): the actual's value is dead once
   ## the call is inlined. `ru`: what the caller reads of the call's result.
   let impl = resolveRoutineImpl(calleeSym)
-  if impl == nil or impl.kind != nnkProcDef or impl.len < 7 or
+  if impl == nil or impl.len < 7 or
      impl[3].kind != nnkFormalParams or impl[6].kind == nnkEmpty:
     return false
   var name = ""

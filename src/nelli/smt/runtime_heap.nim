@@ -45,8 +45,8 @@
 # theories and cannot be cleanly attributed to the heap cluster alone.
 # `buildHeapSnapshot` stays in runtime.nim (called from extractWitness before
 # the heap include point).
-# Placement in runtime.nim: between `walkBlock` and `walk`'s body
-# (after `walk`'s forward-decl and before `walk`'s body).
+# Placement in runtime.nim: after the expression drains and before the
+# statement walkers and `walk`'s body (after `walk`'s forward-decl).
 
 proc freshRef*(ctx: Z3Context, refSort: RawZ3Sort, typeId: string,
                path: Path): Z3AnyAst =

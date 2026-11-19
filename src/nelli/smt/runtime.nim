@@ -599,7 +599,7 @@ template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
                           parent.undefined, parent.undefinedViaOnly)
 
 proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind])
-  ## RFC-0016 W3-z R1 fwd decl (defined beside `admitSolvedHit`). Under
+  ## RFC-0016 W3-z R1 fwd decl (defined beside `crashRaise`). Under
   ## `tUndefined`, an undefined behaviour a degrade token newly puts on a path
   ## (the `{.noinit.}` read) is the target's hit.
 
@@ -620,7 +620,10 @@ template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                                        parent.taint + tok.path,
                                        parent.undefined + tok.ub,
                                        parent.undefinedViaOnly - tok.ub)
-    noteUbAtFork(parent.taint, child, tok.ub - parent.undefined)
+    # INT-34 B1: the empty test is inline, so the common fork (no new kind)
+    # makes no call; `noteUbAtFork` is reached only when a kind arrives.
+    let newUb = tok.ub - parent.undefined
+    if newUb != {}: noteUbAtFork(parent.taint, child, newUb)
     child
 
 template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
@@ -706,7 +709,8 @@ proc taintInPlace(p: Path; d: Degrade) =
   p.taint = p.taint + d.path
   p.undefined = p.undefined + d.ub     ## RFC-0016 W1-d3
   p.undefinedViaOnly = p.undefinedViaOnly - d.ub   ## RFC-0016 W3-z R7
-  noteUbAtFork(priorTaint, p, d.ub - priorUb)   ## RFC-0016 W3-z R1
+  let newUb = d.ub - priorUb   ## INT-34 B1: inline empty test, as `forkPathTainted`
+  if newUb != {}: noteUbAtFork(priorTaint, p, newUb)   ## RFC-0016 W3-z R1
 
 # ---- Phase 15 H1: exported test hooks ---------------------------------------
 # `Path` is a private `ref object`, so the H1 RED test cannot name it. These two
@@ -876,8 +880,35 @@ proc inCellDomain(c: Z3BitVec[64]; ty: IRType): Option[Z3Bool] =
   if conds.len != 2: return none(Z3Bool)
   some(conds[0] and conds[1])
 
-proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal
-  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+proc cellValue(c: Z3BitVec[64]; ty: IRType): SymVal =
+  ## RFC-0005 S8z. The value of type `ty` a 64-bit container cell holds: its
+  ## low `ty.width` bits (`cellOf`'s inverse on every cell it builds); a
+  ## `bool`'s is `cell != 0`.
+  if ty.kind == itBool:
+    return SymVal(kind: svBool, bo: not (c == mkBitVec[64](0'i64)))
+  let whole = SymVal(kind: svBV64, signed: ty.signed, bv64: c)
+  if ty.width == 64: whole else: truncBV(whole, ty.width, ty.signed)
+
+proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
+  ## RFC-0005 S8ar (was `tabValOf`). The value table `sv` holds at key term
+  ## `keyRaw`: the select of each data array, read back as the value type
+  ## (`tabValTerms`' inverse).
+  ## RFC-0005 S8at: a container value is rebuilt from its leaves' selects
+  ## (`svWithLeaves` over its type's zero, whose leaves are all replaced).
+  let valTy = sv.tabValTy
+  # owned at once (RFC-0016 int6-z): every arm below makes terms, and a raw
+  # select result lives only until the next call that makes one
+  let sel0 = wrap[Z3AnyAst](ctx, checkedSelect(ctx, sv.tabDataRaw.raw, keyRaw))
+  case tabValLeaf(valTy)
+  of tvStr: SymVal(kind: svString, str: wrap[Z3String](ctx, sel0.raw))
+  of tvF32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, sel0.raw))
+  of tvF64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, sel0.raw))
+  of tvCell: cellValue(wrap[Z3BitVec[64]](ctx, sel0.raw), valTy)
+  of tvTree:
+    var leaves = @[sel0]
+    for m in sv.tabDataMore:
+      leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, m.raw, keyRaw))
+    svWithLeaves(ctx, defaultZero(valTy, "__tabValProto"), leaves, valTy)
 
 proc noteTableKey(k: Z3String) =
   ## RFC-0005 S8f. A key term some table array is selected or stored at.
@@ -889,8 +920,13 @@ proc noteSetKey(k: Z3BitVec[64]) =
   if firstSighting(cast[pointer](k.raw)):
     containerCard.setKeys.add k
 
-proc tabMoreEq(ctx: Z3Context; a, b: SymVal): Z3Bool
-  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+proc tabMoreEq(ctx: Z3Context; a, b: SymVal): Z3Bool =
+  ## RFC-0005 S8at. A container value's further data arrays equal, pairwise
+  ## (`retBindEq`'s table arm); `true` for a scalar value.
+  result = mkBool(true)
+  for i in 0 ..< min(a.tabDataMore.len, b.tabDataMore.len):
+    result = result and wrap[Z3Bool](ctx,
+      checkedEq(ctx, a.tabDataMore[i].raw, b.tabDataMore[i].raw))
 
 proc distinctPresentCount[K](arr: Z3Array[K, Z3Bool]; keys: seq[K]): Z3Int =
   ## RFC-0005 S8f. The number of DISTINCT values among `keys` at which `arr`
@@ -2278,15 +2314,6 @@ proc lowerConvIntReinterpret(operandSV: SymVal, cirWidth: int,
 proc intBounds(width: int): (int64, int64)
   ## RFC-0005 S8i fwd-decl (`lowerConvIntRange`); defined beside
   ## `overflowCondInt`.
-
-proc cellValue(c: Z3BitVec[64]; ty: IRType): SymVal =
-  ## RFC-0005 S8z. The value of type `ty` a 64-bit container cell holds: its
-  ## low `ty.width` bits (`cellOf`'s inverse on every cell it builds); a
-  ## `bool`'s is `cell != 0`.
-  if ty.kind == itBool:
-    return SymVal(kind: svBool, bo: not (c == mkBitVec[64](0'i64)))
-  let whole = SymVal(kind: svBV64, signed: ty.signed, bv64: c)
-  if ty.width == 64: whole else: truncBV(whole, ty.width, ty.signed)
 
 # ---- RFC-0016 PRC-07 slice B: the union byte image -----------------------------
 #
@@ -3734,35 +3761,6 @@ proc presenceRemoved(cur, base: Z3AnyAst): Z3Bool =
       result = mkBool(ctx, true)
     memo[t] = result
   go(cur.raw)
-
-proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
-  ## RFC-0005 S8ar (was `tabValOf`). The value table `sv` holds at key term
-  ## `keyRaw`: the select of each data array, read back as the value type
-  ## (`tabValTerms`' inverse).
-  ## RFC-0005 S8at: a container value is rebuilt from its leaves' selects
-  ## (`svWithLeaves` over its type's zero, whose leaves are all replaced).
-  let valTy = sv.tabValTy
-  # owned at once (RFC-0016 int6-z): every arm below makes terms, and a raw
-  # select result lives only until the next call that makes one
-  let sel0 = wrap[Z3AnyAst](ctx, checkedSelect(ctx, sv.tabDataRaw.raw, keyRaw))
-  case tabValLeaf(valTy)
-  of tvStr: SymVal(kind: svString, str: wrap[Z3String](ctx, sel0.raw))
-  of tvF32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, sel0.raw))
-  of tvF64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, sel0.raw))
-  of tvCell: cellValue(wrap[Z3BitVec[64]](ctx, sel0.raw), valTy)
-  of tvTree:
-    var leaves = @[sel0]
-    for m in sv.tabDataMore:
-      leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, m.raw, keyRaw))
-    svWithLeaves(ctx, defaultZero(valTy, "__tabValProto"), leaves, valTy)
-
-proc tabMoreEq(ctx: Z3Context; a, b: SymVal): Z3Bool =
-  ## RFC-0005 S8at. A container value's further data arrays equal, pairwise
-  ## (`retBindEq`'s table arm); `true` for a scalar value.
-  result = mkBool(true)
-  for i in 0 ..< min(a.tabDataMore.len, b.tabDataMore.len):
-    result = result and wrap[Z3Bool](ctx,
-      checkedEq(ctx, a.tabDataMore[i].raw, b.tabDataMore[i].raw))
 
 proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
                  intOffsetPositions: seq[int] = @[]): SymVal =
@@ -17136,14 +17134,10 @@ proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
-proc crashRaise(p: Path, typeId: string, w: var WalkCtx)
-  ## RFC-0005 S8cu fwd decl (defined beside `routeRaise`).
-proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
-                   w: var WalkCtx)
+  ## Phase 15 E3 fwd decl (defined after `walk`: it walks `finally` bodies).
 proc noteOpaqueUndefined(w: var WalkCtx; paths: seq[Path];
                          stmt: IRStmt): seq[Path]
-  ## RFC-0016 W3-z R3 fwd decl (defined beside `haltUndefined`).
-  ## RFC-0016 W1-d1a fwd decl (defined beside `crashRaise`).
+  ## RFC-0016 W3-z R3 fwd decl (defined after `routeRaise`).
 
 proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
                                                    unknown: seq[string]] =
@@ -17178,6 +17172,195 @@ proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
 proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            conds: seq[Z3Bool], settings: SymexSettings): bool
   ## RFC-0016 K10b fwd-decl (defined with the follow-mode helpers below).
+
+# ---- Raise and undefined-behaviour hits (RFC-0016 INT-34 B1: need no walk) ---
+
+proc haltExcludedDefect(p: Path, typeId: string, w: var WalkCtx) =
+  ## RFC-0016 K7b (W-16). A `Defect` raise that reaches the SUT boundary
+  ## while its `DefectKind` is in `settings.defectExclusions` ends its path
+  ## with no finding (the user excluded it). The omission is now recorded
+  ## (`feDefectExcluded`, `dcOmitted`: run `{scIncomplete}`), so a search
+  ## the excluded raise could have answered is `sxUnknown`, never a trusted
+  ## `sxUnsat`. A path no execution takes, or one a concrete witness's
+  ## inputs rule out, is not reached and records nothing.
+  if pathInfeasible(w.z3, p, w.settings): return
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                          w.settings):
+    return
+  w.halted(feDefectExcluded,
+    "a raise of `" & typeId & "` is excluded by `defectExclusions` (" &
+    $typeIdToDefectKind(typeId) & "): the path ends here with no finding, " &
+    "so a search it could have answered is not decided")
+
+proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
+  ## RFC-0005 S8cu. A raise no handler and no `finally` sees: a nil dereference,
+  ## which natively is a SIGSEGV (rc 139) that ends the process on the pinned Nim
+  ## 2.2.10, by default, with `--panics:on`, `-d:danger`, clang and the cpp
+  ## backend, under `except NilAccessDefect`, `except Defect` and a bare
+  ## `finally`. `std/segfaults` does not change that with the default goto
+  ## exceptions (its handler recurses to the call depth limit, rc 1, or hangs
+  ## in a release build), nor with `--exceptions:cpp`; with
+  ## `--exceptions:setjmp` it makes the raise catchable and runs the `finally`.
+  ## So in a setjmp build a dereference under any `try` declines
+  ## (`heNilDerefMayBeCaught`). In every other build the crash leaves each
+  ## frame by the channel an escaping raise takes (`escaped`, marked `crash`,
+  ## so the caller's drain re-routes it here), since the callee's or closure
+  ## body's path holds only its own facts and the drain joins the caller's;
+  ## it ends as a finding at the SUT boundary. Before S8cu it was routed as an
+  ## ordinary raise: a label in `except NilAccessDefect` was a false sxSat and
+  ## `tNilAccess` a false sxUnsat.
+  when buildSemantics.exceptions == exSetjmp:
+    var guarded = w.frame.handlerStack.len > 0
+    for f in w.frameStack:
+      if f.handlerStack.len > 0: guarded = true
+    if guarded:
+      if not pathInfeasible(w.z3, p, w.settings):
+        w.halted(heNilDerefMayBeCaught,
+          "a nil dereference under a `try` in a build with " &
+          "`--exceptions:setjmp`, where `std/segfaults` would make it a " &
+          "catchable `" & typeId & "` and run the `finally`: what follows is " &
+          "not known -- path degraded to sxUnknown (heNilDerefMayBeCaught)")
+      return
+  if w.frameStack.len > 0:
+    w.frame.exits.escaped.park(EscapedRaise(path: p, typeId: typeId,
+                                               msg: none(string), crash: true))
+    return
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                          w.settings):
+    return
+  if typeIdToDefectKind(typeId) in w.settings.defectExclusions:
+    haltExcludedDefect(p, typeId, w)   ## RFC-0016 K7b (W-16)
+    return
+  let (st, wit, candErrs, why) = solveTargetHit(w, p)
+  case st
+  of sxSat:
+    let iv = InternalVerdict(kind: ivRaised, raisedTypeId: typeId,
+                             raisedMsg: none(string), raisedWitness: wit,
+                             raisedIsDefect: true)
+    var r = toPublic(iv)
+    r.soundness.pathTaint = p.taint
+    r.soundness.witnessUndefined = ubOrdinals(p.undefined)
+    r.undefinedViaOnly = ubOrdinals(p.undefinedViaOnly)   # W3-z R7
+    r.nilDerefOnPath = p.nilDeref
+    # RFC-0016 W1-c2: the witness ends the process wherever it runs, so no
+    # consumer runs it in the host (`hostRunnable`).
+    r.soundness.witnessUnsafe = true
+    r.errors.add candErrs
+    w.admitSolvedHit(r)
+  of sxUnknown:
+    w.halted(beSolverUndef,
+      "solver returned unknown on a path raising `" & typeId &
+           "` (queryRLimit=" & $w.settings.budget.queryRLimit &
+           "): " & why & " (beSolverUndef)")
+  of sxUnsat, sxRaised: discard
+
+proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind]) =
+  ## RFC-0016 W3-z R1 (finding U3). A `{.noinit.}` read does not halt: it rides
+  ## the path as `ub` on a `feGlobalHavoc` degrade, so `haltUndefined`, the only
+  ## other hit test, never saw it and `tUndefined` returned a trusted `sxUnsat`
+  ## over a reachable indeterminate read. Every fork that newly puts a kind of
+  ## the requested set on a path comes here (`forkPathTainted`, `taintInPlace`;
+  ## a kind already on the parent was tested where it arrived): the hit is
+  ## solved on the child's constraints. The finding's taint is the PARENT's:
+  ## the degrade that carries the kind is the finding itself, not a reason to
+  ## doubt it, so it does not turn the hit into a replay-only candidate.
+  ## Unlike `haltUndefined` the path continues: the read is not a halt.
+  ##
+  ## RFC-0016 0.10.0 review H2. On the tail walk (`tailGate`) the kinds are
+  ## what the run is not shown defined in: a child the pins do not rule out
+  ## records them in `WalkCtx.tailUb`, which `verifyTailDefinedKinds` reads.
+  ## Before, the tail walk returned here and the read was a trusted `sxSat`.
+  if newUb == {} or currentWalkCtxPtr == nil: return
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  if wp[].tailGate:
+    if newUb - wp[].tailUb != {} and
+       not concretelyInfeasible(wp[].z3, wp[].concreteEq,
+                                child.pc & child.defectSurvivorPc,
+                                wp[].settings):
+      wp[].tailUb.incl newUb
+    return
+  if wp[].target.kind != stkUndefined or wp[].shouldStop:
+    return
+  if newUb * wp[].target.ubKinds == {}: return
+  if wp[].mode == wmFollowConcrete and
+     concretelyInfeasible(wp[].z3, wp[].concreteEq,
+                          child.pc & child.defectSurvivorPc, wp[].settings):
+    return
+  let solveOn = if closureBodyCallerPc.len == 0: child
+                else: forkPath(child, closureBodyCallerPc & child.pc, child.env)
+  let (st, wit, candErrs, why) = solveTargetHit(wp[], solveOn)
+  case st
+  of sxSat:
+    wp[].admitSolvedHit(RawResult(status: sxSat, witness: wit,
+      soundness: Soundness(pathTaint: parentTaint,
+                           witnessUndefined: ubOrdinals(child.undefined)),
+      nilDerefOnPath: child.nilDeref, errors: candErrs))
+  of sxUnknown:
+    wp[].halted(beSolverUndef,
+      "solver returned unknown on a path reading an indeterminate value: " &
+      why & " (beSolverUndef)")
+  of sxUnsat, sxRaised: discard
+
+proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
+                   w: var WalkCtx) =
+  ## RFC-0016 W1-d1a (section 9.1 item 2). The undefined side of an op, when
+  ## it is not provably unreachable: a TERMINAL path that leaves through the
+  ## crash channel's end (no `escaped` parking), never `routeRaise`, whose
+  ## handler search would let a bare `except:`, an `except DivByZeroDefect:` or
+  ## a `finally` consume it. So: no setjmp arm (nothing recovers an undefined
+  ## operation), no `defectExclusions` check (it is not a Defect), and a
+  ## `degrade` halt of the op's `UbKind` (`dcOmitted`: run coordinate
+  ## `{scIncomplete}`, which keeps `sxUnsat` from being trusted) in place of a
+  ## finding. `p` is the path BEFORE the op; `cond` is the undefined side.
+  ## In concrete-follow mode a side the witness's inputs rule out is not
+  ## reached and records nothing.
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc & @[cond],
+                          w.settings):
+    return
+  # RFC-0016 K10a-target (section 9.1 item 5): the side is also a FINDING. Under
+  # `tUndefined` a listed kind is the target's hit (a winner, solved on the
+  # path with the undefined side's condition); under any other target it is
+  # listed on `SymexResult.undefined` (clean paths only, a bounded number).
+  # The path ends either way: nothing past the op is modelled.
+  let tgt = w.target
+  let isHit = tgt.kind == stkUndefined and kind in tgt.ubKinds
+  # RFC-0016 K10b: the whole-run gate's second walk reads only the halt, so
+  # it lists nothing (the solve for a witness would run unpinned).
+  var listIt = tgt.kind != stkUndefined and scSpurious notin p.taint and
+               w.undefinedFound.len < maxUndefinedFindings and not w.tailGate
+  for u in w.undefinedFound:
+    if u.kind == kind and u.site == site: listIt = false   # one per op
+  if (isHit and not w.shouldStop) or listIt:
+    let atOp = forkPath(p, p.pc & @[cond], p.env)
+    let solveOn = if closureBodyCallerPc.len == 0: atOp
+                  else: forkPath(atOp, closureBodyCallerPc & atOp.pc, atOp.env)
+    let (st, wit, candErrs, why) = solveTargetHit(w, solveOn)
+    case st
+    of sxSat:
+      if isHit:
+        w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
+          soundness: Soundness(pathTaint: p.taint,
+                               witnessUndefined: ubOrdinals(p.undefined + {kind})),
+          nilDerefOnPath: p.nilDeref, errors: candErrs))
+      else:
+        w.undefinedFound.add RawUndefined(kind: kind, site: site, witness: wit)
+    of sxUnknown:
+      if isHit:
+        w.halted(beSolverUndef,
+          "solver returned unknown on a path reaching " & $kind & " at " &
+          site & ": " & why & " (beSolverUndef)")
+    of sxUnsat, sxRaised: discard
+  let next =
+    if tgt.kind == stkUndefined: ""
+    else: "; query `tUndefined()` to ask for an input that reaches it"
+  w.halted(kind,
+    "undefined behaviour at " & site & " (" & $kind & "): the path ends " &
+    "here, what follows is not modelled" & next &
+    # RFC-0016 K10c: what the verdict assumes of the C flags nelli cannot see.
+    "; " & bprof.assumedAbsentNote())
 
 proc opaqueRaiseForks(w: var WalkCtx; paths: seq[Path];
                       stmt: IRStmt): seq[Path] =
@@ -19695,6 +19878,215 @@ proc followGuard(w: var WalkCtx; dp: Path; cond: Z3Bool; factBase: int;
     return foOffRun
   followBranchOutcome(w, dp, cond, newFacts, construct)
 
+proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
+  ## RFC-0005 batch 6. The value of the receiver `name` a statement arm
+  ## updates in place (`xs[i] = v`, `xs.pop()`, `o.kind = k`), and the path
+  ## to continue on. A bound name is read from `Env`. An unbound one is read
+  ## as `lower` reads the name (`iekVar`): a module-level variable the walk
+  ## has not written yet is its ENTRY value (S8as `entryValueOf`, the path
+  ## tainted `feGlobalHavoc`), and anything else declines in-band. The arms
+  ## read `Env` directly before, so a global receiver not yet written
+  ## raised `KeyError` (the path was dropped: a false `sxUnsat`) or skipped
+  ## the statement (its `FieldDefect` was never forked).
+  ##
+  ## RFC-0005 S8cd: the receiver is read as one, not observed. An untouched
+  ## unwritten part (a field the statement does not reach, an element it
+  ## overwrites) does not taint the path; each arm observes the parts it
+  ## reads (`observeRecvPart`, `unwrittenDisc`). And a global of a known type
+  ## is read at that type (`vGlobalTy`, as a parsed read carries).
+  if p.env.hasKey(name): return (p.env[name], p)
+  let recv = mkVar(name)
+  if w.statics.globals.hasKey(name):
+    recv.vGlobalTy = w.statics.globals[name].ty
+  lowerAsReceiver = true
+  lowerInExpr(p, recv, w)
+
+const viewGrownPrefix = "__viewGrown#"
+  ## RFC-0005 S8cn. On a callee's path, the condition that a key was added to
+  ## the Table of a `slot` entry: a write to the view past it may be lost to a
+  ## rehash, by a capacity that is not modelled.
+const viewGonePrefix = "__viewGone#"
+  ## RFC-0005 S8cn. Set on a callee's path where the key of a `slot` entry was
+  ## removed and the slot is empty (`syncAddrCells`).
+
+func irFieldPath(e: IRExpr): string =
+  ## RFC-0005 S8cn. `e` as a location path (`t`, `o.tab`), or "".
+  if e == nil: return ""
+  case e.kind
+  of iekVar: e.vname
+  of iekField:
+    let r = irFieldPath(e.obj)
+    if r.len == 0: "" else: r & "." & e.fieldName
+  else: ""
+
+func exprLocRoot(e: IRExpr): string =
+  ## RFC-0005 S8cn. The variable the location `e` is a path into, or "".
+  if e == nil: return ""
+  case e.kind
+  of iekVar: e.vname
+  of iekField: exprLocRoot(e.obj)
+  of iekIndex: exprLocRoot(e.arr)
+  else: ""
+
+proc bindsViewWholeShape(s: IRStmt; names: var seq[string];
+                         sh: var WriteShape): bool =
+  ## RFC-0005 S8cn. `s` holds the memory of one of `names` in a way the walk
+  ## takes for a copy. A local bound to a whole seq, Table or string: Nim's
+  ## cursor inference (ARC/ORC) shares the memory when the local is never
+  ## mutated (`let c = t`), and copies when it is, so whether a write through
+  ## the other formal is seen through the local depends on what the compiler
+  ## proved. A loop over one: `items` and `values` yield `lent`, so the loop
+  ## variable reads the element live.
+  if s == nil: return false
+  case s.kind
+  of isBlock:
+    for c in s.stmts:
+      if bindsViewWholeShape(c, names, sh): return true
+  of isIf:
+    for b in s.branches:
+      if bindsViewWholeShape(b.body, names, sh): return true
+    return bindsViewWholeShape(s.elseBody, names, sh)
+  of isWhile:
+    return bindsViewWholeShape(s.wbody, names, sh)
+  of isTry:
+    if bindsViewWholeShape(s.tryBody, names, sh): return true
+    for h in s.tryHandlers:
+      if bindsViewWholeShape(h.body, names, sh): return true
+    return bindsViewWholeShape(s.tryFinally, names, sh)
+  of isLet:
+    # A synthetic `let` is the walk's own (a `var` actual's temporary).
+    if s.lty == nil or s.lname.startsWith("__sym_"): return false
+    if s.lty.kind in {itInt, itBool, itFloat32, itFloat64}:
+      # A scalar binding holds no memory of the container. The route lets it
+      # through; the table says which decline this shape's verdict carries.
+      sh = wsScalarRead
+      return routeDeclines(rrViewWhole, sh)
+    if s.lvalue != nil and s.lvalue.kind == iekTupleLit:
+      sh = wsTupleCopy   # a constructor copies what it is given
+      return routeDeclines(rrViewWhole, sh)
+    if exprLocRoot(s.lvalue) in names:
+      sh = wsVarCopy
+      return routeDeclines(rrViewWhole, sh)
+    return false
+  of isIndex:
+    if exprLocRoot(s.ixArr) in names:
+      if s.ixRetName.startsWith("__sym_fs_"):   # the `for` lowering
+        sh = wsLentLoop
+        return routeDeclines(rrViewWhole, sh)
+      if s.ixElemTy != nil and
+         s.ixElemTy.kind notin {itInt, itBool, itFloat32, itFloat64}:
+        names.add s.ixRetName
+  of isTabKeys:
+    if exprLocRoot(s.tkRecv) in names:
+      sh = wsLentLoop
+      return routeDeclines(rrViewWhole, sh)
+  # RFC-0016 K6c (W-10). No `else`: a statement kind is listed here as one that
+  # binds no view of a container's memory, so a kind added to `IRStmtKind` does
+  # not compile until its author decides (the fail-open `else: discard` this
+  # replaced let a new binder through as "holds nothing").
+  of isAssign, isBreak, isContinue, isReturn, isAssert, isAssume,
+     isCall, isVariantField, isVariantReassign, isVariantReassignSymbolic,
+     isVariantConstructSym, isIndexAssign, isSeqPop, isTargetLabel, isRaise,
+     isDeref, isNew, isDerefWrite, isUnsupported, isUnsafeCast, isSetLen,
+     isUndefined:
+    discard
+  false
+
+proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
+                     w: var WalkCtx): string =
+  ## RFC-0005 S8bx (item 3). Record the call's `cViewAliases` in the callee's
+  ## frame (just pushed), as `slot` address entries (`AddrCellEntry`,
+  ## `syncAddrCells`). Returns why the call declines, or "": the view's
+  ## formal is by value and not a scalar (Nim may pass it by address, so it
+  ## would see the table's writes: not modelled), or the key is unbound.
+  ## A by-value scalar view is a copy, and nothing relates it to the table.
+  ## A call made inside such a callee that passes both formals on carries
+  ## the pair into its own callee (Nim passes the one location on).
+  ## RFC-0005 S8cn: the entry's `path` is the field path from the Table's
+  ## formal to the Table, when an object holding it came. A call made on a
+  ## slot the key has left declines (`viewGonePrefix`: the callee would need
+  ## that state, and nothing passes it).
+  var pairs: seq[tuple[viewArg, tabArg: int; key: SymVal; path: seq[string]]]
+  for a in stmt.cViewAliases:
+    if a.viewArg >= sig.params.len or a.tabArg >= sig.params.len or
+       not callerEnv.hasKey(a.keyName):
+      return "and the walk does not bind the two"
+    pairs.add (viewArg: a.viewArg, tabArg: a.tabArg,
+               key: callerEnv[a.keyName],
+               path: (if a.tabField.len > 0: a.tabField.split('.')
+                      else: newSeq[string]()))
+  if w.frameStack.len > 0:
+    for a in w.frameStack[^1].addrCells:
+      if a.slot.len == 0: continue
+      var vi, ti = -1
+      var path = a.path
+      for i, arg in stmt.cargs:
+        if arg.kind == iekVar and arg.vname == a.local: vi = i
+        elif irFieldPath(arg) == a.slot:
+          ti = i
+        elif a.path.len > 0:
+          # The holder's Table passed on: a field `var` actual comes through
+          # a temporary (`cVarLocs`).
+          for l in stmt.cVarLocs:
+            if l.mode == "var" and l.root == a.slot and l.path == a.path and
+               arg.kind == iekVar and arg.vname == l.temp:
+              ti = i
+              path = @[]
+          if irFieldPath(arg) == a.slot & "." & a.path.join("."):
+            ti = i
+            path = @[]
+      if vi >= 0 and ti >= 0 and vi < sig.params.len and ti < sig.params.len:
+        if callerEnv.hasKey(viewGonePrefix & a.local):
+          return "on a slot its key has left"
+        pairs.add (viewArg: vi, tabArg: ti, key: a.ixs[0], path: path)
+  for a in pairs:
+    let vf = sig.params[a.viewArg]
+    if not vf.isVar:
+      if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
+      return "the view by value (not modelled for a " & $vf.ty.kind & ")"
+    var held = @[vf.name, sig.params[a.tabArg].name]
+    var heldShape = wsUnlisted
+    if bindsViewWholeShape(sig.body, held, heldShape):
+      return "a local or a `for` holding the whole of one (Nim may share its " &
+             "memory or copy it, by what its cursor inference proved) [" &
+             admitShape(rrViewWhole, heldShape).decline[1] & "]"
+    w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: a.path,
+                           ixs: @[a.key], bound: true, view: false,
+                           slot: sig.params[a.tabArg].name)
+  ""
+
+proc haltFrontier(w: var WalkCtx; pruned: int; where: string) =
+  ## The one `ckFrontier` site: `maxFrontierSize` dropped `pruned` live paths,
+  ## after a statement (`walkBlock`) or inside a k-unroll (`capLoopFrontier`).
+  w.halted(beBudgetExhaustedPrune,
+    "path-frontier cap (maxFrontierSize=" &
+         $w.settings.budget.maxFrontierSize & ") pruned " & $pruned &
+         " live path(s)" & where & " — their verdicts are unexplored " &
+         "(beBudgetExhaustedPrune)",
+    cap = ckFrontier)
+
+proc capLoopFrontier(paths: var seq[Path]; w: var WalkCtx) =
+  ## RFC-0016 K7 (CRH-01). `walkBlock` prunes `maxFrontierSize` only after a
+  ## statement, and one unrolled loop multiplies its live set inside it. Holds
+  ## a k-unroll's active and exit sets to the same nonzero cap: certain paths
+  ## kept before tainted ones, the overflow HALTED as `ckFrontier`
+  ## (`beBudgetExhaustedPrune`), so the run is `sxUnknown`.
+  let limit = w.settings.budget.maxFrontierSize
+  if limit <= 0 or paths.len <= limit: return
+  var kept: seq[Path]
+  for p in paths:
+    if p.taint == {} and kept.len < limit: kept.add p
+  for p in paths:
+    if p.taint != {} and kept.len < limit: kept.add p
+  haltFrontier(w, paths.len - kept.len, " of a while-loop k-unroll")
+  paths = kept
+
+include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
+
+# ---- The statement walkers `walkStmt` dispatches to (RFC-0016 INT-34 B1) -----
+# They call `walk` and `evalCondSynced`, so they sit above the expression
+# drains, with the statement arms.
+
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
@@ -19921,193 +20313,6 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Su
       survivors.add forkPathTainted(p, p.pc, p.env, d)
   exact(survivors)
 
-proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
-  ## RFC-0005 batch 6. The value of the receiver `name` a statement arm
-  ## updates in place (`xs[i] = v`, `xs.pop()`, `o.kind = k`), and the path
-  ## to continue on. A bound name is read from `Env`. An unbound one is read
-  ## as `lower` reads the name (`iekVar`): a module-level variable the walk
-  ## has not written yet is its ENTRY value (S8as `entryValueOf`, the path
-  ## tainted `feGlobalHavoc`), and anything else declines in-band. The arms
-  ## read `Env` directly before, so a global receiver not yet written
-  ## raised `KeyError` (the path was dropped: a false `sxUnsat`) or skipped
-  ## the statement (its `FieldDefect` was never forked).
-  ##
-  ## RFC-0005 S8cd: the receiver is read as one, not observed. An untouched
-  ## unwritten part (a field the statement does not reach, an element it
-  ## overwrites) does not taint the path; each arm observes the parts it
-  ## reads (`observeRecvPart`, `unwrittenDisc`). And a global of a known type
-  ## is read at that type (`vGlobalTy`, as a parsed read carries).
-  if p.env.hasKey(name): return (p.env[name], p)
-  let recv = mkVar(name)
-  if w.statics.globals.hasKey(name):
-    recv.vGlobalTy = w.statics.globals[name].ty
-  lowerAsReceiver = true
-  lowerInExpr(p, recv, w)
-
-const viewGrownPrefix = "__viewGrown#"
-  ## RFC-0005 S8cn. On a callee's path, the condition that a key was added to
-  ## the Table of a `slot` entry: a write to the view past it may be lost to a
-  ## rehash, by a capacity that is not modelled.
-const viewGonePrefix = "__viewGone#"
-  ## RFC-0005 S8cn. Set on a callee's path where the key of a `slot` entry was
-  ## removed and the slot is empty (`syncAddrCells`).
-
-func irFieldPath(e: IRExpr): string =
-  ## RFC-0005 S8cn. `e` as a location path (`t`, `o.tab`), or "".
-  if e == nil: return ""
-  case e.kind
-  of iekVar: e.vname
-  of iekField:
-    let r = irFieldPath(e.obj)
-    if r.len == 0: "" else: r & "." & e.fieldName
-  else: ""
-
-func exprLocRoot(e: IRExpr): string =
-  ## RFC-0005 S8cn. The variable the location `e` is a path into, or "".
-  if e == nil: return ""
-  case e.kind
-  of iekVar: e.vname
-  of iekField: exprLocRoot(e.obj)
-  of iekIndex: exprLocRoot(e.arr)
-  else: ""
-
-proc bindsViewWholeShape(s: IRStmt; names: var seq[string];
-                         sh: var WriteShape): bool =
-  ## RFC-0005 S8cn. `s` holds the memory of one of `names` in a way the walk
-  ## takes for a copy. A local bound to a whole seq, Table or string: Nim's
-  ## cursor inference (ARC/ORC) shares the memory when the local is never
-  ## mutated (`let c = t`), and copies when it is, so whether a write through
-  ## the other formal is seen through the local depends on what the compiler
-  ## proved. A loop over one: `items` and `values` yield `lent`, so the loop
-  ## variable reads the element live.
-  if s == nil: return false
-  case s.kind
-  of isBlock:
-    for c in s.stmts:
-      if bindsViewWholeShape(c, names, sh): return true
-  of isIf:
-    for b in s.branches:
-      if bindsViewWholeShape(b.body, names, sh): return true
-    return bindsViewWholeShape(s.elseBody, names, sh)
-  of isWhile:
-    return bindsViewWholeShape(s.wbody, names, sh)
-  of isTry:
-    if bindsViewWholeShape(s.tryBody, names, sh): return true
-    for h in s.tryHandlers:
-      if bindsViewWholeShape(h.body, names, sh): return true
-    return bindsViewWholeShape(s.tryFinally, names, sh)
-  of isLet:
-    # A synthetic `let` is the walk's own (a `var` actual's temporary).
-    if s.lty == nil or s.lname.startsWith("__sym_"): return false
-    if s.lty.kind in {itInt, itBool, itFloat32, itFloat64}:
-      # A scalar binding holds no memory of the container. The route lets it
-      # through; the table says which decline this shape's verdict carries.
-      sh = wsScalarRead
-      return routeDeclines(rrViewWhole, sh)
-    if s.lvalue != nil and s.lvalue.kind == iekTupleLit:
-      sh = wsTupleCopy   # a constructor copies what it is given
-      return routeDeclines(rrViewWhole, sh)
-    if exprLocRoot(s.lvalue) in names:
-      sh = wsVarCopy
-      return routeDeclines(rrViewWhole, sh)
-    return false
-  of isIndex:
-    if exprLocRoot(s.ixArr) in names:
-      if s.ixRetName.startsWith("__sym_fs_"):   # the `for` lowering
-        sh = wsLentLoop
-        return routeDeclines(rrViewWhole, sh)
-      if s.ixElemTy != nil and
-         s.ixElemTy.kind notin {itInt, itBool, itFloat32, itFloat64}:
-        names.add s.ixRetName
-  of isTabKeys:
-    if exprLocRoot(s.tkRecv) in names:
-      sh = wsLentLoop
-      return routeDeclines(rrViewWhole, sh)
-  # RFC-0016 K6c (W-10). No `else`: a statement kind is listed here as one that
-  # binds no view of a container's memory, so a kind added to `IRStmtKind` does
-  # not compile until its author decides (the fail-open `else: discard` this
-  # replaced let a new binder through as "holds nothing").
-  of isAssign, isBreak, isContinue, isReturn, isAssert, isAssume,
-     isCall, isVariantField, isVariantReassign, isVariantReassignSymbolic,
-     isVariantConstructSym, isIndexAssign, isSeqPop, isTargetLabel, isRaise,
-     isDeref, isNew, isDerefWrite, isUnsupported, isUnsafeCast, isSetLen,
-     isUndefined:
-    discard
-  false
-
-proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
-                     w: var WalkCtx): string =
-  ## RFC-0005 S8bx (item 3). Record the call's `cViewAliases` in the callee's
-  ## frame (just pushed), as `slot` address entries (`AddrCellEntry`,
-  ## `syncAddrCells`). Returns why the call declines, or "": the view's
-  ## formal is by value and not a scalar (Nim may pass it by address, so it
-  ## would see the table's writes: not modelled), or the key is unbound.
-  ## A by-value scalar view is a copy, and nothing relates it to the table.
-  ## A call made inside such a callee that passes both formals on carries
-  ## the pair into its own callee (Nim passes the one location on).
-  ## RFC-0005 S8cn: the entry's `path` is the field path from the Table's
-  ## formal to the Table, when an object holding it came. A call made on a
-  ## slot the key has left declines (`viewGonePrefix`: the callee would need
-  ## that state, and nothing passes it).
-  var pairs: seq[tuple[viewArg, tabArg: int; key: SymVal; path: seq[string]]]
-  for a in stmt.cViewAliases:
-    if a.viewArg >= sig.params.len or a.tabArg >= sig.params.len or
-       not callerEnv.hasKey(a.keyName):
-      return "and the walk does not bind the two"
-    pairs.add (viewArg: a.viewArg, tabArg: a.tabArg,
-               key: callerEnv[a.keyName],
-               path: (if a.tabField.len > 0: a.tabField.split('.')
-                      else: newSeq[string]()))
-  if w.frameStack.len > 0:
-    for a in w.frameStack[^1].addrCells:
-      if a.slot.len == 0: continue
-      var vi, ti = -1
-      var path = a.path
-      for i, arg in stmt.cargs:
-        if arg.kind == iekVar and arg.vname == a.local: vi = i
-        elif irFieldPath(arg) == a.slot:
-          ti = i
-        elif a.path.len > 0:
-          # The holder's Table passed on: a field `var` actual comes through
-          # a temporary (`cVarLocs`).
-          for l in stmt.cVarLocs:
-            if l.mode == "var" and l.root == a.slot and l.path == a.path and
-               arg.kind == iekVar and arg.vname == l.temp:
-              ti = i
-              path = @[]
-          if irFieldPath(arg) == a.slot & "." & a.path.join("."):
-            ti = i
-            path = @[]
-      if vi >= 0 and ti >= 0 and vi < sig.params.len and ti < sig.params.len:
-        if callerEnv.hasKey(viewGonePrefix & a.local):
-          return "on a slot its key has left"
-        pairs.add (viewArg: vi, tabArg: ti, key: a.ixs[0], path: path)
-  for a in pairs:
-    let vf = sig.params[a.viewArg]
-    if not vf.isVar:
-      if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
-      return "the view by value (not modelled for a " & $vf.ty.kind & ")"
-    var held = @[vf.name, sig.params[a.tabArg].name]
-    var heldShape = wsUnlisted
-    if bindsViewWholeShape(sig.body, held, heldShape):
-      return "a local or a `for` holding the whole of one (Nim may share its " &
-             "memory or copy it, by what its cursor inference proved) [" &
-             admitShape(rrViewWhole, heldShape).decline[1] & "]"
-    w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: a.path,
-                           ixs: @[a.key], bound: true, view: false,
-                           slot: sig.params[a.tabArg].name)
-  ""
-
-proc haltFrontier(w: var WalkCtx; pruned: int; where: string) =
-  ## The one `ckFrontier` site: `maxFrontierSize` dropped `pruned` live paths,
-  ## after a statement (`walkBlock`) or inside a k-unroll (`capLoopFrontier`).
-  w.halted(beBudgetExhaustedPrune,
-    "path-frontier cap (maxFrontierSize=" &
-         $w.settings.budget.maxFrontierSize & ") pruned " & $pruned &
-         " live path(s)" & where & " — their verdicts are unexplored " &
-         "(beBudgetExhaustedPrune)",
-    cap = ckFrontier)
-
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
@@ -20148,24 +20353,6 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
       # discarded (pinned in `tsymex_rfc0005_s6a_budget.nim`).
       haltFrontier(w, result.len - kept.len, "")
       result = kept
-
-proc capLoopFrontier(paths: var seq[Path]; w: var WalkCtx) =
-  ## RFC-0016 K7 (CRH-01). `walkBlock` prunes `maxFrontierSize` only after a
-  ## statement, and one unrolled loop multiplies its live set inside it. Holds
-  ## a k-unroll's active and exit sets to the same nonzero cap: certain paths
-  ## kept before tainted ones, the overflow HALTED as `ckFrontier`
-  ## (`beBudgetExhaustedPrune`), so the run is `sxUnknown`.
-  let limit = w.settings.budget.maxFrontierSize
-  if limit <= 0 or paths.len <= limit: return
-  var kept: seq[Path]
-  for p in paths:
-    if p.taint == {} and kept.len < limit: kept.add p
-  for p in paths:
-    if p.taint != {} and kept.len < limit: kept.add p
-  haltFrontier(w, paths.len - kept.len, " of a while-loop k-unroll")
-  paths = kept
-
-include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
 
 func addrPartName(formal: string): string =
   ## RFC-0005 S8bu. The callee-frame local an `addr` actual into an
@@ -25306,24 +25493,6 @@ proc strayClaimProbe*(): StrayClaimProbe =
   currentLowerSinks = savedSinks
   restorePending(savedPending)
 
-proc haltExcludedDefect(p: Path, typeId: string, w: var WalkCtx) =
-  ## RFC-0016 K7b (W-16). A `Defect` raise that reaches the SUT boundary
-  ## while its `DefectKind` is in `settings.defectExclusions` ends its path
-  ## with no finding (the user excluded it). The omission is now recorded
-  ## (`feDefectExcluded`, `dcOmitted`: run `{scIncomplete}`), so a search
-  ## the excluded raise could have answered is `sxUnknown`, never a trusted
-  ## `sxUnsat`. A path no execution takes, or one a concrete witness's
-  ## inputs rule out, is not reached and records nothing.
-  if pathInfeasible(w.z3, p, w.settings): return
-  if w.mode == wmFollowConcrete and
-     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
-                          w.settings):
-    return
-  w.halted(feDefectExcluded,
-    "a raise of `" & typeId & "` is excluded by `defectExclusions` (" &
-    $typeIdToDefectKind(typeId) & "): the path ends here with no finding, " &
-    "so a search it could have answered is not decided")
-
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =
   ## Phase 15 E3. Route a raise on path `p` carrying `typeId`/`msg`. This is the
@@ -25574,175 +25743,6 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
     of sxUnsat:   discard
     of sxRaised:  discard   ## trySolve never returns sxRaised
   @[]
-
-proc crashRaise(p: Path, typeId: string, w: var WalkCtx) =
-  ## RFC-0005 S8cu. A raise no handler and no `finally` sees: a nil dereference,
-  ## which natively is a SIGSEGV (rc 139) that ends the process on the pinned Nim
-  ## 2.2.10, by default, with `--panics:on`, `-d:danger`, clang and the cpp
-  ## backend, under `except NilAccessDefect`, `except Defect` and a bare
-  ## `finally`. `std/segfaults` does not change that with the default goto
-  ## exceptions (its handler recurses to the call depth limit, rc 1, or hangs
-  ## in a release build), nor with `--exceptions:cpp`; with
-  ## `--exceptions:setjmp` it makes the raise catchable and runs the `finally`.
-  ## So in a setjmp build a dereference under any `try` declines
-  ## (`heNilDerefMayBeCaught`). In every other build the crash leaves each
-  ## frame by the channel an escaping raise takes (`escaped`, marked `crash`,
-  ## so the caller's drain re-routes it here), since the callee's or closure
-  ## body's path holds only its own facts and the drain joins the caller's;
-  ## it ends as a finding at the SUT boundary. Before S8cu it was routed as an
-  ## ordinary raise: a label in `except NilAccessDefect` was a false sxSat and
-  ## `tNilAccess` a false sxUnsat.
-  when buildSemantics.exceptions == exSetjmp:
-    var guarded = w.frame.handlerStack.len > 0
-    for f in w.frameStack:
-      if f.handlerStack.len > 0: guarded = true
-    if guarded:
-      if not pathInfeasible(w.z3, p, w.settings):
-        w.halted(heNilDerefMayBeCaught,
-          "a nil dereference under a `try` in a build with " &
-          "`--exceptions:setjmp`, where `std/segfaults` would make it a " &
-          "catchable `" & typeId & "` and run the `finally`: what follows is " &
-          "not known -- path degraded to sxUnknown (heNilDerefMayBeCaught)")
-      return
-  if w.frameStack.len > 0:
-    w.frame.exits.escaped.park(EscapedRaise(path: p, typeId: typeId,
-                                               msg: none(string), crash: true))
-    return
-  if w.mode == wmFollowConcrete and
-     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
-                          w.settings):
-    return
-  if typeIdToDefectKind(typeId) in w.settings.defectExclusions:
-    haltExcludedDefect(p, typeId, w)   ## RFC-0016 K7b (W-16)
-    return
-  let (st, wit, candErrs, why) = solveTargetHit(w, p)
-  case st
-  of sxSat:
-    let iv = InternalVerdict(kind: ivRaised, raisedTypeId: typeId,
-                             raisedMsg: none(string), raisedWitness: wit,
-                             raisedIsDefect: true)
-    var r = toPublic(iv)
-    r.soundness.pathTaint = p.taint
-    r.soundness.witnessUndefined = ubOrdinals(p.undefined)
-    r.undefinedViaOnly = ubOrdinals(p.undefinedViaOnly)   # W3-z R7
-    r.nilDerefOnPath = p.nilDeref
-    # RFC-0016 W1-c2: the witness ends the process wherever it runs, so no
-    # consumer runs it in the host (`hostRunnable`).
-    r.soundness.witnessUnsafe = true
-    r.errors.add candErrs
-    w.admitSolvedHit(r)
-  of sxUnknown:
-    w.halted(beSolverUndef,
-      "solver returned unknown on a path raising `" & typeId &
-           "` (queryRLimit=" & $w.settings.budget.queryRLimit &
-           "): " & why & " (beSolverUndef)")
-  of sxUnsat, sxRaised: discard
-
-proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind]) =
-  ## RFC-0016 W3-z R1 (finding U3). A `{.noinit.}` read does not halt: it rides
-  ## the path as `ub` on a `feGlobalHavoc` degrade, so `haltUndefined`, the only
-  ## other hit test, never saw it and `tUndefined` returned a trusted `sxUnsat`
-  ## over a reachable indeterminate read. Every fork that newly puts a kind of
-  ## the requested set on a path comes here (`forkPathTainted`, `taintInPlace`;
-  ## a kind already on the parent was tested where it arrived): the hit is
-  ## solved on the child's constraints. The finding's taint is the PARENT's:
-  ## the degrade that carries the kind is the finding itself, not a reason to
-  ## doubt it, so it does not turn the hit into a replay-only candidate.
-  ## Unlike `haltUndefined` the path continues: the read is not a halt.
-  ##
-  ## RFC-0016 0.10.0 review H2. On the tail walk (`tailGate`) the kinds are
-  ## what the run is not shown defined in: a child the pins do not rule out
-  ## records them in `WalkCtx.tailUb`, which `verifyTailDefinedKinds` reads.
-  ## Before, the tail walk returned here and the read was a trusted `sxSat`.
-  if newUb == {} or currentWalkCtxPtr == nil: return
-  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-  if wp[].tailGate:
-    if newUb - wp[].tailUb != {} and
-       not concretelyInfeasible(wp[].z3, wp[].concreteEq,
-                                child.pc & child.defectSurvivorPc,
-                                wp[].settings):
-      wp[].tailUb.incl newUb
-    return
-  if wp[].target.kind != stkUndefined or wp[].shouldStop:
-    return
-  if newUb * wp[].target.ubKinds == {}: return
-  if wp[].mode == wmFollowConcrete and
-     concretelyInfeasible(wp[].z3, wp[].concreteEq,
-                          child.pc & child.defectSurvivorPc, wp[].settings):
-    return
-  let solveOn = if closureBodyCallerPc.len == 0: child
-                else: forkPath(child, closureBodyCallerPc & child.pc, child.env)
-  let (st, wit, candErrs, why) = solveTargetHit(wp[], solveOn)
-  case st
-  of sxSat:
-    wp[].admitSolvedHit(RawResult(status: sxSat, witness: wit,
-      soundness: Soundness(pathTaint: parentTaint,
-                           witnessUndefined: ubOrdinals(child.undefined)),
-      nilDerefOnPath: child.nilDeref, errors: candErrs))
-  of sxUnknown:
-    wp[].halted(beSolverUndef,
-      "solver returned unknown on a path reading an indeterminate value: " &
-      why & " (beSolverUndef)")
-  of sxUnsat, sxRaised: discard
-
-proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
-                   w: var WalkCtx) =
-  ## RFC-0016 W1-d1a (section 9.1 item 2). The undefined side of an op, when
-  ## it is not provably unreachable: a TERMINAL path that leaves through the
-  ## crash channel's end (no `escaped` parking), never `routeRaise`, whose
-  ## handler search would let a bare `except:`, an `except DivByZeroDefect:` or
-  ## a `finally` consume it. So: no setjmp arm (nothing recovers an undefined
-  ## operation), no `defectExclusions` check (it is not a Defect), and a
-  ## `degrade` halt of the op's `UbKind` (`dcOmitted`: run coordinate
-  ## `{scIncomplete}`, which keeps `sxUnsat` from being trusted) in place of a
-  ## finding. `p` is the path BEFORE the op; `cond` is the undefined side.
-  ## In concrete-follow mode a side the witness's inputs rule out is not
-  ## reached and records nothing.
-  if w.mode == wmFollowConcrete and
-     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc & @[cond],
-                          w.settings):
-    return
-  # RFC-0016 K10a-target (section 9.1 item 5): the side is also a FINDING. Under
-  # `tUndefined` a listed kind is the target's hit (a winner, solved on the
-  # path with the undefined side's condition); under any other target it is
-  # listed on `SymexResult.undefined` (clean paths only, a bounded number).
-  # The path ends either way: nothing past the op is modelled.
-  let tgt = w.target
-  let isHit = tgt.kind == stkUndefined and kind in tgt.ubKinds
-  # RFC-0016 K10b: the whole-run gate's second walk reads only the halt, so
-  # it lists nothing (the solve for a witness would run unpinned).
-  var listIt = tgt.kind != stkUndefined and scSpurious notin p.taint and
-               w.undefinedFound.len < maxUndefinedFindings and not w.tailGate
-  for u in w.undefinedFound:
-    if u.kind == kind and u.site == site: listIt = false   # one per op
-  if (isHit and not w.shouldStop) or listIt:
-    let atOp = forkPath(p, p.pc & @[cond], p.env)
-    let solveOn = if closureBodyCallerPc.len == 0: atOp
-                  else: forkPath(atOp, closureBodyCallerPc & atOp.pc, atOp.env)
-    let (st, wit, candErrs, why) = solveTargetHit(w, solveOn)
-    case st
-    of sxSat:
-      if isHit:
-        w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
-          soundness: Soundness(pathTaint: p.taint,
-                               witnessUndefined: ubOrdinals(p.undefined + {kind})),
-          nilDerefOnPath: p.nilDeref, errors: candErrs))
-      else:
-        w.undefinedFound.add RawUndefined(kind: kind, site: site, witness: wit)
-    of sxUnknown:
-      if isHit:
-        w.halted(beSolverUndef,
-          "solver returned unknown on a path reaching " & $kind & " at " &
-          site & ": " & why & " (beSolverUndef)")
-    of sxUnsat, sxRaised: discard
-  let next =
-    if tgt.kind == stkUndefined: ""
-    else: "; query `tUndefined()` to ask for an input that reaches it"
-  w.halted(kind,
-    "undefined behaviour at " & site & " (" & $kind & "): the path ends " &
-    "here, what follows is not modelled" & next &
-    # RFC-0016 K10c: what the verdict assumes of the C flags nelli cannot see.
-    "; " & bprof.assumedAbsentNote())
 
 proc noteOpaqueUndefined(w: var WalkCtx; paths: seq[Path];
                          stmt: IRStmt): seq[Path] =

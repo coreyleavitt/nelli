@@ -1447,7 +1447,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## bound, field, object or overflow checks is walked under that scope
     ## instead of declining `feCheckOption`): 472->473.
     ## RFC-0016 int6-a2 (a check pragma under `when defined(x)` is decided at
-    ## the entry's call site): 473->474.
+    ## the entry's call site; int6-a6, in the same version: a push leaked
+    ## through the import that first compiles a module is that module's
+    ## position state, the compile order replayed): 473->474.
     check symexWalkerVersion == "474"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

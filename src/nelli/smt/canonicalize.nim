@@ -1454,8 +1454,12 @@ const renderAsChoicesVersion* = "12"
   ##   (`not`, `and`, `or` of such) at a position the walk reads is decided
   ##   as compiled: the entry macro has its call site evaluate each `x` and
   ##   expands again, where the position was read both ways and declined
-  ##   `feCheckOption` (float checks included). Key bytes change: such a
-  ##   body's scope, stamp and digest.
+  ##   `feCheckOption` (float checks included). It covers int6-a6 too: a
+  ##   push open at the import that first compiles a user module (Nim's
+  ##   compile order, replayed from the project file) is that module's
+  ##   position state, walked as such, where it was a leak that declined
+  ##   `feCheckOption`; a stdlib module compiled before the push is not
+  ##   reached. Key bytes change: such a body's scope, stamp and digest.
 
 const symexWalkerVersion* = "474"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

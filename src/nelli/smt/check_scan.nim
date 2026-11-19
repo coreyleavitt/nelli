@@ -87,6 +87,22 @@ type
                               ## into `parsedAsts` (`scannedAst`) and
                               ## `parsedShapes` (`textDisagrees`); -1 for none
 
+  CompileEvent* = object
+    ## RFC-0016 int6-a6. A module-level statement that may compile another
+    ## module, in text order: an import, or a call (`call`), which a text
+    ## scan cannot tell from a macro or template expanding to an import.
+    targets*: seq[string]
+      ## per module the import names: a user module's path (as `imports`
+      ## holds it), `lib:<path>` for a library module found on disk,
+      ## `lib?:<name>` for a `std/`/`system/` one not found, `?<name>` for a
+      ## name the scan cannot place
+    st*: CheckState           ## the state at the statement
+    uncertain*: bool          ## under a `when` the scan did not decide, or in
+                              ## a module read in several worlds
+    call*: bool
+    file*: string
+    line*: int
+
   ModuleScan* = object
     visits: seq[ScanVisit]
     unknown*: string          ## why a part of the module could not be read
@@ -100,6 +116,9 @@ type
       ## RFC-0016 int6-a2. The names `x` of the `defined(x)` the scan could not
       ## decide (absent from `SourceEnv.defines`) in a `when` that moves the
       ## check state: deciding them may make a position exact.
+    events*: seq[CompileEvent]
+      ## RFC-0016 int6-a6. What the module may compile, in order: the import
+      ## graph's edges as Nim walks them (`check_options` replays them).
 
   Scanner = object
     res: ModuleScan
@@ -117,6 +136,9 @@ type
     candOpen: bool            ## a call before a hidden pop may have pushed
     candSaved: CheckState
     env: SourceEnv            ## where an included or imported file is found and read
+    undecided: int            ## RFC-0016 int6-a6: depth under undecided `when`s
+    nested: int               ## RFC-0016 int6-a6: depth under a block, loop or
+                              ## branch, where no import can stand
 
 const
   defaultOn* = {coField, coOverflow, coRange, coBound, coObj}
@@ -527,8 +549,31 @@ proc importPathOf(n: NimNode): string =
   else:
     unlistedImport
 
-proc recordImports(sc: var Scanner; n: NimNode) =
-  ## The user modules this file imports, for the import graph.
+const stdlibDirs = ["pure", "core", "arch", "pure/collections",
+                    "pure/concurrency", "pure/unidecode", "impure", "wrappers",
+                    "wrappers/linenoise", "windows", "posix", "js",
+                    "deprecated/pure", "std"]
+  ## RFC-0016 int6-a6. Where the compiler looks for `std/x` under `lib/`
+  ## (its `stdlibDirs`, then `lib/std` by the search paths).
+
+proc libTarget(env: SourceEnv; rel: string): string =
+  ## RFC-0016 int6-a6. A `std/x` or `system/x` import as a compile-event
+  ## target: `lib:<path>` where it is found under `libDir`, else `lib?:rel`.
+  let name = if rel.endsWith(".nim"): rel else: rel & ".nim"
+  if env.libDir.len > 0:
+    if rel.startsWith("system/"):
+      let cand = env.libDir.joined(name)
+      if env.exists(cand): return "lib:" & normalPath(cand)
+    else:
+      let tail = name[4 .. ^1]
+      for d in stdlibDirs:
+        let cand = env.libDir.joined(d).joined(tail)
+        if env.exists(cand): return "lib:" & normalPath(cand)
+  "lib?:" & rel
+
+proc recordImports(sc: var Scanner; n: NimNode): seq[string] =
+  ## The user modules this file imports, for the import graph. Returns each
+  ## module the statement names as a compile-event target (`CompileEvent`).
   var rels: seq[string]
   if n.kind == nnkImportStmt:
     for c in n:
@@ -540,6 +585,7 @@ proc recordImports(sc: var Scanner; n: NimNode) =
         for b in c[2]:
           let tail = includePathOf(b)
           if head.len > 0 and tail.len > 0: rels.add head & "/" & tail
+          else: rels.add ""   # int6-a6: a name not placed is a `?` target
       else:
         rels.add importPathOf(c)
   elif n.len > 0:
@@ -551,8 +597,14 @@ proc recordImports(sc: var Scanner; n: NimNode) =
       # would reach is not read, so the module's options are unknown.
       if sc.res.unknown.len == 0:
         sc.res.unknown = "an import whose module cannot be named: `" & n.repr & "`"
+      result.add "?"
       continue
-    if rel.len == 0 or rel.startsWith("std/") or rel.startsWith("system/"): continue
+    if rel.len == 0:
+      result.add "?"
+      continue
+    if rel.startsWith("std/") or rel.startsWith("system/"):
+      result.add libTarget(sc.env, rel)
+      continue
     let name = if rel.endsWith(".nim"): rel else: rel & ".nim"
     var found = ""
     if sc.env.exists(dir.joined(name)): found = dir.joined(name)
@@ -564,8 +616,20 @@ proc recordImports(sc: var Scanner; n: NimNode) =
     # Kept as found if it cannot be anchored: reading it then fails closed.
     if found.len > 0 and sc.env.anchor(found).len > 0:
       found = sc.env.anchor(found)
-    if found.len > 0 and not isLibraryFile(found, sc.env.libDir) and found notin sc.res.imports:
-      sc.res.imports.add found
+    if found.len == 0:
+      result.add "?" & rel
+    elif isLibraryFile(found, sc.env.libDir):
+      result.add "lib:" & normalPath(found)
+    else:
+      result.add found
+      if found notin sc.res.imports: sc.res.imports.add found
+
+proc addCompileEvent(sc: var Scanner; n: NimNode; targets: seq[string];
+                     call: bool) =
+  ## RFC-0016 int6-a6. A statement that may compile a module, in text order.
+  sc.res.events.add CompileEvent(targets: targets,
+    st: merge(sc.cur, sc.hidden), uncertain: sc.undecided > 0, call: call,
+    file: sc.res.visits[sc.visit].file, line: n.lineInfoObj.line)
 
 proc walkWhen(sc: var Scanner; n: NimNode) =
   var alts: seq[NimNode]
@@ -601,6 +665,7 @@ proc walkWhen(sc: var Scanner; n: NimNode) =
   var joined = if exhaustive: CheckState() else: savedCur
   var stackJoin = savedStack
   var ambiguous = sc.ambiguous
+  inc sc.undecided   # int6-a6: an import here may not be compiled
   for alt in alts:
     sc.cur = savedCur
     sc.stack = savedStack
@@ -615,6 +680,7 @@ proc walkWhen(sc: var Scanner; n: NimNode) =
       for i in stackJoin.len ..< grown.len: stackJoin.add grown[i]
     else:
       for i in 0 ..< sc.stack.len: stackJoin[i] = merge(stackJoin[i], sc.stack[i])
+  dec sc.undecided
   sc.cur = joined
   sc.stack = stackJoin
   sc.ambiguous = ambiguous
@@ -642,12 +708,15 @@ proc walk(sc: var Scanner; n: NimNode) =
     for c in n: scanInclude(sc, c)
   of nnkImportStmt, nnkImportExceptStmt, nnkFromStmt:
     noteImport(sc, n)
-    recordImports(sc, n)
+    let targets = recordImports(sc, n)
+    addCompileEvent(sc, n, targets, call = false)
   of nnkCall, nnkCommand, nnkCallStrLit, nnkIdent, nnkSym, nnkAccQuoted,
      nnkDotExpr, nnkInfix, nnkPrefix, nnkPostfix, nnkBracketExpr:
     # A call statement before a pop the scan cannot match may be what pushed.
     # RFC-0016 K2F-3: so may a call spelled without parentheses (`pushOff`,
     # `x.pushOff`, an operator), which the scan skipped.
+    # RFC-0016 int6-a6: at the module's level, the call may also import.
+    if sc.nested == 0: addCompileEvent(sc, n, @[], call = true)
     if not sc.candOpen:
       let li = n.lineInfoObj
       let file = sc.res.visits[sc.visit].file
@@ -665,7 +734,11 @@ proc walk(sc: var Scanner; n: NimNode) =
     if sc.hidden != before: sc.pending = true
   of nnkBlockStmt, nnkIfStmt, nnkElifBranch, nnkElse, nnkTryStmt, nnkExceptBranch,
      nnkFinally, nnkForStmt, nnkWhileStmt, nnkCaseStmt, nnkOfBranch, nnkStaticStmt:
+    # int6-a6: an import stands at a module's level only; a call in here
+    # (a condition included) imports nothing.
+    inc sc.nested
     for c in n: walk(sc, c)
+    dec sc.nested
   of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkConverterDef, nnkMethodDef,
      nnkTypeSection, nnkVarSection, nnkLetSection, nnkConstSection,
      nnkCommentStmt, nnkEmpty, nnkDiscardStmt, nnkAsgn, nnkExportStmt,
@@ -681,7 +754,9 @@ proc walk(sc: var Scanner; n: NimNode) =
     # An expression (a condition, a loop's range, a pattern) pushes nothing.
     discard
   of nnkBlockExpr:
+    inc sc.nested
     for c in n: walk(sc, c)
+    dec sc.nested
   of nnkPragmaBlock:
     # RFC-0016 K2F-3: `{.cast(gcsafe).}: ...` runs its body here; a check
     # option on the block itself holds for the block only, which this scan
@@ -709,45 +784,54 @@ const maxForkConds = 4
   ## join in one reading, where a pop below them leaves both states.
 
 proc scanWorld(env: SourceEnv; path, text: string;
-               assume: Table[string, bool]): Scanner =
+               assume: Table[string, bool]; start: CheckState): Scanner =
   ## Read twice where a pop matched no push: the second reading knows where.
-  result = Scanner(cur: commandLineChecks, assume: assume, env: env)
-  result.res.everything = commandLineChecks
+  result = Scanner(cur: start, assume: assume, env: env)
+  result.res.everything = start
   scanFile(result, path, text)
   if result.res.hiddenPops.len > 0:
     let pops = result.res.hiddenPops
-    result = Scanner(cur: commandLineChecks, assume: assume, knownPops: pops,
-                     env: env)
-    result.res.everything = commandLineChecks
+    result = Scanner(cur: start, assume: assume, knownPops: pops, env: env)
+    result.res.everything = start
     scanFile(result, path, text)
 
-proc scanModuleText*(path, text: string; env: SourceEnv): ModuleScan =
+proc scanModuleText*(path, text: string; env: SourceEnv;
+                     start = commandLineChecks): ModuleScan =
   ## The scan of a module whose text is at hand. An `include` is read through
-  ## `env`.
-  let first = scanWorld(env, path, text, initTable[string, bool]())
+  ## `env`. RFC-0016 int6-a6: `start` is the state the module is compiled
+  ## from: the command line's, or the state at the import that first
+  ## compiles it (a push open there reaches it).
+  let first = scanWorld(env, path, text, initTable[string, bool](), start)
   if first.forkConds.len == 0: return first.res
   let k = min(first.forkConds.len, maxForkConds)
-  result.everything = commandLineChecks
+  result.everything = start
   for mask in 0 ..< (1 shl k):
     var assume = initTable[string, bool]()
     for i in 0 ..< k: assume[first.forkConds[i]] = (mask and (1 shl i)) != 0
-    let w = scanWorld(env, path, text, assume)
+    let w = scanWorld(env, path, text, assume, start)
     result.visits.add w.res.visits
     result.everything = merge(result.everything, w.res.everything)
     result.importLeak.add w.res.importLeak
+    # int6-a6: which world was compiled is not known, so neither is what
+    # each world's statements compile.
+    for e in w.res.events:
+      var u = e
+      u.uncertain = true
+      result.events.add u
     for a in w.res.undecidedDefines:
       if a notin result.undecidedDefines: result.undecidedDefines.add a
     for i in w.res.imports:
       if i notin result.imports: result.imports.add i
     if result.unknown.len == 0: result.unknown = w.res.unknown
 
-proc scanModule*(path: string; env: SourceEnv): ModuleScan =
+proc scanModule*(path: string; env: SourceEnv;
+                 start = commandLineChecks): ModuleScan =
   var text: string
   let why = readSource(env, path, text)
   if why.len > 0:
     result.unknown = why
     return
-  scanModuleText(path, text, env)
+  scanModuleText(path, text, env, start)
 
 proc stateAt*(m: ModuleScan; file: string; line, col: int): CheckState =
   ## The options at a position. A position inside a template or a macro is where

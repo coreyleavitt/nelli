@@ -4913,10 +4913,32 @@ proc deadReadDecline(ctx: ParseCtx; derefs: seq[NimNode]): IRStmt =
 
 proc typeIsLent(ty: NimNode): bool  ## RFC-0005 S8cq fwd decl
 
+proc calleeReturnSpelling(n: NimNode): NimNode =
+  ## RFC-0016 INT-92c. The return type `n`'s callee symbol declares (an
+  ## `nnkEmpty` for none), read off the symbol's own signature; nil when the
+  ## callee is no symbol of a routine type. A call node need not carry a
+  ## type: semcheck spells `wasMoved(x)` as a call of the type's generated
+  ## `=wasMoved` hook with none, and `getTypeInst` on such a node stops the
+  ## whole compile ("node has no type"; its `typeKind` is not even reliable,
+  ## see `isBitwiseAndOr`). A resolved routine symbol always has its type.
+  if n.kind notin {nnkCall, nnkCommand, nnkInfix, nnkPrefix} or n.len == 0 or
+     n[0].kind != nnkSym:
+    return nil
+  let t = n[0].getTypeInst
+  if t.kind != nnkProcTy or t.len == 0 or t[0].kind != nnkFormalParams or
+     t[0].len == 0:
+    return nil
+  t[0][0]
+
 proc isViewCall(n: NimNode): bool =
-  ## RFC-0016 INT-89. `n` is a call returning `var T` or `lent T`.
-  n.kind in {nnkCall, nnkCommand} and n.len > 0 and
-    (n.typeKind == ntyVar or typeIsLent(n.getTypeInst))
+  ## RFC-0016 INT-89. `n` is a call returning `var T` or `lent T`. A call of
+  ## a routine symbol is read off the symbol's signature
+  ## (`calleeReturnSpelling`: the call node may have no type).
+  if n.kind notin {nnkCall, nnkCommand} or n.len == 0: return false
+  if n[0].kind == nnkSym:
+    let ret = calleeReturnSpelling(n)
+    return ret != nil and (ret.kind == nnkVarTy or typeIsLent(ret))
+  n.typeKind == ntyVar or typeIsLent(n.getTypeInst)
 
 proc viewAddrExpr(ctx: ParseCtx; call: NimNode; preamble: var seq[IRStmt];
                   dead = false): IRExpr =
@@ -5114,7 +5136,12 @@ proc deadResultCall(call: NimNode; live: seq[string] = @[]): bool =
   ## value (not a view; an object, when only its fields `live` are read),
   ## that `deadResultCandidate` admits: its result, when nothing reads it,
   ## is the `#resultdead` registration's.
-  if not userRoutineCall(call) or isViewCall(call) or
+  ## A callee declaring no return type has no value to drop: decided off
+  ## its signature (`calleeReturnSpelling`), as a hook call has no type.
+  if not userRoutineCall(call) or isViewCall(call): return false
+  let ret = calleeReturnSpelling(call)
+  if ret == nil or ret.kind == nnkEmpty or
+     ret.kind in {nnkSym, nnkIdent} and eqIdent(ret, "void") or
      call.typeKind in {ntyNone, ntyEmpty} or
      live.len > 0 and call.typeKind != ntyObject:
     return false

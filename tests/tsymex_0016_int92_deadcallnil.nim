@@ -325,6 +325,43 @@ proc discardOuterRdSome(p: ref B) =
     discard outerRd(p)
     symexTarget("after")
 
+# INT-92c: a call node semcheck leaves without a type. `wasMoved(x)` is
+# spelled as a call of the type's generated `=wasMoved` hook, whose node
+# carries none; the dead-use scan (`onlyDeadUses`, reached for every local a
+# later statement names) asked it whether it was a view call and stopped the
+# whole compile ("node has no type"). Each shape here compiles and keeps its
+# ordinary verdict.
+
+proc movedLocal(v: int) =
+  var x = v
+  wasMoved(x)
+  if x == 0 and v == 1: symexTarget("a")
+
+proc swappedLocal(v: int) =
+  var a = v
+  var b = 3
+  swap(a, b)
+  if a == 3 and v == 1: symexTarget("a")
+
+proc rdMoved(p: ref B): int =
+  var y = p.n
+  wasMoved(y)
+  result = p.n + y
+
+proc discardRdMovedSome(p: ref B) =
+  if p != nil:
+    discard rdMoved(p)
+    symexTarget("after")
+
+proc movedFormal(x: int) =
+  var y = x
+  wasMoved(y)
+  sideSink = y
+
+proc movedFormalArg(v: int) =
+  movedFormal(v)
+  if v == 2: symexTarget("after")
+
 crashForms:
   case crashForm()
   of "discardRd": discardRd(nil)
@@ -469,6 +506,13 @@ suite "INT-92: a dead value through a local, a call, a formal or a field":
     check pinFind(mkRFieldSome, tLabel("seven")).status == sxSat
     check pinFind(letFormalSome, tLabel("after")).status == sxSat
     check pinFind(discardOuterRdSome, tLabel("after")).status == sxSat
+
+suite "INT-92c: a hook call with no type":
+  test "a local a later hook call names compiles, its verdict ordinary":
+    check pinFind(movedLocal, tLabel("a")).status == sxSat
+    check pinFind(swappedLocal, tLabel("a")).status == sxSat
+    check pinFind(discardRdMovedSome, tLabel("after")).status == sxSat
+    check pinFind(movedFormalArg, tLabel("after")).status == sxSat
 
 suite "INT-92: the walker's version":
   test "floor":

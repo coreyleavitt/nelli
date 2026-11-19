@@ -5139,6 +5139,6 @@ proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
     pointerFacts, pointerViews, pointerSortsUsed, pointerReadSorts,
     frameObjIds, frameCells, framePtrs, pointerDecls, crossSortAccessed, crossSortWritten,
     pointerSortTypes, crossSortFacts, crossSortFactIds, crossSortAnyDesync,
-    crossSortFactsOff)
+    crossSortFactsOff, unionImageProgram)
 
 registerThreadStateRelease(releaseThreadState)

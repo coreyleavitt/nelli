@@ -21,7 +21,7 @@ proc sortFault*(ctx: Z3Context; op: string; want, got: RawZ3Sort): bool =
   ## `want`. Z3 hash-conses sorts, so pointer identity is sort equality (what
   ## `Z3_is_eq_sort` computes).
   if want == got: return false
-  lowerDegrade(weInternalWalkerFault,
+  queueDegrade(weInternalWalkerFault,
     "Z3 sort mismatch at " & op & ": expected " &
       $Z3_sort_to_string(ctx.raw, want) & ", got " &
       $Z3_sort_to_string(ctx.raw, got) & " -- the walker built an ill-sorted " &
@@ -195,13 +195,13 @@ proc allocDegrade*(kind: SymexErrorKind, msg: string) =
   ## this toolchain -- ordinary control flow (no raise, no catch) is the
   ## only form proven safe.
   ## RFC-0005 S1: effect (2) below is now DERIVED rather than written — the
-  ## `loweringDegradeErrors` entry `lowerDegrade` records is a drained
+  ## `loweringDegradeErrors` entry `queueDegrade` records is a drained
   ## `sevError`, and `runSymexImpl` derives `w.runTaint` from exactly those
   ## entries, so the immediate/global run mark this proc used to sync through
   ## `currentWalkCtxPtr` (`syncAllocDegradeSawUnknown`, retired) holds by
   ## construction the instant the error is recorded — still unconditional,
   ## still not contingent on any drain.
-  lowerDegrade(kind, msg)
+  queueDegrade(kind, msg)
 
 proc rawAnyAstOf*(sv: SymVal): RawZ3Ast =
   ## The raw ast of ANY base SymVal that may underlie a distinct type — used

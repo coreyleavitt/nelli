@@ -157,7 +157,7 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
         # own totality work established -- "the fallback's content need
         # not be trustworthy, only type-correct enough that a downstream
         # consumer does not crash").
-        lowerDegrade(feUnsupportedOp,
+        queueDegrade(feUnsupportedOp,
           "closure/lambda return type kind " & $e.lambdaRetTy.kind &
                " flattens to " & $rangeSorts.len &
                " Z3 leaves — only a single-leaf scalar closure return " &

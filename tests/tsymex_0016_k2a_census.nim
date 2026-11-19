@@ -8,7 +8,7 @@
 ##                `nimcase_transparent`);
 ##   survivors    every `Survivors(` literal in `src/nelli` (AUD-09);
 ##   degrade      every `Degrade(` literal in `src/nelli` (word boundary:
-##                `allocDegrade(` and `lowerDegrade(` do not count);
+##                `allocDegrade(` and `queueDegrade(` do not count);
 ##   bare_skip    every `skip(` call under `tests/` (`skipCell(` is another
 ##                identifier and is the recorded form);
 ##   platform     every platform arm (`defined(windows)`, `hostOS`, ...) in a
@@ -285,7 +285,7 @@ proc countPlatform(s: string): int =
     result += countTok(s, t)
 
 const sanctionedCtors = ["degrade", "halted", "exact", "surviving", "continued",
-                         "selfTainted", "carriedDegrade", "takeLoweringPendingDegrade",
+                         "selfTainted", "carriedDegrade", "asDegrade",
                          "heapArmDegrade"]
   ## RFC-0016 K7c. The procs that DEFINE the sanctioned `Degrade`/`Survivors`
   ## constructors (runtime.nim's privacy note). Their own literals are the
@@ -428,7 +428,7 @@ suite "RFC-0016 K2a: dispatch census (synthetic sources)":
     "proc f(n: NimNode) =\n  case n.kind\n  of nnkA: discard\n  else: discard\n" &
     "  # case n.kind in a comment\n  let s = Survivors(live: @[])\n" &
     "  let d = Degrade(path: p)\n  allocDegrade(k, m)\n" &
-    "  lowerDegrade(k, m)\n  case xn.kind\n  of a: discard\n")
+    "  queueDegrade(k, m)\n  case xn.kind\n  of a: discard\n")
   let tstA: SrcFile = ("tests/t.nim",
     "test \"x\":\n  " & skTok & ")\n  skipCell(c)\n  # " & skTok & ")\n")
   let plat: SrcFile = ("tests/p.nim",
@@ -440,7 +440,7 @@ suite "RFC-0016 K2a: dispatch census (synthetic sources)":
     let t = tally(sites(@[srcA, tstA, plat, platOk]))
     check t.getOrDefault("nimcase_transparent") == 1  # comment and `xn.kind` ignored
     check t.getOrDefault("survivors") == 1
-    check t.getOrDefault("degrade") == 1       # allocDegrade/lowerDegrade not
+    check t.getOrDefault("degrade") == 1       # allocDegrade/queueDegrade not
     check t.getOrDefault("bare_skip") == 1     # skipCell and the comment not
     check t.getOrDefault("platform") == 2      # q.nim has skipCell: not counted
 

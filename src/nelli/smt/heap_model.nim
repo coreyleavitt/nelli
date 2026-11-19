@@ -3199,7 +3199,7 @@ template declinePlaceholderInLower*(recv: SymVal, loc, what: string) =
   ## machinery exists to prevent. Callers build their own type-correct inert
   ## result after calling this (an `svInt`/`svSeq`/etc — the one piece that
   ## cannot be centralised, since each arm's result kind differs).
-  lowerDegrade(placeholderReadDeclineKind(recv),
+  queueDegrade(placeholderReadDeclineKind(recv),
     placeholderReadDeclineMsg(recv, loc, what))
 
 proc iteSV*(cond: Z3Bool, t, e: SymVal): SymVal =

@@ -2226,7 +2226,7 @@ type
     dskWalkSite     ## RFC-0005 S8, not in the RFC's §2.5 sketch (which scoped
                     ## only the PARSE-time records the veto read): a record
                     ## the WALKER made at the site it was walking -- a
-                    ## `degrade`/`lowerDegrade`/`closureDegrade`/`allocDegrade`
+                    ## `degrade`/`queueDegrade`/`closureDegrade`/`allocDegrade`
                     ## funnel, the extraction sink, or a `runSymex` boundary
                     ## abort raised mid-walk. Such a record exists only
                     ## because a path reached its site, so its reach is the

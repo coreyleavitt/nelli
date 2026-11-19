@@ -258,7 +258,7 @@ type
 
   Degrade = object
     ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). The token a
-    ## degrade site obtains from `degrade(w, kind, msg)` (or `lowerDegrade`'s
+    ## degrade site obtains from `degrade(w, kind, msg)` (or `queueDegrade`'s
     ## pending-taint drain) and hands to `forkPathTainted`/`taintInPlace`. It
     ## carries ONLY the path coordinate `pathTaint(classOf(kind))` of the one
     ## kind mention that also recorded the `SymexErrorInfo` -- so recording
@@ -614,7 +614,7 @@ template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   ## (`let d = w.degrade(…)` once, then fork per survivor).
   block:
     # `d` is bound once: a template argument is substituted where it is named,
-    # and `takeLoweringPendingDegrade()` drains what it reads.
+    # and `asDegrade(takePending())` drains what it reads.
     let tok = d
     let child = forkPathTaintPrimitive(parent, pcExpr, envExpr,
                                        parent.taint + tok.path,
@@ -1043,7 +1043,7 @@ proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
 # whole run at `runSymexCaught` as `sxUnknown` (the boundary-abort class),
 # because the walker has no unwind discipline to resume after one (no
 # try/finally around `arithFrames` and the other per-run stacks; every escape
-# ends the run, which re-seeds them). An in-band degrade (`lowerDegrade`,
+# ends the run, which re-seeds them). An in-band degrade (`queueDegrade`,
 # `degradeStrArm`) instead taints only the path that met it
 # (`drainPendingLowerEffects` (d)), and every other path still decides. So
 # the sinks are kept for precision, and Nim 2.2.10 still loses a raise in any
@@ -2111,7 +2111,7 @@ proc seqStoreDecline(op: string; elemTy: IRType; val: SymVal): SymVal =
            " -- a recursive value object is unrolled to a bounded depth, " &
            "and this value reaches past it (seRecursiveValueDepth)"
          else: " (feUnsupportedOp)")
-  lowerDegrade(kind, msg)
+  queueDegrade(kind, msg)
   var fresh: seq[Z3Bool]
   allocateSym(tUnsupportedFieldSeq(elemTy, msg, kind = kind),
               freshDegradeName("__seqStoreDecline"), fresh)
@@ -2131,14 +2131,14 @@ proc containerRecvDeclined(recv: SymVal; want: SVKind; op: string): bool =
   if recv.kind == want:
     if want == svTable and not isBackedTableTy(recv.tabKeyTy, recv.tabValTy):
       if not isTableKeyTy(recv.tabKeyTy):
-        lowerDegrade(seUnsupportedTableKeyType,
+        queueDegrade(seUnsupportedTableKeyType,
           op & ": " & tableKeyDeclineMsg(recv.tabKeyTy))
       else:
-        lowerDegrade(seUnsupportedTableValType,
+        queueDegrade(seUnsupportedTableValType,
           op & ": " & tableValDeclineMsg(recv.tabValTy))
       return true
     return false
-  lowerDegrade(feUnsupportedOp,
+  queueDegrade(feUnsupportedOp,
     op & ": receiver lowered to " & plainEnglishSymValKind(recv.kind) &
     ", not a " & plainEnglishSymValKind(want) & " (feUnsupportedOp)")
   true
@@ -2717,7 +2717,7 @@ proc lowerBitSet(env: Env, e: IRExpr): SymVal =
   let n = bitSetDomain(elemTy).size
   let ctx = requireCurrentContext()
   template fault(what: string): SymVal =
-    lowerDegrade(weInternalWalkerFault,
+    queueDegrade(weInternalWalkerFault,
       "builtin set " & $e.bsOp & ": " & what & " (weInternalWalkerFault)")
     var fresh: seq[Z3Bool]
     let rty = case e.bsOp
@@ -5524,7 +5524,7 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
   ## site inside `walk`) forks the path `uncertain` and sets `w.sawUnknown`
   ## regardless of nesting depth once this returns, so the verdict is
   ## `sxUnknown` at ANY nesting depth — never a silently-lost raise.
-  lowerDegrade(kind, msg)
+  queueDegrade(kind, msg)
   var fresh: seq[Z3Bool]
   case e.kind
   of iekStrLen, iekStrFind, iekStrRfind, iekStrCount, iekStrToInt, iekStrFindRe:
@@ -5887,7 +5887,7 @@ proc observeGlobalRead(e: IRExpr; v: SymVal; simplified = false) =
   ## mentions an unwritten part.
   let part = globalReadPart(e, v, simplified)
   if part.len > 0:
-    lowerDegrade(unwrittenKind(part), unwrittenMsg(part), unwrittenUb(part))
+    queueDegrade(unwrittenKind(part), unwrittenMsg(part), unwrittenUb(part))
 
 var callGuardedNames {.threadvar.}: seq[string]
   ## RFC-0005 S8an. The globals and captures that an ACTIVE walked call
@@ -5914,7 +5914,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # `coerceIntLit` raised on it (weInternalWalkerFault); the parse-time
       # decline marker already owns the verdict, so degrade in-band here and
       # hand back the prototype as the inert value of that slot.
-      lowerDegrade(feUnsupportedExprKind,
+      queueDegrade(feUnsupportedExprKind,
         "a placeholder for a declined literal met a " & $proto.get.kind &
         " slot (a `nil` of a type the walk holds no nil for) -- degraded " &
         "to sxUnknown (feUnsupportedExprKind)")
@@ -5955,7 +5955,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
                      globalHiddenRoute(glVarGlobal[e.vname])
                    else: ""
       if hidden.len > 0:
-        lowerDegrade(feGlobalRouteUnproved,
+        queueDegrade(feGlobalRouteUnproved,
           "variable '" & displayName(e.vname) & "' is read, and a store the " &
           "walk does not see may reach it: " & hidden &
           " (feGlobalRouteUnproved)")
@@ -5965,7 +5965,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # expression has run; the walk reads it here, in operand order, and
       # the two differ when a later call writes it again. Read the latest
       # write and decline.
-      lowerDegrade(ceCaptureByRefUnmodelled,
+      queueDegrade(ceCaptureByRefUnmodelled,
         "`" & displayName(e.vname) & "` is read in the same expression as " &
              "a closure call that writes it; the order of that read and " &
              "the write is not modelled (ceCaptureByRefUnmodelled)")
@@ -6042,7 +6042,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         # read would see the value from before the call's writes through
         # the parameter: the name is withheld from the callee (`isCall`)
         # and the read declines here.
-        lowerDegrade(feUnsupportedOp,
+        queueDegrade(feUnsupportedOp,
           "`" & displayName(e.vname) & "` is reached by a callee both " &
                "through a `var`/`addr` argument and directly; the walk " &
                "passes the argument by copy-in/copy-out, so the direct " &
@@ -6056,7 +6056,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         # other parts unwritten, and a later read of `g.a` decides.
         return globalInitValue(e.vname, e.vGlobalTy)
       elif isGlobalEnvName(e.vname):
-        lowerDegrade(feGlobalReadUnmodelled, unwrittenReadMsg(displayName(e.vname)))
+        queueDegrade(feGlobalReadUnmodelled, unwrittenReadMsg(displayName(e.vname)))
       elif e.vname.startsWith("__sym_"):
         # RFC-0005 S8ba: a parser temporary (`freshSynth`; no Nim
         # identifier starts with `_`) is bound by the statement the parser
@@ -6064,7 +6064,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         # inconsistency (a declining arm that dropped its result), never a
         # global. It was reported as `feGlobalReadUnmodelled` naming the
         # temporary.
-        lowerDegrade(weInternalWalkerFault,
+        queueDegrade(weInternalWalkerFault,
           "parser temporary '" & e.vname & "' is read but no statement " &
                "bound it (weInternalWalkerFault)")
       else:
@@ -6072,7 +6072,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         # unbound name is a variable the walk does not bind where it is
         # read (a `{.global.}` local, or one only an unmodelled path
         # reaches) -- the same decline, not mislabelled a module global.
-        lowerDegrade(feGlobalReadUnmodelled,
+        queueDegrade(feGlobalReadUnmodelled,
           "'" & e.vname & "' is read where the symbolic walker has not " &
                "bound it (not a parameter or a local of the walked " &
                "routines it reaches) (feGlobalReadUnmodelled)")
@@ -6275,7 +6275,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # `sxUnsat` with ZERO errors pre-fix; the identical shape without the
       # block was already an honest classified `sxUnknown`. In-band
       # lowering-level degrade instead, matching `degradeStrArm`'s idiom.
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekSeqSlice: base lowered to " & plainEnglishSymValKind(recv.kind) &
              " — expected svSeq (→ sxUnknown, Invariant 3)")
       var fresh: seq[Z3Bool]
@@ -6326,7 +6326,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # without the block was already an honest classified `sxUnknown`.
       # In-band lowering-level degrade instead, matching `degradeStrArm`'s
       # idiom (and N31's own `iekStrSubstr` CR-17 fix).
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekSeqSlice: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
              plainEnglishSymValKind(hiSV.kind) & " — a bitvector-represented bound would " &
              "bv2int-bridge into the array query (ADR-0027 non-termination " &
@@ -6403,7 +6403,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
        atSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64} or
        base.isUnsupportedFieldPlaceholder or # [placeholder-audited]
        part.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekSeqSplice: the storage, the view or the offset lowered as " &
              plainEnglishSymValKind(base.kind) & "/" &
              plainEnglishSymValKind(part.kind) & "/" &
@@ -6420,7 +6420,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     let bArrs = seqArrs(base)
     let pArrs = seqArrs(part)
     if bArrs.len != pArrs.len:
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekSeqSplice: the storage and the view have different element " &
              "shapes (→ sxUnknown, Invariant 3)")
       var fresh: seq[Z3Bool]
@@ -6461,7 +6461,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         plainEnglishSymValKind(left.kind) & "/" &
         plainEnglishSymValKind(right.kind) &
         " — expected two seqs of one element shape (weInternalWalkerFault)"
-      lowerDegrade(weInternalWalkerFault, declineMsg)
+      queueDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg,
@@ -6472,7 +6472,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # is not a placeholder (an empty literal's): as `iekSeqAdd` declines.
       let declineMsg = "iekSeqConcat: a seq of " & $left.seqElemTy &
         ", an element type the model does not back (seNestedSeqUnsupported)"
-      lowerDegrade(seNestedSeqUnsupported, declineMsg)
+      queueDegrade(seNestedSeqUnsupported, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(tUnsupportedFieldSeq(left.seqElemTy, declineMsg),
                          freshDegradeName("__seqConcatUnbacked"), fresh)
@@ -6565,7 +6565,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # mechanism.
       let declineMsg = "iekSeqAdd: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
              " — expected svSeq (weInternalWalkerFault)"
-      lowerDegrade(weInternalWalkerFault, declineMsg)
+      queueDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg,
@@ -6610,7 +6610,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let declineMsg = "iekSeqAdd: an element added to a seq of " &
         $recv.seqElemTy & ", an element type the model does not back " &
         "(seNestedSeqUnsupported)"
-      lowerDegrade(seNestedSeqUnsupported, declineMsg)
+      queueDegrade(seNestedSeqUnsupported, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(tUnsupportedFieldSeq(recv.seqElemTy, declineMsg),
                          freshDegradeName("__seqAddUnbacked"), fresh)
@@ -6621,7 +6621,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let declineMsg = "iekSeqAdd: element lowered to " &
         plainEnglishSymValKind(val.kind) & " for a seq[" &
         plainEnglishTypeKind(recv.seqElemTy.kind) & "] (weInternalWalkerFault)"
-      lowerDegrade(weInternalWalkerFault, declineMsg)
+      queueDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg,
@@ -6646,7 +6646,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     if kOpt.isNone or vOpt.isNone:
       # Unreachable for a typed Nim `[]=`; a value some upstream degrade
       # produced keeps the in-band decline this arm always had.
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekTableSet: key lowered to " & plainEnglishSymValKind(keySV.kind) &
         " and value to " & plainEnglishSymValKind(val.kind) & " — expected a " &
         $recv.tabKeyTy & " key and a " & $recv.tabValTy & " value " &
@@ -6696,7 +6696,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     let keySV = lower(env, e.mutArg, seqElemLitProto(recv.tabKeyTy))
     let kOpt = tabKeyTerm(keySV, recv.tabKeyTy)   ## RFC-0005 S8ar
     if kOpt.isNone:
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekTableDel: key lowered to " & plainEnglishSymValKind(keySV.kind) &
         " — expected a " & $recv.tabKeyTy & " (feUnsupportedOp)")
       return recv
@@ -6732,7 +6732,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     let elemSV = lower(env, e.mutArg, intLitProto(recv.setElemTy))
     let elemOpt = cellOf(elemSV, recv.setElemTy)   ## RFC-0005 S8u
     if elemOpt.isNone:
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekSetIncl: element lowered to " & plainEnglishSymValKind(elemSV.kind) &
         " — expected a " & $recv.setElemTy & " (feUnsupportedOp)")
       return recv
@@ -6753,7 +6753,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     let elemSV = lower(env, e.mutArg, intLitProto(recv.setElemTy))
     let elemOpt = cellOf(elemSV, recv.setElemTy)   ## RFC-0005 S8u
     if elemOpt.isNone:
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekSetExcl: element lowered to " & plainEnglishSymValKind(elemSV.kind) &
         " — expected a " & $recv.setElemTy & " (feUnsupportedOp)")
       return recv
@@ -6787,7 +6787,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # parse-time itSeq gate; decline in-band rather than a raw crash.
       let declineMsg = "iekSeqDel: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
              " — expected svSeq (weInternalWalkerFault)"
-      lowerDegrade(weInternalWalkerFault, declineMsg)
+      queueDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
@@ -6846,7 +6846,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let declineMsg = "iekSeqDel: an element removed from a seq of " &
         $recv.seqElemTy & ", an element type the model does not back " &
         "(seNestedSeqUnsupported)"
-      lowerDegrade(seNestedSeqUnsupported, declineMsg)
+      queueDegrade(seNestedSeqUnsupported, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(tUnsupportedFieldSeq(recv.seqElemTy, declineMsg),
                          freshDegradeName("__seqDelUnbacked"), fresh)
@@ -6873,7 +6873,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # an itSeq receiver.
       let declineMsg = "iekSeqInsert: receiver lowered to " &
         plainEnglishSymValKind(recv.kind) & " — expected svSeq (weInternalWalkerFault)"
-      lowerDegrade(weInternalWalkerFault, declineMsg)
+      queueDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
@@ -6893,7 +6893,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         let declineMsg = "iekSeqInsert: the element type " &
           plainEnglishTypeKind(recv.seqElemTy.kind) &
           " has no zero value for insert's setLen (feUnsupportedOp)"
-        lowerDegrade(feUnsupportedOp, declineMsg)
+        queueDegrade(feUnsupportedOp, declineMsg)
         var fresh: seq[Z3Bool]
         return allocateSym(
           tUnsupportedFieldSeq(recv.seqElemTy, declineMsg, kind = feUnsupportedOp),
@@ -6908,7 +6908,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let declineMsg = "iekSeqInsert: element lowered to " &
         plainEnglishSymValKind(val.kind) & " for a seq[" &
         plainEnglishTypeKind(recv.seqElemTy.kind) & "] (weInternalWalkerFault)"
-      lowerDegrade(weInternalWalkerFault, declineMsg)
+      queueDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
@@ -6947,7 +6947,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     # since `.pop()` needs a FRESH return-value bind alongside the receiver
     # rebind, a shape this single-result expression arm cannot carry.
     let recv = lower(env, e.popSeq)
-    lowerDegrade(feUnsupportedOp,
+    queueDegrade(feUnsupportedOp,
       "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
            "follow-up (feUnsupportedOp)")
     return recv
@@ -6978,7 +6978,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       let keySV = lower(env, e.key, seqElemLitProto(recv.tabKeyTy))
       let kOpt = tabKeyTerm(keySV, recv.tabKeyTy)   ## RFC-0005 S8f: noted
       if kOpt.isNone:
-        lowerDegrade(feUnsupportedOp,
+        queueDegrade(feUnsupportedOp,
           "`k in t`: key lowered to " & plainEnglishSymValKind(keySV.kind) &
           " — expected a " & $recv.tabKeyTy & " (feUnsupportedOp)")
         var fresh: seq[Z3Bool]
@@ -6997,7 +6997,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # guard, the same C-backend silent-loss hazard as the CR-17(a) site
       # above. See `loweringDidDegrade`'s doc comment for the full mechanism.
       if not isBackedSetElemTy(recv.setElemTy):   # RFC-0005 S8z
-        lowerDegrade(seUnsupportedSetCharInterop,
+        queueDegrade(seUnsupportedSetCharInterop,
           "HashSet membership not modeled — element type " &
                $recv.setElemTy & " is not an integer or bool " &
                "(seUnsupportedSetCharInterop)")   # RFC-0005 S8z: read `.width` of any kind
@@ -7014,7 +7014,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # anything else degrades IN-BAND per SND-3 instead of asserting.
       let keyCell = cellOf(keySV, recv.setElemTy)
       if keyCell.isNone:
-        lowerDegrade(weInternalWalkerFault,
+        queueDegrade(weInternalWalkerFault,
           "HashSet membership key lowered to " & plainEnglishSymValKind(keySV.kind) &
                " — expected a " & $recv.setElemTy & " (weInternalWalkerFault)")
         var fresh: seq[Z3Bool]
@@ -7039,7 +7039,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # never lowered (its raise forks are dropped), and system's
       # `contains(openArray)` calls the element type's `==`, which may be
       # a raising user overload.
-      lowerDegrade(feUnsupportedOp,
+      queueDegrade(feUnsupportedOp,
         "iekContains on unsupported kind " & plainEnglishSymValKind(recv.kind) &
              " (feUnsupportedOp)")
       var freshContains: seq[Z3Bool]
@@ -7147,7 +7147,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       of svBV8, svBV16, svBV32, svBV64:
         notBV(inner)
       else:
-        lowerDegrade(weInternalWalkerFault,
+        queueDegrade(weInternalWalkerFault,
           "uNot on unsupported operand kind " & plainEnglishSymValKind(inner.kind) &
                " — expected svBool or a BV (weInternalWalkerFault)")
         var fresh: seq[Z3Bool]
@@ -7176,7 +7176,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # unconstrained bool so evaluation can continue soundly.
       if e.bop in {bLt, bLe, bGt, bGe} and
          (e.lhs.kind == iekStrAt or e.rhs.kind == iekStrAt):
-        lowerDegrade(seUnsupportedStringOp,
+        queueDegrade(seUnsupportedStringOp,
           "ordering comparison on s[i] (char) is not modeled " &
                "(CR-17: String+Int+BV ordering — latent Z3 hang shape; " &
                "use == / != for char comparisons)")
@@ -7441,7 +7441,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       var scratch: seq[Z3Bool]
       let sv = allocateSym(e.zvTy, freshDegradeName("__zeroValueUnmodelled"),
                            scratch)
-      lowerDegrade(feUnsupportedOpHavoc,
+      queueDegrade(feUnsupportedOpHavoc,
         "zero value of " & $e.zvTy & " not modelled — degraded to sxUnknown")
       sv
   of iekBitSet:
@@ -7475,7 +7475,7 @@ proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   if sv.kind == svBool:
     sv.bo
   else:
-    lowerDegrade(weInternalWalkerFault,
+    queueDegrade(weInternalWalkerFault,
       "lowerBool: expected Bool, got " & plainEnglishSymValKind(sv.kind) &
            " (weInternalWalkerFault)")
     var fresh: seq[Z3Bool]
@@ -9294,15 +9294,10 @@ proc modelPins(m: Z3Model, env: Env, params: seq[IRParam]):
   # verdict drains. A pin is not part of the program: its degrade must not
   # taint the explore verdict (`tsymex_r6_n13_reassign_seqarm`), it only leaves
   # the pins incomplete.
-  let degradeBase = loweringDegradeErrors.len
-  let pendingTaintBase = loweringPendingTaint
-  let pendingUbBase = loweringPendingUb
+  let base = checkpoint()
   defer:
-    if loweringDegradeErrors.len > degradeBase:
-      loweringDegradeErrors.setLen(degradeBase)
+    if rollback(base):
       result.complete = false
-    loweringPendingTaint = pendingTaintBase
-    loweringPendingUb = pendingUbBase
   for p in params:
     if not env.hasKey(p.name):
       result.complete = false
@@ -14382,7 +14377,7 @@ type
     stmtStrayTaint: Taint
     stmtStrayUb: set[UbKind]       ## RFC-0016 W1-d3: `stmtStrayTaint`'s undefined
                       ## RFC-0005 review R1-04. Pending lowering taint
-                      ## (`loweringPendingTaint`) that a walker lowering
+                      ## (`symval`'s lowering queue) that a walker lowering
                       ## entry point found already queued
                       ## (`claimStrayPendingTaint`): a deposit no earlier
                       ## lowering of this statement drained, so the path it
@@ -14595,7 +14590,7 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
   ## site between sinks would change `RawResult.errors`). The dual-store sinks
   ## write their threadvar fallback AND the live `WalkCtx` field, exactly as
   ## the hand-written sites did. No-`w` lowering sites use the sibling
-  ## `lowerDegrade` instead.
+  ## `queueDegrade` instead.
   ##
   ## RFC-0005 S6b: `dsUnknownExn` is the one sink that records at
   ## `sevWarning` (the `eeUnknownExnType` severity consumers already see);
@@ -14668,16 +14663,15 @@ proc carriedDegrade(taint: Taint; ub: set[UbKind] = {}): Degrade =
   ## holds and its call's pending decline, each recorded where it arose.
   Degrade(path: taint, ub: ub)
 
-proc takeLoweringPendingDegrade(): Degrade =
-  ## RFC-0005 S1. The lowering-sink half of the token discipline: converts the
-  ## pending taint `lowerDegrade` accumulated (each join already paired with a
-  ## recorded `loweringDegradeErrors` entry) into a `Degrade` token and resets
-  ## the pending taint to `{}`. Called by the drains that fold the queue onto
-  ## the path it was queued for: `drainPendingLowerEffects`, `lowerInExpr`
-  ## and, before the walk, `initialWalkPath`.
-  result = Degrade(path: loweringPendingTaint, ub: loweringPendingUb)
-  loweringPendingTaint = {}
-  loweringPendingUb = {}
+proc asDegrade(q: PendingDegrade): Degrade =
+  ## RFC-0005 S1. The lowering-sink half of the token discipline: the token of
+  ## the lowering queue `takePending` took (each join already paired with a
+  ## recorded `loweringDegradeErrors` entry, or with the closure sink's).
+  ## Used by the drains that fold the queue onto the path it was queued for:
+  ## `drainPendingLowerEffects`, `lowerLeafInExpr` and, before the walk,
+  ## `initialWalkPath`. (Was `takeLoweringPendingDegrade`, which also took the
+  ## queue; RFC-0016 INT-34 gave the queue one owner, `symval`.)
+  Degrade(path: q.taint, ub: q.ub)
 
 proc initialWalkPath(pc: seq[Z3Bool]; env: Env): Path =
   ## RFC-0005 review R3 (leak fix), R4. THE constructor of a walk driver's
@@ -14694,9 +14688,9 @@ proc initialWalkPath(pc: seq[Z3Bool]; env: Env): Path =
   ## drain after it, so the walk-end leak pin fired on a taint that had
   ## in fact reached every path.
   let initial = Path(pc: pc, env: env)
-  if loweringPendingTaint == {}: initial
+  if pendingIsEmpty(): initial
   else: forkPathTainted(initial, initial.pc, initial.env,
-                        takeLoweringPendingDegrade())
+                        asDegrade(takePending()))
 
 proc closureDegrade(kind: SymexErrorKind; msg: string) =
   ## RFC-0005 S7 (§2.5 precondition for S9). THE way a closure / HOF site
@@ -14705,12 +14699,12 @@ proc closureDegrade(kind: SymexErrorKind; msg: string) =
   ## they wrote only the closure sink, which the blanket closure veto read
   ## -- and nothing reached the PATH, so deleting the veto (S9, done) would
   ## have turned every hit through a stand-in value into a clean `sxSat`. One kind
-  ## mention performs both acts, exactly as `lowerDegrade` does for the
+  ## mention performs both acts, exactly as `queueDegrade` does for the
   ## lowering sink:
   ##   1. records the classified `sevError` into the closure sink (threadvar
   ##      fallback + the LIVE `WalkCtx.closureCallErrors` field, which the
   ##      drain-time run coordinate reads);
-  ##   2. joins `pathTaint(classOf(kind))` into `loweringPendingTaint`, which
+  ##   2. queues `pathTaint(classOf(kind))` (`queueDegrade`), which
   ##      `drainPendingLowerEffects` folds onto the path that consumes the
   ##      lowered value.
   ## A closure-sink decline outside `lower` would use `w.degrade(…,
@@ -14719,13 +14713,13 @@ proc closureDegrade(kind: SymexErrorKind; msg: string) =
                             scope: walkSite())   # RFC-0005 S8
   currentClosureCallErrors.add info   # threadvar: fallback
   syncClosureCallError(info)          # LIVE WalkCtx field (no-op outside a walk)
-  loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
+  queueDegrade(pathTaint(classOf(kind)))
 
 proc stampLoweringPendingLeak(w: var WalkCtx) =
   ## RFC-0005 S1 (§2.2 last paragraph) — the pending-taint LEAK PIN. Called
   ## once, right after the top-level `walk` returns, by BOTH walk drivers
-  ## (`runSymexImpl`; `runConcolicCollectImpl` since S1c). `loweringPendingTaint`
-  ## must be `{}` there: every `lowerDegrade` join is meant to be folded onto
+  ## (`runSymexImpl`; `runConcolicCollectImpl` since S1c). The lowering queue
+  ## must be empty there: every `queueDegrade` join is meant to be folded onto
   ## a path by `drainPendingLowerEffects`; a non-empty residue means a
   ## lowering degrade was recorded but its PATH taint landed nowhere (the
   ## "lost entirely" hazard `runtime_heap.nim`'s N42 note documents — a lost
@@ -14733,13 +14727,12 @@ proc stampLoweringPendingLeak(w: var WalkCtx) =
   ## backstop is extended to it: stamp a classified `weInternalWalkerFault`
   ## (so telemetry sees the leak) and reset the residue so it cannot bleed
   ## into the next run on this thread.
-  if loweringPendingTaint != {}:
+  if not pendingIsEmpty():
+    let leaked = takePending()
     w.halted(weInternalWalkerFault,
-      "lowering pending taint " & $loweringPendingTaint & " leaked at walk " &
+      "lowering pending taint " & $leaked.taint & " leaked at walk " &
       "end — a lowering degrade's path taint was never drained onto a path " &
       "(RFC-0005 S1 leak pin; weInternalWalkerFault)")
-    loweringPendingTaint = {}
-    loweringPendingUb = {}
 
 # ---- RFC-0005 S1: exported test hooks (H1 pattern) --------------------------
 # `Path`/`WalkCtx`/`Degrade` are private to the runtime unit, so — exactly as
@@ -14787,20 +14780,17 @@ proc rfc0005S1CarrierProbe*(): Rfc0005S1CarrierProbe =
   ## `WalkCtx`: `forkPath` propagation, `forkPathTainted`'s join (and that
   ## the parent is untouched), `degrade` into each of the four sinks (and
   ## that it writes no run coordinate), `taintInPlace`, the return-merge
-  ## union, and the lowering funnel (`lowerDegrade` → pending →
-  ## `takeLoweringPendingDegrade`).
+  ## union, and the lowering funnel (`queueDegrade` → pending →
+  ## `takePending`).
   let savedHeapDepth = heapDepthErrors
   let savedNewFieldZero = newFieldZeroErrors
   let savedClosure = currentClosureCallErrors
   let savedLowering = loweringDegradeErrors
-  let savedPending = loweringPendingTaint
-  let savedPendingUb = loweringPendingUb
-  loweringPendingUb = {}
+  let savedPending = setAsidePending()
   heapDepthErrors = @[]
   newFieldZeroErrors = @[]
   currentClosureCallErrors = @[]
   loweringDegradeErrors = @[]
-  loweringPendingTaint = {}
   var p {.used.} = Path()
   result.hasTaintField = compiles(p.taint)
   result.hasNoUncertainField = not compiles(p.uncertain)
@@ -14834,11 +14824,11 @@ proc rfc0005S1CarrierProbe*(): Rfc0005S1CarrierProbe =
     forkPathMerged(cleanCallee, cleanCallee.pc, cleanCallee.env, parent).taint
   result.returnMergeCleanStaysClean =
     forkPathMerged(cleanCallee, cleanCallee.pc, cleanCallee.env, cleanCallee).taint
-  lowerDegrade(seUnsupportedStringOp, "rfc0005 S1 probe (lowering)")
-  result.lowerPendingAfter = loweringPendingTaint
+  queueDegrade(seUnsupportedStringOp, "rfc0005 S1 probe (lowering)")
+  result.lowerPendingAfter = peekPending().taint
   result.loweringSinkKinds = kindsOf(loweringDegradeErrors)
-  result.lowerDrainedPath = takeLoweringPendingDegrade().path
-  result.lowerPendingAfterDrain = loweringPendingTaint
+  result.lowerDrainedPath = asDegrade(takePending()).path
+  result.lowerPendingAfterDrain = peekPending().taint
   heapDepthErrors = savedHeapDepth
   newFieldZeroErrors = savedNewFieldZero
   currentClosureCallErrors = savedClosure
@@ -14864,34 +14854,32 @@ proc rfc0005S1CarrierProbe*(): Rfc0005S1CarrierProbe =
   result.undefReturnMergeCleanStaysClean =
     forkPathMerged(cleanCallee, cleanCallee.pc, cleanCallee.env,
                    cleanCallee).undefined
-  lowerDegrade(feGlobalHavoc, "rfc0016 W1-d3 probe (lowering undefined)",
+  queueDegrade(feGlobalHavoc, "rfc0016 W1-d3 probe (lowering undefined)",
                {UbKind(ubIndeterminateRead)})
-  result.undefLowerDrained = takeLoweringPendingDegrade().ub
-  result.undefLowerPendingAfterDrain = loweringPendingUb
+  result.undefLowerDrained = asDegrade(takePending()).ub
+  result.undefLowerPendingAfterDrain = peekPending().ub
   loweringDegradeErrors = savedLowering
-  loweringPendingTaint = savedPending
-  loweringPendingUb = savedPendingUb
+  restorePending(savedPending)
 
 proc rfc0005S1LeakPinProbe*(): Rfc0005S1LeakPinProbe =
   ## Drives `stampLoweringPendingLeak` twice on a scratch `WalkCtx`: once with
   ## a clean pending taint (must stamp nothing) and once with a residue left
-  ## by a `lowerDegrade` that no `drainPendingLowerEffects` consumed (must
+  ## by a `queueDegrade` that no `drainPendingLowerEffects` consumed (must
   ## stamp one `weInternalWalkerFault` sevError and reset the residue).
   let savedLowering = loweringDegradeErrors
-  let savedPending = loweringPendingTaint
+  let savedPending = setAsidePending()
   loweringDegradeErrors = @[]
-  loweringPendingTaint = {}
   var clean: WalkCtx
   stampLoweringPendingLeak(clean)
   result.cleanStampedKinds = kindsOf(clean.walkDegradeErrors)
   var leaky: WalkCtx
-  lowerDegrade(seUnsupportedStringOp, "rfc0005 S1 leak probe")
+  queueDegrade(seUnsupportedStringOp, "rfc0005 S1 leak probe")
   stampLoweringPendingLeak(leaky)
   result.leakStampedKinds = kindsOf(leaky.walkDegradeErrors)
   for e in leaky.walkDegradeErrors: result.leakStampedSeverities.add e.severity
-  result.pendingAfterStamp = loweringPendingTaint
+  result.pendingAfterStamp = peekPending().taint
   loweringDegradeErrors = savedLowering
-  loweringPendingTaint = savedPending
+  restorePending(savedPending)
 
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
@@ -14934,8 +14922,7 @@ type
     ## became the body's. `takePendingLowerEffects` sets them aside (and
     ## clears the sinks) before the descent; `restorePendingLowerEffects` puts
     ## them back after it, before the call deposits its own.
-    pendingTaint: Taint
-    pendingUb: set[UbKind]                    ## RFC-0016 W1-d3
+    queue: PendingDegrade                     ## RFC-0016 INT-34 (W1-d3: with its `ub`)
     parseInt: seq[ParseIntRaise]              ## RFC-0005 S10
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
     convBound: seq[ConvBound]
@@ -14964,7 +14951,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   ## mirror their own), so they are what is saved; every store is cleared. The caller-heap seed is saved, not
   ## cleared -- the descent reads it.
   result = PendingLowerEffects(
-    pendingTaint: loweringPendingTaint, pendingUb: loweringPendingUb,
+    queue: setAsidePending(),
     parseInt: w.sinks.parseIntRaiseConds, divByZero: w.sinks.divByZeroConds,
     overflow: w.sinks.overflowConds, strIndexOob: w.sinks.strIndexOobConds,
     seqOob: w.sinks.seqOobConds, convBound: w.sinks.convFloatToIntBoundConds,
@@ -14980,8 +14967,6 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     envWrites: closureEnvWrites, readNames: loweringReadNames)
   closureEnvWrites = @[]
   loweringReadNames = @[]
-  loweringPendingTaint = {}
-  loweringPendingUb = {}
   w.sinks.parseIntRaiseConds = @[]
   w.sinks.divByZeroConds = @[]
   w.sinks.overflowConds = @[]
@@ -15002,8 +14987,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   ## RFC-0005 S7. Inverse of `takePendingLowerEffects`: reinstates the calling
   ## expression's pending effects in every store, discarding whatever the
   ## descent's own statement arms left behind (they drained their own).
-  loweringPendingTaint = s.pendingTaint
-  loweringPendingUb = s.pendingUb
+  restorePending(s.queue)
   w.sinks.parseIntRaiseConds = s.parseInt
   w.sinks.divByZeroConds = s.divByZero
   w.sinks.overflowConds = s.overflow
@@ -16137,7 +16121,7 @@ proc pruneFactsHold(ctx: Z3Context; p: Path; facts: seq[seq[Z3Bool]];
 # which call `forkPathTainted` instead. Because the taint argument is no
 # longer a bare value at the call site, "silently drop the parent's taint" is
 # not spellable; RFC-0005 S1 goes further — `forkPathTainted` takes a
-# `Degrade` token (only `degrade`/`lowerDegrade` mint one from a recorded
+# `Degrade` token (only `degrade`/`queueDegrade` mint one from a recorded
 # kind), the return merge is `forkPathMerged`, and the shared constructor
 # `forkPathTaintPrimitive` is "not for sites" (writer grep-pin). The list below still documents
 # fork-site provenance for the heap-copy contract.
@@ -17442,13 +17426,12 @@ proc drainPendingLowerEffects(p: Path): Path =
   ##       LiveRefs` is merged into the path's `heaps/allocCounters/liveRefs`
   ##       (via `drainClosureExitHeap`, conditional on `currentClosureDidMutateHeap`)
   ##       and all four exit-heap threadvars are reset to clean state.
-  ##   (d) SND-3 (ADR-0023, walker v58): if `loweringPendingTaint` is
+  ##   (d) SND-3 (ADR-0023, walker v58): if the lowering queue is
   ##       non-empty (a lowering site returned a fresh unconstrained symbol
-  ##       in-band instead of raising, via `lowerDegrade`), fork the path
-  ##       joining that pending taint as its `Degrade` token and reset it
-  ##       (RFC-0005 S1; the run coordinate is derived at drain from the
-  ##       recorded `loweringDegradeErrors`). The ONLY per-path consumer of
-  ##       `loweringPendingTaint` (the other is the walk-end leak stamp).
+  ##       in-band instead of raising, via `queueDegrade`), fork the path
+  ##       joining the taken queue as its `Degrade` token (`takePending`;
+  ##       RFC-0005 S1; the run coordinate is derived at drain from the
+  ##       recorded `loweringDegradeErrors`).
   ##
   ## USAGE CONVENTION (uniform pattern at every `lower()`/`lowerBool()` call site
   ## inside `walk`):
@@ -17477,13 +17460,13 @@ proc drainPendingLowerEffects(p: Path): Path =
   # (d) SND-3 (ADR-0023, walker v58). Fork BEFORE mutating (same rationale as
   # (c) above) so we never alias a sibling path's taint. This is the single
   # choke-point that folds an in-band lowering-degrade into the per-path
-  # taint. RFC-0005 S1: the pending taint `lowerDegrade` joined (one join per
+  # taint. RFC-0005 S1: the pending taint `queueDegrade` joined (one join per
   # recorded `loweringDegradeErrors` entry) becomes this path's `Degrade`
   # token; the RUN coordinate is no longer written here (was the
   # `currentWalkCtxPtr.sawUnknown` write) — it is derived at drain from the
-  # very `loweringDegradeErrors` entries `lowerDegrade` recorded.
-  if loweringPendingTaint != {}:
-    p2 = forkPathTainted(p2, p2.pc, p2.env, takeLoweringPendingDegrade())
+  # very `loweringDegradeErrors` entries `queueDegrade` recorded.
+  if not pendingIsEmpty():
+    p2 = forkPathTainted(p2, p2.pc, p2.env, asDegrade(takePending()))
   # (e) RFC-0005 S8as: the by-reference writes of the expression's closure
   # calls land on the calling path (`closureEnvWrites`), in call order.
   if closureEnvWrites.len > 0:
@@ -17527,7 +17510,7 @@ proc drainPendingLowerEffects(p: Path): Path =
 
 proc claimStrayPendingTaint() =
   ## RFC-0005 review R1-04. The entry check of every walker lowering:
-  ## `loweringPendingTaint` must be empty when a walk arm starts lowering for
+  ## the lowering queue must be empty when a walk arm starts lowering for
   ## a path, because the drain that follows folds whatever is queued onto
   ## THAT path. A non-empty queue is a deposit an earlier lowering in this
   ## statement left undrained -- possibly for a sibling path (the raw
@@ -17543,13 +17526,14 @@ proc claimStrayPendingTaint() =
   ## path's decline on its siblings too (an over-taint, never an unsound
   ## verdict), so a debug build stops on it and a release build keeps it.
   when not buildSemantics.release:
-    doAssert loweringPendingTaint == {},
+    doAssert pendingIsEmpty(),
       "claimStrayPendingTaint: a lowering left pending taint " &
-      $loweringPendingTaint & " with no drain of its own (RFC-0016 R2-08)"
-  if loweringPendingTaint != {} and currentWalkCtxPtr != nil:
+      $peekPending().taint & " with no drain of its own (RFC-0016 R2-08)"
+  if not pendingIsEmpty() and currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].stmtStrayTaint = wp[].stmtStrayTaint + loweringPendingTaint
-    wp[].stmtStrayUb = wp[].stmtStrayUb + loweringPendingUb
+    let stray = peekPending()
+    wp[].stmtStrayTaint = wp[].stmtStrayTaint + stray.taint
+    wp[].stmtStrayUb = wp[].stmtStrayUb + stray.ub
 
 proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
                  proto = none(SymVal)): (SymVal, Path) =
@@ -17632,7 +17616,7 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): (SymVal, Path) =
   ## name-only `bytes(s)` model that produced it.)
   ##
   ## RFC-0005 S8bw (item 1): pure, but not decline-free -- a global read
-  ## before any write declines in-band (`lowerDegrade`). That pending taint
+  ## before any write declines in-band (`queueDegrade`). That pending taint
   ## lands on the returned path, `p` forked tainted; it was left for some
   ## later drain, and on the arms that fork no further it leaked to the
   ## walk end (`weInternalWalkerFault`, `gSeq[0] = k`).
@@ -17641,8 +17625,8 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): (SymVal, Path) =
     " — add seed+drain if parser changes"
   claimStrayPendingTaint()               ## RFC-0005 review R1-04
   let sv = lower(p.env, e)
-  if loweringPendingTaint == {}: return (sv, p)
-  (sv, forkPathTainted(p, p.pc, p.env, takeLoweringPendingDegrade()))
+  if pendingIsEmpty(): return (sv, p)
+  (sv, forkPathTainted(p, p.pc, p.env, asDegrade(takePending())))
 
 # nilDerefFork moved to runtime_heap.nim (CR-7-deeper Stage 8+).
 
@@ -23650,7 +23634,7 @@ proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
               mkVar(addrSnapPrefix & "key"), mkVar(c.local)))
             # RFC-0016 INT-37 (R2-08): this raw `lower` drains its own queue
             # onto the path it lowered for, so no later lowering claims it.
-            taintInPlace(q, takeLoweringPendingDegrade())
+            taintInPlace(q, asDegrade(takePending()))
             let holder = locSet(env2[c.slot], c.path, @[], t2)
             if holder.isNone:
               viewWhy = "the walk does not find the Table in its holder"
@@ -24521,7 +24505,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0005 review R1-04, R2 (SD1/SD2), R3 (T1). `walkCapSynced`, with the
   ## statement as the unit of the pending-lowering-taint discipline. A
   ## lowering decline cannot fork a path from inside `lower`: it queues its
-  ## taint (`loweringPendingTaint`) for the walk arm that called `lower` to
+  ## taint (`queueDegrade`) for the walk arm that called `lower` to
   ## drain onto the path it lowered for.
   ##
   ## A statement owns what it queues, and only that. What is queued when it
@@ -24556,22 +24540,20 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0016 INT-36 (R3-17): and the findings it filed (`stampStatementSince`):
   ## a hit solved mid-statement, before the stray was found, was filed from a
   ## path that did not carry it yet.
-  let outerPending = loweringPendingTaint
-  let outerPendingUb = loweringPendingUb
-  loweringPendingTaint = {}
-  loweringPendingUb = {}
+  let outerPending = setAsidePending()
   let outerStray = w.stmtStrayTaint
   let outerStrayUb = w.stmtStrayUb
   w.stmtStrayTaint = {}
   w.stmtStrayUb = {}
   let since = w.stmtMark
   result =
-    if outerPending == {}: walkCapSynced(stmt, paths, w)
-    else: walkCapSynced(stmt, taintAll(paths, outerPending, outerPendingUb), w)
-  let stray = w.stmtStrayTaint + loweringPendingTaint
-  let strayUb = w.stmtStrayUb + loweringPendingUb
-  loweringPendingTaint = outerPending
-  loweringPendingUb = outerPendingUb
+    if outerPending.taint == {}: walkCapSynced(stmt, paths, w)
+    else: walkCapSynced(stmt, taintAll(paths, outerPending.taint,
+                                       outerPending.ub), w)
+  let left = takePending()
+  let stray = w.stmtStrayTaint + left.taint
+  let strayUb = w.stmtStrayUb + left.ub
+  restorePending(outerPending)
   w.stmtStrayTaint = outerStray
   w.stmtStrayUb = outerStrayUb
   if stray != {}:
@@ -24620,7 +24602,7 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
   ##   3. Two raises caught by one bare `except` whose arm holds an inner
   ##      `try`; the second is stamped as its own statement. Its entry must
   ##      carry the taint wherever the inner try's claim left it.
-  let savedPending = loweringPendingTaint
+  let savedPending = setAsidePending()
   let spur: Taint = {scSpurious}
   template np(): Path = Path(pc: @[], env: initOrderedTable[string, SymVal]())
   proc probeCtx(): WalkCtx =
@@ -24629,13 +24611,13 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
     result.frame = initCallFrameCtx(result.exitClock)
   var w = probeCtx()
   w.loopStack.add initLoopFrame(w.exitClock)
-  loweringPendingTaint = spur
+  queueDegrade(spur)
   let r = walk(mkBreak(), @[np()], w)
   result.resultLen = r.len
-  result.pendingAfter = loweringPendingTaint
+  result.pendingAfter = peekPending().taint
   if w.loopStack[0].exits.breakPaths.len > 0:
     result.breakTaint = w.loopStack[0].exits.breakPaths.contents[0].taint
-  loweringPendingTaint = savedPending
+  restorePending(savedPending)
   var w2 = probeCtx()
   w2.loopStack.add initLoopFrame(w2.exitClock)
   w2.callStack.add initCallFrame(w2.exitClock)
@@ -24717,8 +24699,7 @@ proc strayClaimProbe*(): StrayClaimProbe =
   ## queued by no lowering of its own: a debug build stops on it, a release
   ## build keeps it for the statement. Restores every threadvar it touches.
   ## For `tests/tsymex_0016_int37_probes.nim` only.
-  let savedPending = loweringPendingTaint
-  let savedPendingUb = loweringPendingUb
+  let savedPending = setAsidePending()
   let savedCtx = currentWalkCtxPtr
   let savedSinks = currentLowerSinks
   var w: WalkCtx
@@ -24727,19 +24708,17 @@ proc strayClaimProbe*(): StrayClaimProbe =
   w.frame = initCallFrameCtx(w.exitClock)
   currentWalkCtxPtr = addr w
   currentLowerSinks = addr w.sinks
-  loweringPendingTaint = {scSpurious}
-  loweringPendingUb = {}
+  queueDegrade({scSpurious})
   try:
     claimStrayPendingTaint()
   except AssertionDefect:
     result.tripped = true
   result.strayKept = w.stmtStrayTaint
-  discard takeLoweringPendingDegrade()
-  result.pendingAfter = loweringPendingTaint
+  discard takePending()
+  result.pendingAfter = peekPending().taint
   currentWalkCtxPtr = savedCtx
   currentLowerSinks = savedSinks
-  loweringPendingTaint = savedPending
-  loweringPendingUb = savedPendingUb
+  restorePending(savedPending)
 
 proc haltExcludedDefect(p: Path, typeId: string, w: var WalkCtx) =
   ## RFC-0016 K7b (W-16). A `Defect` raise that reaches the SUT boundary
@@ -25640,7 +25619,7 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     if nm in readBefore and displayName(nm) notin clash:
       clash.add displayName(nm)
   if clash.len > 0:
-    lowerDegrade(ceCaptureByRefUnmodelled,
+    queueDegrade(ceCaptureByRefUnmodelled,
       "closure call through `" & e.ccCallee & "` writes " & clash.join(", ") &
            ", which the same expression reads; the order of that read and " &
            "the write is not modelled (ceCaptureByRefUnmodelled)")
@@ -25987,10 +25966,10 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # too, and the consuming path still gets its own (`restorePendingLowerEffects`).
   # So with a decline the calling path has already passed (`f(t["a"], t)`'s marker).
   let bodyEntry =
-    if pending.pendingTaint + currentCallerTaint != {}:
+    if pending.queue.taint + currentCallerTaint != {}:
       forkPathTainted(descentBase, descentBase.pc, descentBase.env,
-                      carriedDegrade(pending.pendingTaint + currentCallerTaint,
-                                     pending.pendingUb + currentCallerUb))
+                      carriedDegrade(pending.queue.taint + currentCallerTaint,
+                                     pending.queue.ub + currentCallerUb))
     else: descentBase
   # RFC-0005 S8bh: the body specialised to the call's shared locations.
   let outerBodyPc = closureBodyCallerPc
@@ -26167,8 +26146,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for cp in fallThrough:
     exitTaint = exitTaint + cp.taint
     exitUb = exitUb + cp.undefined
-  loweringPendingTaint = loweringPendingTaint + exitTaint
-  loweringPendingUb = loweringPendingUb + exitUb
+  queueDegrade(exitTaint, exitUb)
   # ---- 5. Lift each body return sub-path to a GROUND per-call axiom (D6). ----
   # Two channels yield sub-paths `(branch_conds_i, v_i)`:
   #   (a) EXPLICIT `return EXPR` — `walk(isReturn)` bound the value to the frame
@@ -26593,7 +26571,7 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     # placeholder discipline -- never call the unsafe function, never
     # attempt to `storeSeqElem` real (unbacked-typed) content into a
     # placeholder array.
-    lowerDegrade(seNestedSeqUnsupported,
+    queueDegrade(seNestedSeqUnsupported,
       "seq[seq[T]] / seq[complex] not modeled — element kind " &
            plainEnglishTypeKind(elemTy.kind) &
            " (nested seq element type is not supported)")
@@ -26679,7 +26657,7 @@ proc lowerSeqNew(env: Env, e: IRExpr): SymVal =
   if not isBackedSeqElemTy(elemTy) or
      (needZero and not defaultZeroTotal(elemTy)) or
      lenSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
-    lowerDegrade(seNestedSeqUnsupported,
+    queueDegrade(seNestedSeqUnsupported,
       op & " of a " & plainEnglishTypeKind(elemTy.kind) &
         " element (or a non-integer length) not modelled")
     var fresh: seq[Z3Bool]
@@ -26700,7 +26678,7 @@ proc lowerSeqNew(env: Env, e: IRExpr): SymVal =
       # (S8bc's leaf split) has one array per leaf, and a write of one
       # leaf would read as a write of the element, so the whole path stays
       # tainted, as before S8bq.
-      lowerDegrade(feUnsupportedOpHavoc,
+      queueDegrade(feUnsupportedOpHavoc,
         "newSeqUninit element values are unspecified — degraded to sxUnknown")
     return mkSeqSV(toZ3Int(lenSV), arrs, elemTy)
   mkSeqSV(toZ3Int(lenSV), seqNewZeroArrs(elemTy), elemTy)
@@ -26792,7 +26770,7 @@ proc variantLitArms(env: Env, arms: seq[VariantArm], tagOrd: int,
         # touch that field), the safe direction per Invariant 3.
         let ftIssue = unallocatableFieldIssue(ft)
         if ftIssue.isSome:
-          lowerDegrade(ftIssue.get.kind,
+          queueDegrade(ftIssue.get.kind,
             "variant literal inactive-arm field `" & objName &
                  "." & arm.fieldNames[j] & "` allocation unmodeled — " &
                  ftIssue.get.msg & " (arm-field allocation, not param-entry)")
@@ -26965,7 +26943,7 @@ proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
   # `feUnsupportedOp` (`dcSubstituted`, which taints the path). It was
   # `seVariantFieldOnDeclinedCtor`, the READ arm's halt kind (`dcOmitted`,
   # no path taint), right only where the path ends.
-  lowerDegrade(feUnsupportedOp,
+  queueDegrade(feUnsupportedOp,
     "variant field '" & e.vfsFieldName & "' written on a receiver with no " &
     "such field slot (SymVal kind=" & $recv.kind & "): the write is " &
     "dropped (feUnsupportedOp)")
@@ -27124,7 +27102,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # that even a single non-top-level catch/raise on this backend can
       # misbehave).
       if not isBackedSeqElemTy(e.hofRetElemTy):
-        lowerDegrade(seNestedSeqUnsupported,
+        queueDegrade(seNestedSeqUnsupported,
           "seq[seq[T]] / seq[complex] not modeled — element kind " &
                plainEnglishTypeKind(e.hofRetElemTy.kind) &
                " (nested seq element type is not supported)")
@@ -27151,7 +27129,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # `map` arm immediately above -- see its own comment for the full
       # rationale (identical hazard, identical fix).
       if not isBackedSeqElemTy(elemTy):
-        lowerDegrade(seNestedSeqUnsupported,
+        queueDegrade(seNestedSeqUnsupported,
           "seq[seq[T]] / seq[complex] not modeled — element kind " &
                plainEnglishTypeKind(elemTy.kind) &
                " (nested seq element type is not supported)")
@@ -29561,7 +29539,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # RFC-0005 S1c: the walk-end pending-taint leak pin, exactly as
   # `runSymexImpl` runs it. This driver used to skip it, so a lowering
   # degrade whose path taint was never drained stayed in the
-  # `loweringPendingTaint` threadvar after the collect returned (reset only at
+  # lowering queue threadvar after the collect returned (reset only at
   # the NEXT run's entry) and went uncounted. The stamp records a classified
   # `weInternalWalkerFault` into `w.walkDegradeErrors`, which the
   # `walkDegradeCount` read below picks up, and clears the residue.

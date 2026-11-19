@@ -97,7 +97,7 @@ const
   ## What slice D3c-1 moved out of `runtime.nim`.
   movedNames = [
     "SVKind", "SymVal", "Env", "plainEnglishSymValKind", "liftBV", "ofBool",
-    "bvVar", "bvRangeConds", "lowerDegrade", "StrBuf", "VariantAxisSym",
+    "bvVar", "bvRangeConds", "queueDegrade", "StrBuf", "VariantAxisSym",
     "truncBV"]
 
 proc leadIdent(s: string): string =
@@ -573,7 +573,7 @@ suite "RFC-0016 D3c-1: the symval leaf":
     for l in sv.splitLines:
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
-    check tvs.len == 4   # + RFC-0016 CRH-07 rawKeep
+    check tvs.len == 3   # + RFC-0016 CRH-07 rawKeep; INT-34: one lowering queue (`pending`)
     for n in tvs:
       checkpoint n
       check resetBody.contains("\n  " & n & " = ")

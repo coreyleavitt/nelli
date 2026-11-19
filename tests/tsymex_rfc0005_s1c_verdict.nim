@@ -222,7 +222,7 @@ suite "RFC-0005 S1c (d) -- the lowering pending-taint leak (S1b's N40-4 finding)
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedTableKeyType)
     check not r.errors.hasKind(weInternalWalkerFault)
-    check loweringPendingTaint == {}
+    check pendingIsEmpty()
 
   test "a walk-level call-return allocation drains its pending taint onto its path (no leak stamp)":
     let r = pinFind(s1cOpaqueBadRet, tLabel("s1c_bad_ret"))
@@ -230,13 +230,13 @@ suite "RFC-0005 S1c (d) -- the lowering pending-taint leak (S1b's N40-4 finding)
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedTableKeyType)
     check not r.errors.hasKind(weInternalWalkerFault)
-    check loweringPendingTaint == {}
+    check pendingIsEmpty()
 
   test "a concolic collect ends its walk with no pending lowering taint left on the thread":
     let r = concolicCollect(s1cHeapWriteFlat, newSeq[ChoiceNode](),
                             newSeq[ConcolicParamBinding]())
     checkpoint("walkDegradeCount=" & $r.counters.walkDegradeCount)
-    check loweringPendingTaint == {}
+    check pendingIsEmpty()
 
 # ---- (e) the candidate pool, observed on the raw result (IR level) ----------
 # `RawResult.candidates` is the pool S10's replay reads; `symexFind` does not

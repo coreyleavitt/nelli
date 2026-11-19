@@ -813,7 +813,7 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     let hiSV = if e.strArgs.len >= 3: lowerStrOperand(env, e.strArgs[2], intProto)
                else: SymVal(kind: svInt, zi: len(recv.str) - mkInt(1))
     if loSV.kind != svInt or hiSV.kind != svInt:
-      lowerDegrade(seUnsupportedStringOp,
+      queueDegrade(seUnsupportedStringOp,
         "iekStrSubstr: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
              plainEnglishSymValKind(hiSV.kind) & " — a bitvector-represented bound would bv2int-" &
              "bridge into Sequence theory, a Z3 non-termination shape " &

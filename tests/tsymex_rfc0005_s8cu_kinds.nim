@@ -14,6 +14,13 @@
 ## `ubSignedOverflow` halt, not a `feOverflowCheckOption` decline. A closure
 ## iterator whose `overflowChecks` differs from its caller's still declines
 ## (`feCheckOption`).
+##
+## RFC-0016 int6 (walker 477, int6-a5): a `{.push ...}` / `{.pop.}` of check
+## options among a user routine's body statements is walked as a region of
+## its own (`withCheckDeclines`), not declined as an unsupported statement:
+## the body's pushed-off write is exact. A routine defined under such a push
+## is declined by name (`feCheckOption`, "declared inside"), no longer by the
+## pragma statement (`feUnsupportedStmtKind`).
 import std/[unittest, sets, options]
 import nelli
 import nelli/symex
@@ -180,13 +187,19 @@ proc checksOnNoFloat(v: int) = writeWrongBranch(v)
 
 suite "S8cu: a body":
 
-  test "a push in a body declines by its statement":
+  test "a push in a body is walked as its own region, exact":
+    # int6 (walker 477): the in-body `{.push fieldChecks: off.}` region is
+    # walked with the check off, as native compiles it: its wrong-branch
+    # write reaches the label (no `FieldDefect` on any input).
     check native(bodyPush(4)) == "hit"
-    pinDecline(bodyPush, declKey, feUnsupportedStmtKind)
+    writesExact(bodyPush)
 
-  test "a routine nested under a body's push":
+  test "a routine nested under a body's push declines by name":
+    # int6 (walker 477): the in-body push is read; the routine declared
+    # inside it is declined with `feCheckOption`, no longer as an
+    # unsupported pragma statement (`feUnsupportedStmtKind`).
     check native(bodyPushNested(4)) == "hit"
-    pinDecline(bodyPushNested, declKey, feUnsupportedStmtKind)
+    pinDecline(bodyPushNested, declKey, feCheckOption, needle = "declared inside")
 
 suite "S8cu: a forward declaration":
 

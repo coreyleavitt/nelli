@@ -211,6 +211,7 @@ template declineCell(sut: untyped; cell: static string;
 
 suite "K4b: the reachable magic cells, through symexFind":
   exactCell(sAddr, "Addr")
+  exactCell(sCStrToStr, "CStrToStr")   ## RFC-0016 INT-87
   exactCell(sArrToSeq, "ArrToSeq")
   exactCell(sAsgn, "Asgn")
   exactCell(sBoolToStr, "BoolToStr")
@@ -245,7 +246,6 @@ suite "K4b: the reachable magic cells, through symexFind":
   exactCell(sSlice, "Slice")
   exactCell(sSetLenUninit, "SetLengthSeqUninit")
   exactCell(sEqProc, "EqProc")
-  declineCell(sCStrToStr, "CStrToStr", feUnsupportedOp)
   exactCell(sEqCString, "EqCString")
   declineCell(sGCref, "GCref", feUnsupportedExprKind)
   declineCell(sGCunref, "GCunref", feUnsupportedOp)

@@ -1209,6 +1209,14 @@ proc depositStrIndexOob(oob: Z3Bool) =
     strIndexOobConds.add oob
     syncStrIndexOobCond(oob)
 
+proc depositUndefinedOob(oob: Z3Bool) =
+  ## RFC-0016 INT-87. `c[i]` on a `cstring` outside `0 .. len(c)`: C reads
+  ## past the buffer, undefined whatever the build's checks.
+  let tr = ArithTrap(cond: oob, ub: some(uncheckedIndexUb()),
+                     site: uncheckedIndexSite(""))
+  arithTrapConds.add tr
+  syncArithTrapCond(tr)
+
 proc seedCallerHeapInWalkCtx*(p: Path)
   ## CR-9 Stage 6 fwd-decl (Groups 3+4). If `currentWalkCtxPtr != nil` (a
   ## walk is active), mirrors `p`'s heap state into the WalkCtx fields
@@ -28539,6 +28547,21 @@ proc readUInt64*(w: RawWitness, name: string): uint64 =        w.uintVals[name]
 
 proc readString*(w: RawWitness, name: string): string = w.strVals[name]
 
+var cstringWitnessBufs {.threadvar.}: seq[ref string]
+  ## RFC-0016 INT-87. The buffers `readCString` handed out, kept alive for
+  ## the thread: a witness `cstring` addresses one, and the tuple holding it
+  ## may outlive any scope the reader runs in.
+
+proc readCString*(w: RawWitness, name: string): cstring =
+  ## RFC-0016 INT-87. A `cstring` witness (`tCString`): nil, or a fresh
+  ## buffer holding the model's bytes and the terminating NUL (a Nim string
+  ## keeps one past its length).
+  if not w.boolVals[name & ".nonNil"]: return nil
+  let buf = new string
+  buf[] = w.strVals[name & ".bytes"]
+  cstringWitnessBufs.add buf
+  cstring(buf[])
+
 # ---- RFC-0005 S8h: ref witnesses built from the model's input heap ---------
 #
 # A `ref`/`ptr` position of the typed witness (a param, a field of a by-value
@@ -29465,4 +29488,5 @@ lowerHooks = LowerHooks(
   lower: lower, lowerClosureCall: lowerClosureCall,
   currentFrameId: currentFrameId,
   registerCapCell: registerCapCell,
-  depositStrIndexOob: depositStrIndexOob)
+  depositStrIndexOob: depositStrIndexOob,
+  depositUndefinedOob: depositUndefinedOob)

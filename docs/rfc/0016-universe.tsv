@@ -302,7 +302,7 @@ magic:BoolToStr	modelled	-
 magic:BuildCPU	never	-
 magic:BuildOS	never	-
 magic:BuiltinType	never	-
-magic:CStrToStr	declined	-
+magic:CStrToStr	modelled	-
 magic:Card	modelled	-
 magic:CharToStr	modelled	-
 magic:Chr	modelled	-

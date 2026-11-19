@@ -686,7 +686,8 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     let inLoCond = idxZi >= mkInt(0)
     let inHiCond = idxZi < strLenZi
     let oob = not (inLoCond and inHiCond)
-    lowerHooks.depositStrIndexOob(oob)
+    if e.strOp == cstringIndexOp: lowerHooks.depositUndefinedOob(oob)   # RFC-0016 INT-87
+    else: lowerHooks.depositStrIndexOob(oob)
     let code = toCode(at(recv.str, idxZi))
     liftBV(intToBv[8](code, Z3BitVec[8]), false)
   of iekStrSubstr:

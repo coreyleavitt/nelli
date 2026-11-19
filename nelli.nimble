@@ -2148,8 +2148,10 @@ task test, "Run the test suite":
             # RFC-0016 W3-z E6: the allowlist ratchet (a committed ceiling per allowlist file; growth and unlowered shrinkage both fail).
             "tsymex_0016_allowlist_ceilings",
             "tsymex_0016_noproducer",
-            # RFC-0016 K2c: one snippet per NimTypeKind through symexFind, and classifyType reading the named-feature rows (owned, Atomic, c_longdouble).
-            "tsymex_0016_k2c_typeclass",
+            # RFC-0016 K2c: one snippet per NimTypeKind through symexFind, and classifyType reading the named-feature rows (owned, Atomic, c_longdouble). Three parts (INT-51: the single suite ran 150.9 s on msvc): the scalar/aggregate kinds, the pointer/view kinds, and the named-feature, version and by-value rows.
+            "tsymex_0016_k2c_typeclass_a",
+            "tsymex_0016_k2c_typeclass_b",
+            "tsymex_0016_k2c_typeclass_c",
             "tsymex_0016_p6_nillit",
             # RFC-0016 W3-z P12: isNil on a NimNode answers true for a nnkNilLit; a nil literal in each expression position agrees with native.
             "tsymex_0016_p12_nilpos",

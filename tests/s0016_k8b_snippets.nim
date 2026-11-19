@@ -304,7 +304,7 @@ const definedSnippets = @[
 const typeClassSnippets = @[
   sn("alias", "N_f(t)", top = "type N_A = int\nproc N_f(x: N_A): int = x + 1"),
   sn("array", "N_f([t, u])", top = "proc N_f(x: array[2, int]): int = x[0] - x[1]"),
-  # the by-value formal site, in the pin's shape (tsymex_0016_k2c_typeclass
+  # the by-value formal site, in the pin's shape (tsymex_0016_k2c_typeclass_c
   # `bvPtr`: a global `ptr` handed to a `pointer` formal the callee never reads)
   sn("pointer", "N_f(N_g) + ord(N_g == nil) + t", "N_g = nil",
      top = "var N_g: ptr int\nproc N_f(p: pointer): int =\n  N_g = nil\n  3"),
@@ -351,7 +351,7 @@ const typeClassSnippets = @[
   sn("var", "V_x", "var V_x = t\n  N_f(V_x)", top = "proc N_f(x: var int) = x = x + 3"),
   # the row is the by-value formal site only (a cstring parameter of the
   # SUT, a `len` of one or a conversion to one declines): the shape
-  # tsymex_0016_k2c_typeclass pins, a global built from literals and handed
+  # tsymex_0016_k2c_typeclass_c pins, a global built from literals and handed
   # to a callee that compares it
   sn("cstring", "N_f(N_g)", "N_g = (if t > 3: \"abc\" else: \"x\")",
      top = "var N_g: cstring\n" &

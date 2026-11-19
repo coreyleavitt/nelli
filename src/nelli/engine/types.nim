@@ -15,6 +15,8 @@ import ../smt/soundness   ## RFC-0005 S11: Z3-free and IR-free (a leaf)
 export soundness
 import ../smt/budget      ## review R1-17: Z3-free and IR-free (a leaf)
 export budget
+import ../smt/errorkind   ## RFC-0016 INT-34: Z3-free and IR-free (a leaf)
+export errorkind
 
 type
   SymexFindingStatus* = enum
@@ -126,9 +128,11 @@ type
 
   FindingHint* = object
     ## RFC-0005 W1. One entry of `SymexFinding.hints`: a recorded diagnostic
-    ## that decided nothing, projected to strings like `FindingGap`.
-    kind*:     string   ## the `SymexErrorKind`, by name (e.g. "feReplayCrashed")
-    severity*: string   ## the `SymexErrorSeverity`, by name ("sevHint", "sevWarning")
+    ## that decided nothing, projected onto the Z3-free leaf types like
+    ## `FindingGap`. RFC-0016 INT-34: `kind` and `severity` are the enums, not
+    ## their names; every renderer prints `$kind`, so the text is unchanged.
+    kind*:     SymexErrorKind      ## e.g. `feReplayCrashed`
+    severity*: SymexErrorSeverity  ## `sevHint` or `sevWarning`
     msg*:      string
 
   FindingDiagnostic* = object
@@ -149,7 +153,7 @@ type
     ## the run coordinate, with the `DegradeClass` that names its lever (see
     ## `gaps()` in `smt/types.nim` for the class -> lever table).
     class*: DegradeClass
-    kind*:  string   ## the `SymexErrorKind`, by name (e.g. "beBudgetExhausted")
+    kind*:  SymexErrorKind   ## e.g. `beBudgetExhausted`
     msg*:   string   ## the decline's message, naming the budget or call
 
   FalsifiedError* = object of CatchableError
@@ -274,6 +278,13 @@ type
       ## or a failure. Empty when symex wasn't used. Phase 7. Review R1-10:
       ## nothing from another run leaks in; the collector is the run's own
       ## engine frame (`recordSymexFinding`).
+    droppedSymexFindings*: int
+      ## RFC-0016 INT-36 (0005 review R5-07). How far the process's count of
+      ## dropped findings (`droppedSymexFindings()`) moved while this run
+      ## ran: findings `assertCoveredBy` made with no engine frame open on
+      ## its thread (a thread the property started), so on no report. Every
+      ## renderer shows it when non-zero. Process-wide, so a run concurrent
+      ## with this one on another thread counts here too.
     crash*: Option[CrashInfo]
       ## RFC-fuzzer-nextgen U0: typed crash identity when the falsifying
       ## example was a caught property `Defect` (failed `doAssert`,
@@ -299,31 +310,3 @@ func defaultSettings*(): Settings =
   ## release that already changes the behaviour of every partial literal.
   Settings()
 
-# ---- engineSymexDbErrors sink (Phase 14 cycle C2) ---------------------------
-#
-# Layer 1's `symexFindAllWitnesses` macro currently routes DB save/
-# load errors into a local `errors` accumulator, but the engine
-# layer's `Report.dbErrors` (the user-visible surface) never
-# receives them. C2 adds a thread-local sink: Layer 1 deposits,
-# `finalizePhase` drains via `consumeSymexDbErrors()` and appends to
-# `Report.dbErrors`.
-
-var engineSymexDbErrors* {.threadvar.}: seq[string]
-
-proc recordSymexDbError*(msg: string) =
-  engineSymexDbErrors.add msg
-
-proc consumeSymexDbErrors*(): seq[string] =
-  result = engineSymexDbErrors
-  engineSymexDbErrors.setLen(0)
-
-# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
-# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
-# a thread that exits leaks none of it. A threadvar added to this module
-# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
-import ../thread_state
-
-proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
-  releaseToDefault(engineSymexDbErrors)
-
-registerThreadStateRelease(releaseThreadState)

@@ -436,7 +436,7 @@ proc finalizePhase*[T](state: var EngineState[T]): PhaseAction =
       displayed: renderDisplayed(state.spec.s, state.output.shrunkExample),
       events: snapshotEvents(),
       printEvents: state.spec.settings.printEvents,
-      dbErrors: state.acc.dbErrors & consumeSymexDbErrors(),
+      dbErrors: state.acc.dbErrors,
       # RFC-fuzzer-nextgen U1: left at the zero-value default here.
       # `coverageGuided`'s authoritative `coverageHits` (driven by the
       # per-run `CoverageFrontier`, not this module's raw bitmap read) is

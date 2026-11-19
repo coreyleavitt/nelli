@@ -45,7 +45,7 @@ suite "RFC-0005 S8az (1) -- :sat witness cache hit also serves gaps()":
   test "saveSymexWitnessImpl/loadSymexWitnessesImpl round-trip non-empty gaps":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
-    let gaps = @[FindingGap(class: dcSubstituted, kind: "feOpaqueCallUnmodelled",
+    let gaps = @[FindingGap(class: dcSubstituted, kind: feOpaqueCallUnmodelled,
                             msg: "opaque call s8azSensor")]
     let finding = SymexFinding(status: sfSat, witnessChoices: @[],
                                soundness: Soundness(pathTaint: {scSpurious}),
@@ -111,7 +111,7 @@ suite "RFC-0005 S8az (2) -- :raised:<type> cache hit also serves gaps()":
   test "saveSymexRaisedImpl/loadSymexRaisedImpl round-trip non-empty gaps":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
-    let gaps = @[FindingGap(class: dcFreshSymbol, kind: "feUnsupportedOpHavoc",
+    let gaps = @[FindingGap(class: dcFreshSymbol, kind: feUnsupportedOpHavoc,
                             msg: "a < a modelled as a fresh symbol")]
     let found = @[RawResult(status: sxRaised, raisedTypeId: "ValueError",
                             soundness: Soundness(pathTaint: {scSpurious}))]
@@ -134,7 +134,7 @@ suite "RFC-0005 S8az (2) -- :raised:<type> cache hit also serves gaps()":
     # A normal S8az-era save populates the (private-keyed) index entry AND a
     # gaps-carrying per-type sentinel.
     saveSymexRaisedImpl(db, s8azRaisedProg, s8azRaisedTarget, settings, found,
-                        errors, @[@[FindingGap(class: dcFreshSymbol, kind: "x",
+                        errors, @[@[FindingGap(class: dcFreshSymbol, kind: feUnsupportedOpHavoc,
                                                msg: "y")]])
     check errors.len == 0
     # Overwrite ONLY the per-type sentinel with the exact pre-S8az shape --

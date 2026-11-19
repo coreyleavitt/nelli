@@ -16,19 +16,49 @@
 ## No constructor's payload may contain an unescaped sigil; primitives
 ## are wrapped to enforce that.
 
-import std/[strutils, tables, algorithm]
+import std/[strutils, tables, algorithm, options]
 import ./types
 import ./replayproc   ## RFC-0005 0.9.1 (WA-8): how this build replays
 import ./buildprofile ## RFC-0016 W1-c1a: the build reads live there
 import ./sha256       ## review R3 (E10): the one hash the cache keys with
 import ./toolchain_id ## RFC-0016 INT-31: the `|tc=` segment
 
+func symexCacheKeyPrefixFor*(walkerVersion: string): string =
+  ## RFC-0016 INT-34 (0005 review R4-08). What a content-addressed key written
+  ## by walker `walkerVersion` starts with, before the 64-hex-digit SHA-256 of
+  ## its canon (`symexCacheKey`): `w<version>:`. It was a fixed `"sx2:"`
+  ## (`"sx:"` over a SHA-1 before review R3, E10), redundant with the walker
+  ## version the canon already holds: any change to the key's form bumps the
+  ## walker. The version in clear is what lets `walkerVersionOfKey` tell one
+  ## version's records from another's (R8-04's opt-in prune).
+  "w" & walkerVersion & ":"
+
+func walkerVersionOfKey*(key: string): Option[string] =
+  ## RFC-0016 INT-38 (0005 review R8-04). The walker version a symex cache
+  ## record's DB key was written under, or `none` for a key that is not a
+  ## symex record (an ordinary test id). A key of the forms before INT-34
+  ## (`sx:` over a 40-digit SHA-1, `sx2:` over a 64-digit SHA-256) names no
+  ## version and reads as `some("")`, a version no build has. Only the key's
+  ## shape is read: a prefix, a lowercase hex digest of the length that
+  ## prefix's form has, then nothing or a `:` suffix.
+  func digestThen(key: string; at, n: int): bool =
+    if key.len < at + n: return false
+    for i in at ..< at + n:
+      if key[i] notin {'0' .. '9', 'a' .. 'f'}: return false
+    key.len == at + n or key[at + n] == ':'
+  if key.startsWith("sx:"):
+    return (if digestThen(key, 3, 40): some("") else: none(string))
+  if key.startsWith("sx2:"):
+    return (if digestThen(key, 4, 64): some("") else: none(string))
+  if key.len < 3 or key[0] != 'w': return none(string)
+  let colon = key.find(':')
+  if colon < 2: return none(string)
+  for i in 1 ..< colon:
+    if key[i] notin {'0' .. '9'}: return none(string)
+  if digestThen(key, colon + 1, 64): some(key[1 ..< colon])
+  else: none(string)
+
 const
-  symexCacheKeyPrefix* = "sx2:"
-    ## Review R3 (E10). What every content-addressed key starts with, before
-    ## the 64-hex-digit SHA-256 of its canon (`symexCacheKey`). It was `"sx:"`
-    ## over a SHA-1; the new prefix makes every key written under the old one
-    ## a miss.
   cacheKeySat*     = ":sat"
     ## Phase 13 cycle 2; renamed Phase 15 Z3e. Suffix appended to a
     ## content-addressed key for SAT witness entries. Sibling suffixes
@@ -911,8 +941,18 @@ const renderAsChoicesVersion* = "12"
   ##   raise per type is stored, not the first; a winner is lossy by its own
   ##   extraction only. Entries an earlier walker stored are stale. No key
   ##   bytes change.
+  ## - RFC-0016 W4 rv0005-lows part 5 (408->413; 409-412 are reserved;
+  ##   INT-36): a statement's stray lowering taint reaches the findings it
+  ##   filed, so a hit solved mid-statement before the stray was found is a
+  ##   candidate, not a clean winner. Entries an earlier walker stored are
+  ##   stale. No key bytes change.
+  ## - RFC-0016 W4 rv0005-lows part 6 (413->416; 414-415 are reserved;
+  ##   INT-34): a key starts with the walker version that wrote it
+  ##   (`symexCacheKeyPrefixFor`, `w416:`), not the fixed `sx2:`, so every
+  ##   key changes and every entry an earlier walker stored is a miss. Those
+  ##   entries are removed only on request (`pruneForeignSymexRecords`, R8-04).
 
-const symexWalkerVersion* = "412"
+const symexWalkerVersion* = "416"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -6605,6 +6645,9 @@ const symexWalkerVersion* = "412"
   ## previously-free don't-care byte to the value the (now-sound) proof
   ## actually depends on.
 
+const symexCacheKeyPrefix* = symexCacheKeyPrefixFor(symexWalkerVersion)
+  ## RFC-0016 INT-34. What every key this build writes starts with.
+
 proc canonicalize*(t: IRType): string =
   if t.isNil:
     return "Ty<nil>"
@@ -7453,7 +7496,8 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
   ## Content-addressed key over every input that determines a
   ## witness's validity. Stable across builds (no source locations,
   ## no map-iteration order, no compiler-specific hashes). Returns
-  ## `symexCacheKeyPrefix & <64-char SHA-256 hex>` (review R3, E10: SHA-256,
+  ## `symexCacheKeyPrefixFor(walkerVersion) & <64-char SHA-256 hex>`
+  ## (RFC-0016 INT-34; review R3, E10: SHA-256,
   ## `sha256.nim`, the hash the implementation digest uses too).
   ##
   ## `walkerVersion` covers walker semantics (what the walker
@@ -7485,4 +7529,4 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
     # flags `fn` runs under, the Z3 and the libpcre (the engine std/re's
     # unanchored calls run on, which the walker reads differently).
     "|bs=" & seg
-  symexCacheKeyPrefix & sha256Hex(canon)
+  symexCacheKeyPrefixFor(walkerVersion) & sha256Hex(canon)

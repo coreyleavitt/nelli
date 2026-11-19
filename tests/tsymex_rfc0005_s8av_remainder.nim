@@ -5,8 +5,8 @@
 ##   (1) The public cache macros (`saveSymexWitness`, `loadSymexWitnesses`,
 ##       `saveSymexVerdict`, `loadSymexVerdict`) collected `dbErrors` into a
 ##       block-local `{.used.}` variable and discarded it. Now routed into
-##       `recordSymexDbError`/`consumeSymexDbErrors` -- the same thread-local
-##       sink `symexFindAllWitnesses` already drains into `Report.dbErrors`.
+##       `recordSymexDbError`, as `symexFindAllWitnesses` records its own
+##       (RFC-0016 INT-34: outside any run, `consumeSymexDbErrors` reads them).
 ##   (2) `db.nim`'s F6 (`save(..., meta)`/`loadPrimaryWithMeta`), targeted-PBT
 ##       secondary, F1 corpus and scheduler-checkpoint wrappers called their
 ##       OPTIONAL closure unconditionally -- a hand-built `ExampleDatabase`
@@ -175,7 +175,7 @@ suite "RFC-0005 S8av (3) -- verdict cache hit also serves gaps()":
   test "saveSymexVerdictImpl/loadSymexVerdictImpl round-trip non-empty gaps":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
-    let gaps = @[FindingGap(class: dcNoAnswer, kind: "beBudgetExhausted",
+    let gaps = @[FindingGap(class: dcNoAnswer, kind: beBudgetExhausted,
                             msg: "query ran out of rlimit")]
     saveSymexVerdictImpl(db, s8avVerdictProg, s8avVerdictTarget,
                          defaultSymexSettings(), sfUnknown, Soundness(),
@@ -214,9 +214,9 @@ suite "RFC-0005 S8av (3) -- verdict cache hit also serves gaps()":
     check cold.status == sfUnknown
     check not cold.fromCache
     check cold.gaps.len > 0
-    var kinds: seq[string]
+    var kinds: seq[SymexErrorKind]
     for g in cold.gaps: kinds.add g.kind
-    check "feOpaqueCallUnmodelled" in kinds
+    check feOpaqueCallUnmodelled in kinds
     for f in symexFindAllWitnesses(s8avOpaque, db):
       if f.targetDesc == "label(\"s8av_opaque\")": warm = f
     check warm.fromCache

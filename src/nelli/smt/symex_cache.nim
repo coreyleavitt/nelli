@@ -200,13 +200,21 @@ const gapsVersionMetaKey = "gapsv"
 const gapsVersion = "1"
 const gapsCountMetaKey = "gapsn"
 
+func storedEnum[E: enum](name: string): Option[E] =
+  ## RFC-0016 INT-34. A `FindingGap`/`FindingHint` enum as the cache stores it,
+  ## by name (the form records before INT-34 used, so they still read). `none`
+  ## for a name this build does not know. Never raises.
+  for e in E:
+    if $e == name: return some(e)
+  none(E)
+
 proc gapsMeta(gaps: seq[FindingGap]): Table[string, string] =
   result = initTable[string, string]()
   result[gapsVersionMetaKey] = gapsVersion
   result[gapsCountMetaKey] = $gaps.len
   for i, g in gaps:
     result["gapsc" & $i] = $ord(g.class)
-    result["gapsk" & $i] = g.kind
+    result["gapsk" & $i] = $g.kind
     result["gapsm" & $i] = g.msg
 
 proc storedGaps(meta: Table[string, string]): Option[seq[FindingGap]] =
@@ -235,7 +243,9 @@ proc storedGaps(meta: Table[string, string]): Option[seq[FindingGap]] =
     except ValueError: return none(seq[FindingGap])
     if classOrd < ord(low(DegradeClass)) or classOrd > ord(high(DegradeClass)):
       return none(seq[FindingGap])
-    gaps.add FindingGap(class: DegradeClass(classOrd), kind: meta[kKey],
+    let kind = storedEnum[SymexErrorKind](meta[kKey])
+    if kind.isNone: return none(seq[FindingGap])
+    gaps.add FindingGap(class: DegradeClass(classOrd), kind: kind.get,
                         msg: meta[mKey])
   some(gaps)
 
@@ -261,7 +271,7 @@ proc metaReady(db: ExampleDatabase, who: string,
 proc findingGaps*(errors: seq[SymexErrorInfo]): seq[FindingGap] =
   ## RFC-0005 S11. `gapsOf` projected onto the Z3-free `FindingGap`.
   for g in gapsOf(errors):
-    result.add FindingGap(class: g.class, kind: $g.e.kind, msg: g.e.msg)
+    result.add FindingGap(class: g.class, kind: g.e.kind, msg: g.e.msg)
 
 proc findingHints*(errors: seq[SymexErrorInfo]): seq[FindingHint] =
   ## RFC-0005 W1. The complement of `findingGaps`: every entry `taintsRun`
@@ -270,7 +280,7 @@ proc findingHints*(errors: seq[SymexErrorInfo]): seq[FindingHint] =
   ## `SymexFinding` never showed them, the replay outcomes among them.
   for e in errors:
     if not taintsRun(e):
-      result.add FindingHint(kind: $e.kind, severity: $e.severity, msg: e.msg)
+      result.add FindingHint(kind: e.kind, severity: e.severity, msg: e.msg)
 
 proc findingDiagnostics*[T](ds: seq[DefectFinding[T]]): seq[FindingDiagnostic] =
   ## RFC-0005 W1. `SymexResult.diagnostics` projected onto the Z3-free
@@ -326,12 +336,18 @@ proc saveSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
   meta[notesVersionMetaKey] = notesVersion
   meta["hintn"] = $hints.len
   for i, h in hints:
-    meta["hintk" & $i] = h.kind
-    meta["hints" & $i] = h.severity
+    meta["hintk" & $i] = $h.kind
+    meta["hints" & $i] = $h.severity
     meta["hintm" & $i] = h.msg
   meta["diagn"] = $diagnostics.len
   meta["undefn"] = $undefined.len   # RFC-0016 K10a-target
   try:
+    # RFC-0016 INT-38 (R6-07): a head the loader refuses first, so a re-save
+    # that fails part-way never serves the earlier record's head over a mix
+    # of its slots and this save's. A failure of this first write leaves the
+    # earlier record whole.
+    db.save(baseKey & cacheKeyNotes, @[],
+            {notesVersionMetaKey: "-"}.toTable, verdictCacheMaxEntries)
     for i, u in undefined:
       var um = initTable[string, string]()
       um["kind"] = u.kind
@@ -384,8 +400,13 @@ proc loadSymexNotesImpl*(db: ExampleDatabase, prog: SymexProgram,
         witnessChoices: e[0].choices)
     for i in 0 ..< nh:
       if ("hintk" & $i) notin meta: break
-      result.hints.add FindingHint(kind: meta["hintk" & $i],
-                                   severity: meta.getOrDefault("hints" & $i, ""),
+      # RFC-0016 INT-34: the record keeps each enum by name; a name this build
+      # does not know ends the list, as a missing entry does.
+      let kind = storedEnum[SymexErrorKind](meta["hintk" & $i])
+      let severity = storedEnum[SymexErrorSeverity](
+        meta.getOrDefault("hints" & $i, ""))
+      if kind.isNone or severity.isNone: break
+      result.hints.add FindingHint(kind: kind.get, severity: severity.get,
                                    msg: meta.getOrDefault("hintm" & $i, ""))
     for i in 0 ..< nd:
       let e = db.loadPrimaryWithMeta(notesKey(baseKey, i))
@@ -816,3 +837,27 @@ proc toFindingStatus*(s: SymexStatusKind): SymexFindingStatus =
   of sxUnsat:   sfUnsat
   of sxUnknown: sfUnknown
   of sxRaised:  sfRaised   ## Phase 15 E2a
+
+# ---- RFC-0016 INT-38 (0005 review R8-04): the opt-in prune ------------------
+
+proc pruneForeignSymexRecords*(db: ExampleDatabase): int =
+  ## RFC-0016 INT-38 (0005 review R8-04). Removes every symex cache record
+  ## `db` holds that a walker other than this build's wrote, and returns how
+  ## many records (DB keys) it emptied. A record's walker is read off its key
+  ## (`walkerVersionOfKey`): the `sx:`/`sx2:` keys before RFC-0016 INT-34
+  ## (their `:raised` indexes and slots among them) and every `w<n>:` key of
+  ## another `n` are foreign. A key that is not a symex record (a test id) and
+  ## this walker's records are left alone.
+  ##
+  ## Explicit and opt-in: no run calls it. A walker bump makes every earlier
+  ## record a miss, never a deletion, so a build rolled back to an earlier
+  ## walker still finds its records. On a `multiplexedDatabase` it sweeps the
+  ## writable side only. Raises `DbError` for a backend that cannot list its
+  ## keys (`primaryKeysImpl`) or cannot be written (`readOnlyDatabase`).
+  for key in db.primaryKeys():
+    let v = walkerVersionOfKey(key)
+    if v.isNone or v.get == symexWalkerVersion: continue
+    let entries = db.loadPrimary(key)
+    if entries.len == 0: continue
+    db.removeMany(key, entries)
+    inc result

@@ -301,11 +301,11 @@ suite "RFC-0005 S11 (e) -- SymexFinding carries soundness, gaps, violations; the
     check not f.fromCache
     check f.soundness.runTaint != {}
     check not trusted(f)
-    var kinds: seq[string]
+    var kinds: seq[SymexErrorKind]
     for g in f.gaps: kinds.add g.kind
-    check "feOpaqueCallUnmodelled" in kinds
+    check feOpaqueCallUnmodelled in kinds
     for g in f.gaps:
-      if g.kind == "feOpaqueCallUnmodelled": check g.class == dcSubstituted
+      if g.kind == feOpaqueCallUnmodelled: check g.class == dcSubstituted
 
   test "a confirmed finding: soundness carries rsConfirmed, and so does its cache hit":
     let db = inMemoryDatabase()

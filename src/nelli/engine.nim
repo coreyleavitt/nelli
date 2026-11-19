@@ -108,6 +108,7 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
     settings.seed = cast[uint64](hash(settings.testId))
   pushEngineFrame()
   defer: popEngineFrame()   # review R3 (E3): findings reach the parent
+  let droppedBefore = droppedSymexFindings()   # RFC-0016 INT-36 (R5-07)
   let originalProp = prop
   let deadline = settings.deadline
   let hasDeadline = deadline.inNanoseconds > 0
@@ -185,6 +186,10 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
   result = runPipeline(state, phases)
   # Review R2 (DD3): what `assertCoveredBy` found inside the property.
   for f in engineStack[^1].symexFindings.values: result.symexFindings.add f
+  # RFC-0016 INT-34 (R2-10): the symex DB errors this run made, on whichever
+  # report the pipeline built (passed, failed or cut short).
+  result.dbErrors.add engineStack[^1].dbErrors
+  result.droppedSymexFindings = droppedSymexFindings() - droppedBefore
   if settings.coverageGuided:
     # U1: the frontier (not a raw scalar re-read) is now the single
     # source of truth for the run's cumulative distinct-edge count too.

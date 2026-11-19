@@ -1539,7 +1539,7 @@ table = "5.8c"
 title = "Design cleanups: `FindingHint`/`FindingGap` kinds are strings; include-split `runtime_*` modules and a `symex.nim` that mixes codegen, cache codecs and settle; the `engineSymexDbErrors` threadvar sink; `loweringPendingTaint` still a threadvar with `walk`/`walkCapSynced` as two shallow layers; the `sx2:` prefix is redundant with the walker version"
 class = "design debt; no wrong verdict described"
 state = "moved"
-note = ": slice `rv0005-lows`"
+note = ": slice `rv0005-lows`. Parts 1 and 2 done (branch `rfc-0016-w4rvlows-d`, part 6, walker 416): `FindingGap.kind`, `FindingHint.kind` and `FindingHint.severity` are the `SymexErrorKind`/`SymexErrorSeverity` enums, stored by name as before so the text and an older record read the same (R1-28); a symex DB error rides the engine frame of the run that made it, and that run's report shows it, passed or failed, in place of the `engineSymexDbErrors` threadvar the next failing run drained (R2-10; RED: a passing run reported none of its errors, and a nested run took its enclosing run's); a key starts with the walker version that wrote it (`w416:`), not the fixed `sx2:` (R4-08). Left, scheduled with the runtime split on the integration branch: the `runtime_*` include-split and the `symex.nim` split (R1-29), and the `loweringPendingTaint` threadvar with `walk`/`walkCapSynced` as two shallow layers (R2-14)"
 source = "0005 review R1-28, R1-29, R2-10, R2-14, R4-08"
 cells = []
 
@@ -1548,40 +1548,44 @@ id = "INT-35"
 table = "5.8c"
 title = "Exit-group guards: a compile-time `fields()` check that every group-typed field of `WalkCtx`/`LoopFrame`/`CallFrame`/`CallFrameCtx` is visited by `forEachExitGroup`; per-frame constructors so a group cannot be default-constructed unbound; `mitemsSince` yields `var T` so an entry's depth is mutable; `replayNotRun`'s hint check"
 class = "design debt; guards against a future soundness slip"
-state = "moved"
-note = ": slice `rv0005-lows`"
+state = "closed"
+note = ": fixed (slice `rv0005-lows`, branch `rfc-0016-w4rvlows-d`, walker 413). Part 5: every field of `WalkCtx`, `CallFrame`, `LoopFrame` and `CallFrameCtx` holding an exit group (directly, as a frame, or a seq of frames) must be named walked or unwalked beside `forEachExitGroup`, or `runtime.nim` does not compile (`collectExitGroupFields`, R6-03); `mitemsSince` is private to `exits`, so a parked entry's handler depth cannot be changed from outside (R5-08; RED: it compiled from a test). Left: per-frame constructors (R6-04: an unbound group still fails only at its first `park`), `replayNotRun`'s hint check. Part 6: every frame is made by `initLoopFrame`/`initCallFrame`/`initCallFrameCtx`, which bind its exit group to the walk's clock; all 14 field-by-field constructions are gone, and a source audit pins it (cell `walk/exits/frames`; RED: 14 sites). `replayNotRun` leaves no candidate hint, is not `rsRefused`, ends no child and adds no run-dependence (pinned). `exits` exports a read-only `itemsSince` for readers outside it, so `tsymex_rfc0005_r2_walktaint` builds again (its in-place stamp goes through `visitSince`). Nothing is left"
 source = "0005 review R5-08, R6-03, R6-04"
-cells = []
+cells = ["construct:walk/exits/groups", "construct:walk/exits/frames"]
+pins = ["tsymex_0016_int35_exitgroups"]
 
 [[row]]
 id = "INT-36"
 table = "5.8c"
 title = "The finding collector's edges: `droppedSymexFindings` has no production consumer and is per-thread, so a worker thread's drops are invisible; `popEngineFrame` merges speculative nested runs and double-reports; a finding filed mid-statement is not stamped with later stray taint (pre-existing)"
 class = "precision (R4-09, R5-07) and soundness (R3-17, not compared against `main`)"
-state = "moved"
-note = ": slice `rv0005-lows`"
+state = "closed"
+note = ": fixed (slice `rv0005-lows`, branch `rfc-0016-w4rvlows-d`, walker 413). Part 5 (walker 408->413): a statement's stray taint reaches the findings it filed since it began (`stampStatementSince`), so a hit solved before the stray was found is a candidate, not a clean winner (R3-17; RED: the exit stamp alone left it in `w.found`). No source shape is known to leave stray taint, so the pin drives the stamp through `strayFindingProbe`, as R2's walktaint probe does. Left: `droppedSymexFindings`'s consumer and per-thread scope (R5-07), `popEngineFrame`'s merge of nested runs (R4-09). Part 6 (walker 413 unchanged: no verdict moves): the drop count is one atomic count for the process, so a drop on a thread the property started is counted; a run's `Report.droppedSymexFindings` is how far it moved during the run, and the text, JSON, JUnit and GitHub renderers show it when non-zero (R5-07; cell `report/findings/dropped`; RED: no such field). `popEngineFrame` merges a nested run's findings into the enclosing frame on the claim (`fn` and target), not the call site: one re-found at its own site joins the entry the enclosing frame holds for that claim, keeping the more severe and then the higher `claimRank`; two sites in one run stay two entries (R4-09; cell `report/findings/nested-merge`). Pinned by `tsymex_0016_int36_report`, now registered. Nothing is left"
 source = "0005 review R5-07, R6-08, R4-09, R3-17"
-cells = []
+cells = ["construct:walk/stmt/stray-findings", "construct:report/findings/dropped", "construct:report/findings/nested-merge"]
+pins = ["tsymex_0016_int36_collector", "tsymex_0016_int36_report"]
 
 [[row]]
 id = "INT-37"
 table = "5.8c"
 title = "Precision and unverified probes: `claimStrayPendingTaint` over-taints coalesced pending taint; a possessive quantifier on a non-group item may add 0 to the PCRE size bound (probe near 65536); `symBodyHash` on a bodiless routine (importc or forward declaration) may fail at compile time"
 class = "precision; two items unverified"
-state = "moved"
-note = ": slice `rv0005-lows`"
+state = "closed"
+note = ": fixed (slice `rv0005-lows`, branch `rfc-0016-w4rvlows-d`, walker 413). R2-09 and R6-09 (part 5): both probes run, neither a defect. PCRE 8.45 has a possessive opcode for every repeat of a character, type, class and back-reference, so a possessive on a non-group item adds nothing; seven families taken to the largest count the reader decides all compile under `re()`, and one more is undecided. A SUT calling an `importc` routine and a forward-declared one compiles and is keyed. R2-08 (part 6): the one raw walk-level `lower` with no drain of its own, `syncAddrCells`'s `mkTableSet`, now drains onto its path, so a stray at a lowering's entry is a walker fault: `claimStrayPendingTaint` stops a debug build on it (RED: `strayClaimProbe` found no stop) and keeps the sound statement-wide fallback in release (cell `walk/stmt/stray-claim`). No suite in the taint and lowering gate tripped the new assertion, so no other stray was found; the probes that queue stray taint on purpose (`stmtExitTaintProbe`, `strayFindingProbe`) set it aside or stamp it directly and never reach the entry check, so no suspension of the assertion exists"
 source = "0005 review R2-08, R2-09, R6-09"
-cells = []
+cells = ["construct:regex/possessive/size", "construct:cache/key/bodiless", "construct:walk/stmt/stray-claim"]
+pins = ["tsymex_0016_int37_probes"]
 
 [[row]]
 id = "INT-38"
 table = "5.8c"
 title = "Cache hygiene: the notes record can be torn mid-save; old `:raised` indexes (before `:raised2`) are never cleaned up"
 class = "performance; no wrong verdict"
-state = "moved"
-note = ": slice `rv0005-lows`"
+state = "closed"
+note = ": fixed (slice `rv0005-lows`, branch `rfc-0016-w4rvlows-d`). Part 5: a notes re-save first writes a head the loader refuses, so a failure part-way reads back as the old record, the new one or nothing (R6-07; RED: the new run's first diagnostics under the old head). Part 6 (walker 416), the fork settled: a key now starts with the walker version that wrote it (INT-34), so a record's version is read off its key, and `pruneForeignSymexRecords` is the general sweep, explicit and opt-in: it empties every record of another walker version (the `sx:`/`sx2:` keys before 416, their `:raised` indexes and slots among them) and reports how many; a test id and this walker's records stay, and no run calls it, so a walker bump still only misses (R8-04; a backend lists its keys through the new optional `primaryKeysImpl`)"
 source = "0005 review R6-07, R8-04"
-cells = []
+cells = ["construct:cache/record/notes"]
+pins = ["tsymex_0016_int38_notes", "tsymex_0016_int34_cleanups"]
 
 [[row]]
 id = "INT-39"

@@ -196,9 +196,9 @@ suite "K5a-2: a host the profile does not admit declines the run":
     for f in fs:
       if f.targetDesc == "label(\"hit\")":
         check f.status == sfUnknown
-        var kinds: seq[string]
+        var kinds: seq[SymexErrorKind]
         for g in f.gaps: kinds.add g.kind
-        check "feHostUnadmitted" in kinds
+        check feHostUnadmitted in kinds
 
   test "concolicCollect: the refusal rides parseErrors":
     overrideHostForTest(hostOld)

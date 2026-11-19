@@ -68,7 +68,7 @@ suite "WA-1 -- symexFindAllWitnesses sees the user exception hierarchy":
     checkpoint($fs)
     for f in fs:
       check f.status == sfUnsat
-      for g in f.gaps: check g.kind != "eeUnknownExnType"
+      for g in f.gaps: check g.kind != eeUnknownExnType
 
   test "symexForAll's report agrees":
     let rep = symexForAll(integers(-10, 10), w1Guarded, inMemoryDatabase())
@@ -136,12 +136,12 @@ proc w1SiblingOverflow(n: int) =
     symexTarget("w1_hit")
   discard y
 
-proc hasHint(f: SymexFinding; kinds: openArray[string]): bool =
+proc hasHint(f: SymexFinding; kinds: openArray[SymexErrorKind]): bool =
   for h in f.hints:
     if h.kind in kinds: return true
   false
 
-const replayHintKinds = ["feReplayCrashed", "feReplayDeclined"]
+const replayHintKinds = [feReplayCrashed, feReplayDeclined]
 
 suite "WA-6 -- symexFindAllWitnesses carries hints and diagnostics":
 
@@ -151,7 +151,7 @@ suite "WA-6 -- symexFindAllWitnesses carries hints and diagnostics":
     check r.errors.named(feGlobalHavoc)
     var found = false
     for e in r.errors:
-      if $e.kind in replayHintKinds: found = true
+      if e.kind in replayHintKinds: found = true
     check found
 
   test "cold: the replay hint, with its message, is on the finding and rendered":
@@ -161,8 +161,8 @@ suite "WA-6 -- symexFindAllWitnesses carries hints and diagnostics":
     check f.status == sfUnknown
     check f.hasHint(replayHintKinds)
     for h in f.hints:
-      if h.kind == "feReplayCrashed":
-        check h.severity == "sevHint"
+      if h.kind == feReplayCrashed:
+        check h.severity == sevHint
         check "on the input" in h.msg   # the crashing input is named
     let t = renderReport(reportWith(@[f]), ofText)
     check "feReplay" in t
@@ -186,7 +186,7 @@ suite "WA-6 -- symexFindAllWitnesses carries hints and diagnostics":
     let rep = symexForAll(integers(-5, 5), w1Refuted, inMemoryDatabase())
     let f = findingFor(rep.symexFindings, "label(\"w1_refuted\")")
     check f.status == sfUnknown
-    check f.hasHint(["feReplayRefuted"])
+    check f.hasHint([feReplayRefuted])
     check "feReplayRefuted" in renderReport(rep, ofText)
 
   test "cold and warm: the non-winning diagnostic is on the finding and rendered":

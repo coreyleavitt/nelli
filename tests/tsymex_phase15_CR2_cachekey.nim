@@ -1305,7 +1305,28 @@ suite "Phase 15 CR-2 — version bumps":
     ## is stored, one ended from outside is not, a refused lossy winner is
     ## `rsRefused`, malformed gaps miss, the strongest raise per type is
     ## kept; 407 reserved): 406->408.
-    check symexWalkerVersion == "412"
+    ## RFC-0016 W4 rv0005-lows part 5 (INT-36: a statement's stray taint
+    ## reaches the findings it filed; 409-412 reserved): 408->413.
+    ## RFC-0016 W4 rv0005-lows part 6 (INT-34: a key starts with the walker
+    ## version that wrote it, not `sx2:`; 414-415 reserved): 413->416.
+    check symexWalkerVersion == "416"
+
+  test "CR-2 sub-test 5a: the key starts with the walker version":
+    ## RFC-0016 INT-34. `w<walker>:` and a 64-digit SHA-256, so a key names
+    ## the walker that wrote it; the fixed `sx2:` of walkers before 416 is
+    ## gone, and a change of walker changes the prefix as well as the digest.
+    let prog = SymexProgram(body: mkBlock(@[]))
+    proc key(w: string): string =
+      symexCacheKey(prog, tAssertionViolation(), defaultSymexSettings(),
+        z3Version = "z", nimVersion = "n", walkerVersion = w,
+        renderingVersion = "r", buildSeg = "b")
+    let k = key(symexWalkerVersion)
+    check k.startsWith("w" & symexWalkerVersion & ":")
+    check k.len == ("w" & symexWalkerVersion & ":").len + 64
+    check not k.startsWith("sx")
+    check walkerVersionOfKey(k) == some(symexWalkerVersion)
+    check walkerVersionOfKey(key("415")) == some("415")
+    check k[^64 .. ^1] != key("415")[^64 .. ^1]
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

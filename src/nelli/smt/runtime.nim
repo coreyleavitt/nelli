@@ -13820,6 +13820,29 @@ func depthOf(e: HeldPath): int = e.depth
 func depthOf(e: HeldRaise): int = e.depth
 func depthOf(e: HeldJump): int = e.depth
 
+proc initLoopFrame(clock: ExitClock; hsDepth = 0;
+                   label = ""): LoopFrame {.inline.} =
+  ## RFC-0016 INT-35 (R6-04). The one way to make a loop (or labelled block)
+  ## frame: its exit group is bound to the walk's clock here, so no frame can
+  ## carry a zero-valued group that fails only at its first `park`.
+  LoopFrame(exits: clock.newExits(LoopExits), hsDepth: hsDepth, label: label)
+
+proc initCallFrame(clock: ExitClock; callee = ""; retSym = default(SymVal);
+                   retName = ""; retTy: IRType = nil;
+                   ptrRiskFormals: seq[IRParam] = @[];
+                   ptrSafeFormals: seq[string] = @[];
+                   sp: uint = 0): CallFrame {.inline.} =
+  ## RFC-0016 INT-35 (R6-04). The one way to make an inline-call frame, its
+  ## exit group bound to the walk's clock.
+  CallFrame(exits: clock.newExits(CallExits), callee: callee, retSym: retSym,
+            retName: retName, retTy: retTy, ptrRiskFormals: ptrRiskFormals,
+            ptrSafeFormals: ptrSafeFormals, sp: sp)
+
+proc initCallFrameCtx(clock: ExitClock; frameId = 0): CallFrameCtx {.inline.} =
+  ## RFC-0016 INT-35 (R6-04). The one way to make a call descent's exception
+  ## context, its exit group bound to the walk's clock.
+  CallFrameCtx(frameId: frameId, exits: clock.newExits(FrameExits))
+
 proc pushFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Save the current call frame's exception context and install a
   ## fresh, empty one for the callee being descended into. The handler stack is
@@ -13829,8 +13852,7 @@ proc pushFrame(w: var WalkCtx) {.inline.} =
   ## wired now so E3/E5 need not re-audit the call-descent arms.
   w.frameStack.add w.frame
   inc w.frameIdCounter                        ## RFC-0005 S9
-  w.frame = CallFrameCtx(frameId: w.frameIdCounter,
-                         exits: w.exitClock.newExits(FrameExits))
+  w.frame = initCallFrameCtx(w.exitClock, frameId = w.frameIdCounter)
 
 proc popFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Restore the caller's call frame saved by `pushFrame`.
@@ -16273,6 +16295,15 @@ proc claimStrayPendingTaint() =
   ## here, so the taint is kept for the statement (`stmtStrayTaint`), and
   ## `walk` puts it on every path the statement yields; it still lands on
   ## this path through the drain as before.
+  ##
+  ## RFC-0016 INT-37 (R2-08): every raw `lower` now drains its own queue onto
+  ## its own path, so a stray here is a walker fault. The fallback put one
+  ## path's decline on its siblings too (an over-taint, never an unsound
+  ## verdict), so a debug build stops on it and a release build keeps it.
+  when not defined(release):
+    doAssert loweringPendingTaint == {},
+      "claimStrayPendingTaint: a lowering left pending taint " &
+      $loweringPendingTaint & " with no drain of its own (RFC-0016 R2-08)"
   if loweringPendingTaint != {} and currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].stmtStrayTaint = wp[].stmtStrayTaint + loweringPendingTaint
@@ -18042,8 +18073,8 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Su
   ## early `return` on an ambiguous guard.
   var survivors: seq[Path] = @[]
   var active = paths
-  w.loopStack.add LoopFrame(exits: w.exitClock.newExits(LoopExits),
-                            hsDepth: w.frame.handlerStack.len)   # RFC-0005 S8m
+  w.loopStack.add initLoopFrame(w.exitClock,
+                                hsDepth = w.frame.handlerStack.len)   # RFC-0005 S8m
   let frameIx = w.loopStack.high
   defer: discard w.loopStack.pop()
   # RFC-0010 B4: unlike every other ResourceBudget field, `unwind = 0` here
@@ -20785,14 +20816,13 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         inc w.depthWalks[w.callStack.len]
         let ptrRisk = varFormalPtrRisk(w, sig.params, stmt.cargs,
                                        stmt.cVarPtrSafe)   ## RFC-0005 S8bn
-        w.callStack.add CallFrame(
-          exits: w.exitClock.newExits(CallExits),
-          callee: stmt.callee, retSym: retSym,
-          retName: stmt.retName,
-          retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
-          ptrRiskFormals: ptrRisk.risk,
-          ptrSafeFormals: ptrRisk.safe,
-          sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
+        w.callStack.add initCallFrame(w.exitClock,
+          callee = stmt.callee, retSym = retSym,
+          retName = stmt.retName,
+          retTy = (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
+          ptrRiskFormals = ptrRisk.risk,
+          ptrSafeFormals = ptrRisk.safe,
+          sp = nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
         w.callStats[stmt.callee] = CallStat(
           name: stmt.callee,
           walked: w.callStats[stmt.callee].walked + 1,
@@ -21184,9 +21214,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
     # RFC-0005 S8m: a labelled block is a break target (a source `block` a
     # `break` names, or a desugared loop body a `continue` leaves). Paths
     # that `break` it resume after it, beside its fall-through.
-    w.loopStack.add LoopFrame(exits: w.exitClock.newExits(LoopExits),
-                              label: stmt.blkLabel,
-                              hsDepth: w.frame.handlerStack.len)
+    w.loopStack.add initLoopFrame(w.exitClock,
+                                  hsDepth = w.frame.handlerStack.len,
+                                  label = stmt.blkLabel)
     let frameIx = w.loopStack.high
     var survivors = walkBlock(stmt.stmts, paths, w)
     # The parked exits were reconciled at the leaves and guards they passed
@@ -21363,8 +21393,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
     # Phase 6: k-unroll. Each iteration forks on the guard.
     var survivors: seq[Path] = @[]
     var active = paths
-    w.loopStack.add LoopFrame(exits: w.exitClock.newExits(LoopExits),
-                              hsDepth: w.frame.handlerStack.len)   # RFC-0005 S8m
+    w.loopStack.add initLoopFrame(w.exitClock,
+                                  hsDepth = w.frame.handlerStack.len)   # RFC-0005 S8m
     let frameIx = w.loopStack.high
     # RFC-0005 S8y: the loop's identity for `Path.loopIters` -- the IR
     # statement itself, the same object on every execution in this walk.
@@ -22400,6 +22430,9 @@ proc syncAddrCells(src: CellProducer; outs: seq[Path]; depth: int;
             e2[tabTmp] = tabV
             let t2 = lower(e2, mkTableSet(mkVar(tabTmp),
               mkVar(addrSnapPrefix & "key"), mkVar(c.local)))
+            # RFC-0016 INT-37 (R2-08): this raw `lower` drains its own queue
+            # onto the path it lowered for, so no later lowering claims it.
+            taintInPlace(q, takeLoweringPendingDegrade())
             let holder = locSet(env2[c.slot], c.path, @[], t2)
             if holder.isNone:
               viewWhy = "the walk does not find the Table in its holder"
@@ -23143,6 +23176,55 @@ template forEachExitGroup(w, g, body: untyped) =
     template g(): untyped = w.frame.exits
     body
 
+const
+  exitGroupsWalked = ["WalkCtx.topExits", "WalkCtx.callStack",
+                      "WalkCtx.loopStack", "WalkCtx.frame", "CallFrame.exits",
+                      "LoopFrame.exits", "CallFrameCtx.exits"]
+    ## RFC-0016 INT-35 (R6-03). What `forEachExitGroup` reaches: each field
+    ## of a walk or frame type that holds an exit group, or a frame or a seq
+    ## of frames holding one.
+  exitGroupsUnwalked = ["WalkCtx.frameStack"]
+    ## Saved caller frames: a statement parks only on the frame it runs in.
+
+template isExitGroupType(T: typedesc): bool =
+  T is CallExits or T is LoopExits or T is FrameExits
+
+template isExitFrameType(T: typedesc): bool =
+  T is CallFrame or T is LoopFrame or T is CallFrameCtx
+
+proc collectExitGroupFields[T: object](x: T; owner: static string;
+                                       acc: var seq[string]) =
+  ## RFC-0016 INT-35 (R6-03). Every field of `x` that holds an exit group
+  ## (directly, as a frame, or as a seq of frames), as `owner.field`. One
+  ## that `exitGroupsWalked` and `exitGroupsUnwalked` do not name is a
+  ## compile error: a group `forEachExitGroup` does not visit is stamped by
+  ## no statement and claimed by no `try`.
+  for name, f in fieldPairs(x):
+    when isExitGroupType(typeof(f)) or isExitFrameType(typeof(f)):
+      const path = owner & "." & name
+      when path notin exitGroupsWalked and path notin exitGroupsUnwalked:
+        {.error: "RFC-0016 INT-35: `" & path & "` holds an exit group " &
+                 "that forEachExitGroup does not visit".}
+      acc.add path
+      when isExitFrameType(typeof(f)):
+        collectExitGroupFields(f, $typeof(f), acc)
+    elif typeof(f) is seq:
+      when isExitGroupType(typeof(f[0])) or isExitFrameType(typeof(f[0])):
+        const path = owner & "." & name
+        when path notin exitGroupsWalked and path notin exitGroupsUnwalked:
+          {.error: "RFC-0016 INT-35: `" & path & "` holds exit groups " &
+                   "that forEachExitGroup does not visit".}
+        acc.add path
+        when isExitFrameType(typeof(f[0])):
+          var e: typeof(f[0])
+          collectExitGroupFields(e, $typeof(f[0]), acc)
+
+proc exitGroupFieldPaths*(): seq[string] =
+  ## RFC-0016 INT-35 (R6-03). The exit-group fields of `WalkCtx` and the
+  ## frames it holds (`collectExitGroupFields`); compiling it is the check.
+  var w: WalkCtx
+  collectExitGroupFields(w, "WalkCtx", result)
+
 proc visitExitsSince(w: var WalkCtx; since: ExitMark;
                      visit: proc (p: var Path) {.closure.}) =
   ## RFC-0005 review R5. `visit` the path of every exit-channel entry parked
@@ -23165,6 +23247,50 @@ proc stampExitsSince(w: var WalkCtx; since: ExitMark; taint: Taint;
   if not w.exitClock.parkedSince(since): return   # nothing parked
   w.visitExitsSince(since, proc (p: var Path) =
     p = forkPathTainted(p, p.pc, p.env, carriedDegrade(taint, ub)))
+
+type StmtMark = object
+  ## RFC-0016 INT-36 (R3-17). Where a statement began: the exit clock's
+  ## reading, and how many findings (`w.found`) and candidates
+  ## (`w.candidates`) were filed. Both only grow during a walk.
+  exits: ExitMark
+  found, candidates: int
+
+proc stmtMark(w: WalkCtx): StmtMark =
+  StmtMark(exits: w.exitClock.mark, found: w.found.len,
+           candidates: w.candidates.len)
+
+proc stampFindingsSince(w: var WalkCtx; m: StmtMark; taint: Taint;
+                        ub: set[UbKind] = {}) =
+  ## RFC-0016 INT-36 (R3-17). Join `taint` (and `ub`) into every finding
+  ## filed since `m`, as the paths the statement produced are. A winner the
+  ## join makes `scSpurious` moves to the candidates, in filing order, as
+  ## `admitSolvedHit` files a tainted hit: it no longer halts the walk and
+  ## only a replay can promote it.
+  for i in m.candidates ..< w.candidates.len:
+    w.candidates[i].soundness.pathTaint =
+      w.candidates[i].soundness.pathTaint + taint
+    w.candidates[i].soundness.witnessUndefined =
+      w.candidates[i].soundness.witnessUndefined + ubOrdinals(ub)
+  if m.found >= w.found.len: return
+  var kept = w.found[0 ..< m.found]
+  for i in m.found ..< w.found.len:
+    var r = w.found[i]
+    r.soundness.pathTaint = r.soundness.pathTaint + taint
+    r.soundness.witnessUndefined = r.soundness.witnessUndefined + ubOrdinals(ub)
+    if scSpurious in r.soundness.pathTaint:
+      r.witnessExtraction = @[]
+      w.candidates.add r
+    else:
+      kept.add r
+  w.found = move kept
+
+proc stampStatementSince(w: var WalkCtx; m: StmtMark; taint: Taint;
+                         ub: set[UbKind] = {}) =
+  ## The end of a statement that left stray taint: on its exit-channel
+  ## entries (`stampExitsSince`) and on its findings (`stampFindingsSince`).
+  ## The paths it returns are the caller's to taint (`walk`).
+  stampExitsSince(w, m.exits, taint, ub)
+  stampFindingsSince(w, m, taint, ub)
 
 proc taintAll(paths: seq[Path]; taint: Taint;
               ub: set[UbKind] = {}): seq[Path] =
@@ -23208,6 +23334,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## handler body that claimed an older `caught` entry shrank the channel
   ## under its mark, so the new entry landed below it unstamped). A
   ## statement with nothing queued on either side allocates nothing.
+  ##
+  ## RFC-0016 INT-36 (R3-17): and the findings it filed (`stampStatementSince`):
+  ## a hit solved mid-statement, before the stray was found, was filed from a
+  ## path that did not carry it yet.
   let outerPending = loweringPendingTaint
   let outerPendingUb = loweringPendingUb
   loweringPendingTaint = {}
@@ -23216,7 +23346,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   let outerStrayUb = w.stmtStrayUb
   w.stmtStrayTaint = {}
   w.stmtStrayUb = {}
-  let since = w.exitClock.mark
+  let since = w.stmtMark
   result =
     if outerPending == {}: walkCapSynced(stmt, paths, w)
     else: walkCapSynced(stmt, taintAll(paths, outerPending, outerPendingUb), w)
@@ -23228,7 +23358,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   w.stmtStrayUb = outerStrayUb
   if stray != {}:
     result = taintAll(result, stray, strayUb)
-    stampExitsSince(w, since, stray, strayUb)
+    stampStatementSince(w, since, stray, strayUb)
 
 # ---- Statement exit-taint test hook (H1 pattern) -----------------------------
 # `Path`/`WalkCtx` are private to the runtime unit, so -- as
@@ -23278,9 +23408,9 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
   proc probeCtx(): WalkCtx =
     result.exitClock = newExitClock()
     result.topExits = result.exitClock.newExits(CallExits)
-    result.frame = CallFrameCtx(exits: result.exitClock.newExits(FrameExits))
+    result.frame = initCallFrameCtx(result.exitClock)
   var w = probeCtx()
-  w.loopStack.add LoopFrame(exits: w.exitClock.newExits(LoopExits))
+  w.loopStack.add initLoopFrame(w.exitClock)
   loweringPendingTaint = spur
   let r = walk(mkBreak(), @[np()], w)
   result.resultLen = r.len
@@ -23289,8 +23419,8 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
     result.breakTaint = w.loopStack[0].exits.breakPaths.contents[0].taint
   loweringPendingTaint = savedPending
   var w2 = probeCtx()
-  w2.loopStack.add LoopFrame(exits: w2.exitClock.newExits(LoopExits))
-  w2.callStack.add CallFrame(exits: w2.exitClock.newExits(CallExits))
+  w2.loopStack.add initLoopFrame(w2.exitClock)
+  w2.callStack.add initCallFrame(w2.exitClock)
   w2.loopStack[0].exits.breakPaths.park(np())
   let since = w2.exitClock.mark
   var parked = 0
@@ -23312,6 +23442,86 @@ proc stmtExitTaintProbe*(): StmtExitTaintProbe =
   discard routeRaise(np(), "E", none(string), w3)
   stampExitsSince(w3, since3, spur)
   for c in w3.frame.exits.held.caught: result.caughtTaints.add c.path.taint
+
+type
+  StrayFindingProbe* = object
+    ## Observations `strayFindingProbe` reports (see its doc).
+    foundBefore*, foundAfter*, candidatesAfter*: int
+    foundAfterExitsOnly*: int
+      ## What the statement's end left in `w.found` before INT-36: the exit
+      ## stamp alone (`stampExitsSince`).
+    earlierFoundKept*: bool
+    movedTaint*, stmtCandidateTaint*: Taint
+
+proc strayFindingProbe*(): StrayFindingProbe =
+  ## RFC-0016 INT-36 (R3-17). A walk context holding a clean winner filed
+  ## before a statement began; the statement files a candidate and a clean
+  ## winner, and ends with `{scSpurious, scIncomplete}` stray. Run twice:
+  ## with the exit stamp alone (the statement end before INT-36) and with
+  ## the statement stamp `walk` runs (`stampStatementSince`). For
+  ## `tests/tsymex_0016_int36_collector.nim` only.
+  let stray: Taint = {scSpurious, scIncomplete}
+  proc staged(m: var StmtMark): WalkCtx =
+    result.exitClock = newExitClock()
+    result.topExits = result.exitClock.newExits(CallExits)
+    result.frame = initCallFrameCtx(result.exitClock)
+    result.found.add RawResult(status: sxRaised, raisedTypeId: "before")
+    m = result.stmtMark
+    result.admitSolvedHit(RawResult(status: sxSat,
+      soundness: Soundness(pathTaint: {scSpurious})))
+    result.admitSolvedHit(RawResult(status: sxSat))
+  var m0: StmtMark
+  var w0 = staged(m0)
+  stampExitsSince(w0, m0.exits, stray)
+  result.foundAfterExitsOnly = w0.found.len
+  var m: StmtMark
+  var w = staged(m)
+  result.foundBefore = w.found.len
+  stampStatementSince(w, m, stray)
+  result.foundAfter = w.found.len
+  result.candidatesAfter = w.candidates.len
+  result.earlierFoundKept = w.found.len > 0 and
+    w.found[0].status == sxRaised and w.found[0].raisedTypeId == "before" and w.found[0].soundness.pathTaint == {}
+  if w.candidates.len == 2:
+    result.stmtCandidateTaint = w.candidates[0].soundness.pathTaint
+    result.movedTaint = w.candidates[1].soundness.pathTaint
+
+type
+  StrayClaimProbe* = object
+    ## Observations `strayClaimProbe` reports (see its doc).
+    tripped*: bool       ## the entry check stopped on the stray
+    strayKept*: Taint    ## what the statement kept for its paths
+    pendingAfter*: Taint ## the queue once the probe drained it
+
+proc strayClaimProbe*(): StrayClaimProbe =
+  ## RFC-0016 INT-37 (R2-08). A lowering's entry check
+  ## (`claimStrayPendingTaint`) on a walk context with `{scSpurious}` left
+  ## queued by no lowering of its own: a debug build stops on it, a release
+  ## build keeps it for the statement. Restores every threadvar it touches.
+  ## For `tests/tsymex_0016_int37_probes.nim` only.
+  let savedPending = loweringPendingTaint
+  let savedPendingUb = loweringPendingUb
+  let savedCtx = currentWalkCtxPtr
+  let savedSinks = currentLowerSinks
+  var w: WalkCtx
+  w.exitClock = newExitClock()
+  w.topExits = w.exitClock.newExits(CallExits)
+  w.frame = initCallFrameCtx(w.exitClock)
+  currentWalkCtxPtr = addr w
+  currentLowerSinks = addr w.sinks
+  loweringPendingTaint = {scSpurious}
+  loweringPendingUb = {}
+  try:
+    claimStrayPendingTaint()
+  except AssertionDefect:
+    result.tripped = true
+  result.strayKept = w.stmtStrayTaint
+  discard takeLoweringPendingDegrade()
+  result.pendingAfter = loweringPendingTaint
+  currentWalkCtxPtr = savedCtx
+  currentLowerSinks = savedSinks
+  loweringPendingTaint = savedPending
+  loweringPendingUb = savedPendingUb
 
 proc haltExcludedDefect(p: Path, typeId: string, w: var WalkCtx) =
   ## RFC-0016 K7b (W-16). A `Defect` raise that reaches the SUT boundary
@@ -24403,21 +24613,20 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # Push a call frame whose retSym IS the funcApp: `walk(isReturn)` binds each
   # returning path's value to it as `funcApp == v_i` on that path's pc delta.
   let ptrRisk = varFormalPtrRisk(w, cb.params, ptrArgs, ptrCodes)
-  w.callStack.add CallFrame(
-    exits: w.exitClock.newExits(CallExits),
-    callee: "closure@" & $clo.closureSite.siteHash & "/" &
+  w.callStack.add initCallFrame(w.exitClock,
+    callee = "closure@" & $clo.closureSite.siteHash & "/" &
             $clo.closureSite.declOrder,
-    retSym: funcApp, retName: "__closureRet",
+    retSym = funcApp, retName = "__closureRet",
     # RFC-0005 S8m: a bare `return` that never assigned `result` binds the
     # zero value, as the fall-through twin below does. With no `retTy` the
     # path joined `returnedPaths` unbound, and the explicit-return loop
     # below took its LAST BRANCH CONDITION for the value binding: `if y > 0:
     # return` asserted `y > 0` as a ground axiom of the whole run.
-    retTy: cb.retTy,
+    retTy = cb.retTy,
     # RFC-0005 S8bn (item 3): the lambda's `var` formals a pointer may
     # address (all of them for a call that carries no codes).
-    ptrRiskFormals: ptrRisk.risk, ptrSafeFormals: ptrRisk.safe,
-        sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
+    ptrRiskFormals = ptrRisk.risk, ptrSafeFormals = ptrRisk.safe,
+        sp = nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
   let frameIx = w.callStack.high
   # RFC-0005 S8bu: the calling frame's address cells, for the formals bound
   # to them below.
@@ -26651,7 +26860,7 @@ proc verifyTailDefinedKinds(prog: SymexProgram; settings: SymexSettings;
   var w = WalkCtx(
     extHardMark: -1,
     exitClock: exitClock, topExits: exitClock.newExits(CallExits),
-    frame: CallFrameCtx(exits: exitClock.newExits(FrameExits)),
+    frame: initCallFrameCtx(exitClock),
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_k10b_tail_unreached__"),
     params: prog.params, mode: wmFollowConcrete, tailGate: true,
@@ -27068,7 +27277,7 @@ proc runSymexImpl(prog: SymexProgram,
   var w = WalkCtx(
     extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     exitClock: exitClock, topExits: exitClock.newExits(CallExits),
-    frame: CallFrameCtx(exits: exitClock.newExits(FrameExits)),
+    frame: initCallFrameCtx(exitClock),
     z3: ctx, target: target, params: prog.params,
     mode: wmExplore,   ## RFC-fuzzer-nextgen G1a: explicit for clarity — this
                        ## is also the zero-value, so pre-G1a callers already
@@ -28046,7 +28255,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   var w = WalkCtx(
     extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     exitClock: exitClock, topExits: exitClock.newExits(CallExits),
-    frame: CallFrameCtx(exits: exitClock.newExits(FrameExits)),
+    frame: initCallFrameCtx(exitClock),
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_concolic_unreached__"),
     params: prog.params, mode: wmFollowConcrete,

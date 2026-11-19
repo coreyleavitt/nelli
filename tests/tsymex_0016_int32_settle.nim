@@ -105,8 +105,8 @@ suite "INT-32 (3): the strongest finding of a raised type is stored":
                          soundness: Soundness(replay: rsUnconfirmed))
     let strong = RawResult(status: sxRaised, raisedTypeId: "ValueError",
                            soundness: Soundness(replay: rsNotNeeded))
-    let weakGaps = @[FindingGap(class: dcSubstituted, kind: "weak", msg: "w")]
-    let strongGaps = @[FindingGap(class: dcNoAnswer, kind: "strong", msg: "s")]
+    let weakGaps = @[FindingGap(class: dcSubstituted, kind: feOpaqueCallUnmodelled, msg: "w")]
+    let strongGaps = @[FindingGap(class: dcNoAnswer, kind: beBudgetExhausted, msg: "s")]
     let weakWit = @[integerChoice(1, 0, 10, 0)]
     let strongWit = @[integerChoice(7, 0, 10, 0)]
     check saveSymexRaisedImpl(db, int32RaisedProg, int32RaisedTarget,

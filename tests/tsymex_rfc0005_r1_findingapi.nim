@@ -288,12 +288,12 @@ proc lcFinding(fs: seq[SymexFinding]): SymexFinding =
 suite "R2 DD1: host safety is typed, not read off hints":
   test "probe: the lossy winner's replay ended its child":
     let f = lcFinding(symexFindAllWitnesses(r2LossyCrash, inMemoryDatabase()))
-    var kinds: seq[string]
+    var kinds: seq[SymexErrorKind]
     for h in f.hints: kinds.add h.kind
     checkpoint $f.status & " " & $f.soundness & " " & $kinds
     check f.status == sfSat
     check f.soundness.replay == rsUnconfirmed
-    check "feReplayCrashed" in kinds
+    check feReplayCrashed in kinds
     check not hostRunnable(f.soundness)
 
   test "a cache hit without its notes still refuses the host":

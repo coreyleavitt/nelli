@@ -172,6 +172,51 @@ func constructRows(): seq[ConstructKey] =
     "of the whole record, never served with the gaps up to the break " &
     "(INT-32)", iNever, nrByDesign)
   result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["cache/record/notes"], none(SymexErrorKind),
+    "a notes record re-saved over another and broken part-way reads back as " &
+    "the old record, the new one or nothing, never a mix (INT-38)",
+    iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["cache/key/bodiless"], none(SymexErrorKind),
+    "a routine with no body of its own (an `importc` one, a forward " &
+    "declaration) is keyed at compile time like any other (INT-37)",
+    iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["regex/possessive/size"], none(SymexErrorKind),
+    "a possessive repeat of a character, type, class or back-reference adds " &
+    "nothing to PCRE 8.45's compiled size, as the reader's bound assumes " &
+    "(INT-37)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["walk/stmt/stray-findings"], none(SymexErrorKind),
+    "a statement's stray lowering taint reaches the findings it filed, so a " &
+    "hit solved before the stray was found is a candidate, never a clean " &
+    "winner (INT-36)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["walk/exits/groups"], none(SymexErrorKind),
+    "every exit group a walk or frame type holds is visited by the stamp and " &
+    "the claim, or the build fails; an entry's handler depth cannot change " &
+    "once parked (INT-35)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["walk/exits/frames"], none(SymexErrorKind),
+    "every walker frame is made by its constructor, which binds its exit " &
+    "group to the walk's clock; none is built field by field (INT-35)",
+    iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["walk/stmt/stray-claim"], none(SymexErrorKind),
+    "no lowering leaves pending taint for another lowering to claim: a debug " &
+    "walk stops on one, a release walk keeps it for the statement (INT-37)",
+    iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["report/findings/dropped"], none(SymexErrorKind),
+    "a finding recorded outside any engine frame, on any thread, is counted " &
+    "on the report of the run it happened during, and every renderer shows " &
+    "it (INT-36)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["report/findings/nested-merge"], none(SymexErrorKind),
+    "a nested run that re-finds its enclosing run's claim at its own call " &
+    "site adds no second entry to the enclosing report; the more severe, " &
+    "then the stronger claim, is kept (INT-36)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
     ["db/secondary/guard"], none(SymexErrorKind),
     "a failing secondary-corpus write is reported in `dbErrors` (and ends a " &
     "`strictDb` run with a report), never raised out of `forAll` (INT-33)",

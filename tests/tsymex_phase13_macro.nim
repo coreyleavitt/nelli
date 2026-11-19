@@ -5,9 +5,9 @@
 ## for non-SAT verdicts. The `status: SymexFindingStatus` param is
 ## a runtime value (not `static`) — the suffix selection is
 ## runtime-dispatched. RFC-0005 S8av: error accumulation routes
-## through `recordSymexDbError`/`consumeSymexDbErrors` (the same
-## thread-local sink `symexFindAllWitnesses` drains into
-## `Report.dbErrors`), so a caller of this standalone macro form
+## through `recordSymexDbError` (as `symexFindAllWitnesses` records its
+## own; RFC-0016 INT-34: the running run's `Report.dbErrors`, else
+## `consumeSymexDbErrors`), so a caller of this standalone macro form
 ## sees a save/load failure there (see
 ## `tests/tsymex_rfc0005_s8av_remainder.nim`); callers wanting a
 ## locally-scoped `errors` seq instead use `saveSymexVerdictImpl` /

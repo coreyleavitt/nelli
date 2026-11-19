@@ -106,12 +106,23 @@ proc claimAt*[T](ch: var ExitChannel[T]; m: ExitMark; depth: int): seq[T] =
     else: kept.add e
   ch.entries = move kept
 
-iterator mitemsSince*[T](ch: var ExitChannel[T]; m: ExitMark): var T =
+iterator mitemsSince[T](ch: var ExitChannel[T]; m: ExitMark): var T =
   ## The items of the entries parked after `m`, to replace in place. An
-  ## entry's serial is not the item's to change.
+  ## entry's serial is not the item's to change. RFC-0016 INT-35 (R5-08):
+  ## not exported, so nothing outside this module can change an entry's
+  ## handler depth (`depthOf`) after it was parked; `visitSince`, its one
+  ## reader, hands out only the path (`exitPath`).
   if ch.entries.len > 0:
     checkMark(ch.clock, m)
     for e in ch.entries.mitems:
+      if e.serial > m.serial: yield e.item
+
+iterator itemsSince*[T](ch: ExitChannel[T]; m: ExitMark): T =
+  ## The items of the entries parked after `m`, in parking order, read-only:
+  ## the exported reading of what `mitemsSince` changes in place (R5-08).
+  if ch.entries.len > 0:
+    checkMark(ch.clock, m)
+    for e in ch.entries:
       if e.serial > m.serial: yield e.item
 
 # ---- Groups ------------------------------------------------------------------

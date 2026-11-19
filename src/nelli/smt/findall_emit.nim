@@ -10,6 +10,7 @@ import ../choice
 import ./dsl
 import ./scan
 import ../engine/types as engineTypes
+import ../engine/frame   ## RFC-0016 INT-34: `recordSymexDbError`
 import ./witness_render
 import ./witness_emit
 import ./run_replayed
@@ -352,13 +353,11 @@ proc symexFindAllWitnessesImpl*(self: NimNode; fn: NimNode; db: NimNode; symexSe
       var `findingsId`: seq[SymexFinding] = @[]
       var `dbErrorsId` {.used.}: seq[string] = @[]
         # Phase 13 cycle 3 — accumulator for DB save/load failures.
-        # Phase 14 cycle C2: drained into `engineSymexDbErrors`
-        # thread-local sink so `finalizePhase` can append into
-        # `Report.dbErrors` at end-of-run.
+        # RFC-0016 INT-34: recorded on the running run's frame below, so
+        # that run's `Report.dbErrors` shows them.
       `runtimeBody`
-      # Phase 14 C2: deposit accumulated DB errors into the
-      # engine-side thread-local sink. `recordSymexDbError` is a
-      # tiny append; safe to call from any phase.
+      # RFC-0016 INT-34: the run this call is in owns its DB errors
+      # (`recordSymexDbError`); outside any run, its caller does.
       for dbErr in `dbErrorsId`:
         recordSymexDbError(dbErr)
       `findingsId`

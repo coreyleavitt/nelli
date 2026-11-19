@@ -72,7 +72,9 @@ import ./engine/types as engineTypes
 import ./smt/witness_render   ## RFC-0016 D6: the witness -> choices bridge
 export witness_render.renderAsChoices
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
-       engineTypes.FindingGap, engineTypes.FindingUndefined, engineTypes.trusted   ## RFC-0005 S11
+       engineTypes.FindingGap, engineTypes.FindingUndefined, engineTypes.trusted,   ## RFC-0005 S11
+       engineTypes.FindingHint, engineTypes.SymexErrorKind,
+       engineTypes.SymexErrorSeverity   ## RFC-0016 INT-34
 
 
 # ---- assertCoveredBy capture context ----------------------------------------
@@ -127,6 +129,7 @@ import ./engine/pipeline
 import ./optbox
 import ./smt/canonicalize
 export canonicalize.symexCacheKey, canonicalize.symexCacheKeyPrefix,
+       canonicalize.symexCacheKeyPrefixFor, canonicalize.walkerVersionOfKey,
        canonicalize.symexWalkerVersion,
        canonicalize.renderAsChoicesVersion, canonicalize.canonicalize,
        canonicalize.cacheKeySat, canonicalize.cacheKeyUnsat,
@@ -154,7 +157,8 @@ export symex_cache.saveSymexNotesImpl, symex_cache.loadSymexNotesImpl,
        symex_cache.saveSymexVerdictImpl, symex_cache.loadSymexVerdictImpl,
        symex_cache.saveSymexRaisedImpl, symex_cache.loadSymexRaisedImpl,
        symex_cache.toFindingStatus, symex_cache.CachedWitness,
-       symex_cache.CachedVerdict, symex_cache.CachedRaised, symex_cache.CachedNotes
+       symex_cache.CachedVerdict, symex_cache.CachedRaised, symex_cache.CachedNotes,
+       symex_cache.pruneForeignSymexRecords   ## RFC-0016 INT-38 (R8-04)
 
 
 
@@ -677,13 +681,10 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
       var dbErrors: seq[string] = @[]
       saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
                             `finding`, dbErrors, `maxEntries`)
-      # RFC-0005 S8av: route through the SAME thread-local sink
-      # `symexFindAllWitnesses` drains into `Report.dbErrors` (Phase 14
-      # cycle C2), so a caller of this standalone macro sees a save
-      # failure via `consumeSymexDbErrors()` instead of it being
-      # silently swallowed (was: declared `{.used.}` and discarded —
-      # S11's own note on `db.nim`'s "errors flow to Report.dbErrors"
-      # promise, left unwired since Phase 13 cycle 7).
+      # RFC-0005 S8av, RFC-0016 INT-34: recorded as `symexFindAllWitnesses`
+      # records its own (`recordSymexDbError`): on the running run's
+      # `Report.dbErrors`, or, outside any run, for this macro's caller
+      # (`consumeSymexDbErrors()`), never silently swallowed.
       for dbErr in dbErrors:
         recordSymexDbError(dbErr)
 
@@ -719,13 +720,12 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
 # Mirror `saveSymexWitness` / `loadSymexWitnesses` for non-SAT
 # verdicts. `status: SymexFindingStatus` is a runtime value, not
 # static — the suffix (`:unsat` vs `:unk`) is dispatched at
-# runtime inside `saveSymexVerdictImpl`. RFC-0005 S8av: error
-# accumulation routes through `recordSymexDbError`/
-# `consumeSymexDbErrors` (the same sink `symexFindAllWitnesses`
-# drains into `Report.dbErrors`), so a caller of the standalone
-# macro form sees a save/load failure there instead of it being
-# silently swallowed; callers wanting a locally-scoped `errors` seq
-# instead use the `*Impl` procs directly.
+# runtime inside `saveSymexVerdictImpl`. RFC-0005 S8av, RFC-0016 INT-34:
+# errors are recorded through `recordSymexDbError`, as
+# `symexFindAllWitnesses` records its own: on the running run's
+# `Report.dbErrors`, or, outside any run, for the caller
+# (`consumeSymexDbErrors`); callers wanting a locally-scoped `errors`
+# seq instead use the `*Impl` procs directly.
 
 macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,

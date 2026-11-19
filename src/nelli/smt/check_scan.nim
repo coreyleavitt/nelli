@@ -77,10 +77,9 @@ type
     file: string              ## `normalPath`ed
     events: seq[ScanEvent]
     regions: seq[tuple[first, last: int]]   ## template and macro definitions
-    defs: RoutineDefs         ## RFC-0016 int6-w: the routines the text defines
-    lines: int                ## RFC-0016 int6-w: the text's line count
     parse: int                ## RFC-0016 int6-w: the text as parsed, an index
-                              ## into `parsedAsts` (`scannedAst`); -1 for none
+                              ## into `parsedAsts` (`scannedAst`) and
+                              ## `parsedShapes` (`textDisagrees`); -1 for none
 
   ModuleScan* = object
     visits: seq[ScanVisit]
@@ -280,12 +279,20 @@ proc collectHidden(sc: var Scanner; n: NimNode) =
 proc walk(sc: var Scanner; n: NimNode)
 
 var parsedFiles {.compileTime.}:
-  Table[string, tuple[text: string, ast: NimNode, defs: RoutineDefs, parse: int]]
+  Table[string, tuple[text: string, ast: NimNode, parse: int]]
 var parsedAsts {.compileTime.}: seq[NimNode]
   ## RFC-0016 int6-w. Every text a scan parsed, in parse order: a `ScanVisit`
   ## names its own by index, so a later read of the same file under another
   ## text does not replace the one it was scanned from. An index and not the
   ## node, so a `ModuleScan` stays a value a `const` can hold.
+var parsedShapes {.compileTime.}:
+  seq[tuple[text: string, done: bool, lines: int, defs: RoutineDefs]]
+  ## RFC-0016 int6-s. Per entry of `parsedAsts`, its text, and once
+  ## `textDisagrees` first asks of it, the text's line count and the routines
+  ## it defines. Read lazily: only a user module a routine is placed in is
+  ## asked, and a count over every visit of every included stdlib file, in
+  ## every world `scanModuleText` reads, spent the VM's iteration budget on
+  ## the `system.nim` scan alone (`tests/tsymex_0016_int6s_scancost.nim`).
 
 func defKey*(name: string): string =
   ## RFC-0016 int6-w. A routine name as Nim compares identifiers: the first
@@ -357,14 +364,10 @@ proc scanFile(sc: var Scanner; path, text: string) =
     # lookup spends the VM's iteration budget.
     if path notin parsedFiles or parsedFiles[path].text != text:
       let ast = parseStmt(text, path)
-      var defs: RoutineDefs
-      collectDefs(ast, defs)
       parsedAsts.add ast
-      parsedFiles[path] = (text: text, ast: ast, defs: defs,
-                           parse: parsedAsts.high)
-    sc.res.visits[sc.visit].defs = parsedFiles[path].defs
-    sc.res.visits[sc.visit].lines = text.count('\n') +
-      (if text.len > 0 and text[^1] != '\n': 1 else: 0)
+      parsedShapes.add (text: text, done: false, lines: 0,
+                        defs: initTable[string, seq[int]]())
+      parsedFiles[path] = (text: text, ast: ast, parse: parsedAsts.high)
     sc.res.visits[sc.visit].parse = parsedFiles[path].parse
     walk(sc, parsedFiles[path].ast)
   except ValueError as e:
@@ -746,6 +749,18 @@ proc scannedAst*(m: ModuleScan; file: string): NimNode =
       return parsedAsts[v.parse]
   nil
 
+proc shapeOf(i: int) =
+  ## RFC-0016 int6-s. Fills `parsedShapes[i]`, once per parsed text: linear in
+  ## the text and its tree.
+  if parsedShapes[i].done: return
+  let text = parsedShapes[i].text
+  var defs: RoutineDefs
+  collectDefs(parsedAsts[i], defs)
+  parsedShapes[i].lines = text.count('\n') +
+    (if text.len > 0 and text[^1] != '\n': 1 else: 0)
+  parsedShapes[i].defs = defs
+  parsedShapes[i].done = true
+
 proc textDisagrees*(m: ModuleScan; file, name: string; line: int): string =
   ## RFC-0016 int6-w. "" when the text the scan read can be the text the
   ## compiler parsed at a routine `name` it places at `line` of `file`, else
@@ -762,13 +777,22 @@ proc textDisagrees*(m: ModuleScan; file, name: string; line: int): string =
   let key = defKey(name)
   for v in m.visits:
     if v.file != file: continue
-    if line > v.lines:
-      return "`" & baseName(file) & "` on disk has " & $v.lines &
+    if v.parse notin 0 .. parsedAsts.high:
+      # Not parsed: a text of no lines and no routines.
+      if line > 0:
+        return "`" & baseName(file) & "` on disk has 0 lines, and the " &
+          "compiler placed `" & name & "` at line " & $line
+      continue
+    shapeOf(v.parse)
+    let lines = parsedShapes[v.parse].lines
+    if line > lines:
+      return "`" & baseName(file) & "` on disk has " & $lines &
         " lines, and the compiler placed `" & name & "` at line " & $line
-    if key in v.defs and line notin v.defs[key]:
+    if key in parsedShapes[v.parse].defs and
+       line notin parsedShapes[v.parse].defs[key]:
       return "`" & baseName(file) & "` on disk defines `" & name &
-        "` at line " & v.defs[key].join(", ") & ", not at line " & $line &
-        ", where the compiler placed it"
+        "` at line " & parsedShapes[v.parse].defs[key].join(", ") &
+        ", not at line " & $line & ", where the compiler placed it"
   ""
 
 proc unknownReason*(m: ModuleScan): string = m.unknown

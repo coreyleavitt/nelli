@@ -4175,12 +4175,12 @@ var pendingPtrCompares {.threadvar.}: seq[Z3AnyAst]
   ## `drainPendingLowerEffects`, which declines the path when one may be a
   ## dead frame's address cell (`danglingCompareTaint`).
 
-proc refNilAst(v: SymVal): RawZ3Ast =
+proc refNilAst(v: SymVal): Z3AnyAst =
   ## RFC-0016 INT-65. The nil of `v`'s pointee sort (`allocRefSort` mints it).
   let ctx = requireCurrentContext()
   let pointee = (if v.kind == svRef: v.refPointee else: v.ptrPointee)
   discard allocRefSort(ctx, pointee)
-  currentNilConsts[refPointeeTypeId(pointee)].raw
+  currentNilConsts[refPointeeTypeId(pointee)]
 
 proc refEq(a, b: SymVal, op: IRBinop): SymVal
 proc refCrossSortEq(a, b: SymVal, op: IRBinop): SymVal =
@@ -4196,10 +4196,10 @@ proc refCrossSortEq(a, b: SymVal, op: IRBinop): SymVal =
   let bAst = (if b.kind == svRef: b.refAst else: b.ptrAst)
   let aNil = refNilAst(a)
   let bNil = refNilAst(b)
-  let aIsNil = wrap[Z3Bool](ctx, checkedEq(ctx, aAst.raw, aNil))
-  let bIsNil = wrap[Z3Bool](ctx, checkedEq(ctx, bAst.raw, bNil))
-  if aAst.raw == aNil or bAst.raw == bNil:
-    let eq = if aAst.raw == aNil: bIsNil else: aIsNil
+  let aIsNil = wrap[Z3Bool](ctx, checkedEq(ctx, aAst.raw, aNil.raw))
+  let bIsNil = wrap[Z3Bool](ctx, checkedEq(ctx, bAst.raw, bNil.raw))
+  if aAst.raw == aNil.raw or bAst.raw == bNil.raw:
+    let eq = if aAst.raw == aNil.raw: bIsNil else: aIsNil
     case op
     of bEq: return ofBool(eq)
     of bNe: return ofBool(not eq)

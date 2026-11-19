@@ -512,7 +512,7 @@ proc maxMagnitude(r: IntRender): uint64 =
   elif r.width == 64: high(uint64)
   else: (1'u64 shl r.width) - 1
 
-proc bvNum(ctx: Z3Context; text: string; width: int): Z3AnyAst =
+proc bvNumOwned(ctx: Z3Context; text: string; width: int): Z3AnyAst =
   let s = ctx.checkErr Z3_mk_bv_sort(ctx.raw, cuint(width))
   wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring, s))
 
@@ -521,7 +521,7 @@ proc rbool(ctx: Z3Context; raw: RawZ3Ast): Z3Bool = wrap[Z3Bool](ctx, raw)
 proc isNeg(ctx: Z3Context; r: IntRender): Z3Bool =
   if not r.signed: return mkBool(ctx, false)
   rbool(ctx, ctx.checkErr Z3_mk_bvslt(ctx.raw, r.v.raw,
-                                      bvNum(ctx, "0", r.width).raw))
+                                      bvNumOwned(ctx, "0", r.width).raw))
 
 proc renderLen(ctx: Z3Context; r: IntRender): Z3Int =
   ## `len($v)`: the digit count of `v`'s magnitude, one more when negative.
@@ -534,15 +534,15 @@ proc renderLen(ctx: Z3Context; r: IntRender): Z3Int =
   if not r.signed:
     return chain(ctx, digitCount(maxMagnitude(r)), proc (k: int): Z3Bool =
       rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, v.raw,
-                                          bvNum(ctx, pow10Text(k), w).raw)))
+                                          bvNumOwned(ctx, pow10Text(k), w).raw)))
   let posLen = chain(ctx, digitCount(maxMagnitude(r) - 1),
     proc (k: int): Z3Bool =
       rbool(ctx, ctx.checkErr Z3_mk_bvslt(ctx.raw, v.raw,
-                                          bvNum(ctx, pow10Text(k), w).raw)))
+                                          bvNumOwned(ctx, pow10Text(k), w).raw)))
   let negLen = chain(ctx, digitCount(maxMagnitude(r)),
     proc (k: int): Z3Bool =
       rbool(ctx, ctx.checkErr Z3_mk_bvsgt(ctx.raw, v.raw,
-                                          bvNum(ctx, "-" & pow10Text(k), w).raw)))
+                                          bvNumOwned(ctx, "-" & pow10Text(k), w).raw)))
   ite(isNeg(ctx, r), mkInt(ctx, 1) + negLen, posLen)
 
 proc magnitude(ctx: Z3Context; r: IntRender; width: int): Z3AnyAst =
@@ -567,18 +567,18 @@ proc renderPad*(ctx: Z3Context; m: Z3AnyAst; L: int): Z3AnyAst =
   ## most `L` digits: an `ite` chain over `m`'s thresholds.
   const ew = 8
   let width = renderKeyWidth(L)
-  result = bvNum(ctx, "0", ew)
+  result = bvNumOwned(ctx, "0", ew)
   for k in countdown(L - 1, 1):
     let below = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, m.raw,
-                                         bvNum(ctx, pow10Text(k), width).raw))
+                                         bvNumOwned(ctx, pow10Text(k), width).raw))
     result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, below.raw,
-      bvNum(ctx, $(L - k), ew).raw, result.raw))
+      bvNumOwned(ctx, $(L - k), ew).raw, result.raw))
 
 proc renderScale*(ctx: Z3Context; m, pad: Z3AnyAst; L: int): Z3AnyAst =
   ## RFC-0016 INT-57. `m * 10^pad` for an 8-bit `pad < L`: `m` scaled by
   ## `10^(2^i)` for each set bit `i` of `pad`.
   let width = renderKeyWidth(L)
-  let one = bvNum(ctx, "1", 1)
+  let one = bvNumOwned(ctx, "1", 1)
   result = m
   var i = 0
   while (1 shl i) <= L - 1:
@@ -586,7 +586,7 @@ proc renderScale*(ctx: Z3Context; m, pad: Z3AnyAst; L: int): Z3AnyAst =
                                                               cuint(i), pad.raw))
     let isSet = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, bit.raw, one.raw))
     let scaled = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvmul(ctx.raw,
-      result.raw, bvNum(ctx, pow10Text(1 shl i), width).raw))
+      result.raw, bvNumOwned(ctx, pow10Text(1 shl i), width).raw))
     result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, isSet.raw,
                                                          scaled.raw, result.raw))
     inc i
@@ -816,7 +816,7 @@ const byteAtMaxWidth = 16
   ## `10^k`, and at 60 s with the chain of divisions by ten below, so a
   ## wider rendering's byte stays the walker's `str.at`.
 
-proc bvByte(ctx: Z3Context; b: int): Z3AnyAst = bvNum(ctx, $b, 8)
+proc bvByte(ctx: Z3Context; b: int): Z3AnyAst = bvNumOwned(ctx, $b, 8)
 
 proc digitByte(ctx: Z3Context; m: Z3AnyAst; w, digits, j: int): Z3AnyAst =
   ## Byte `j` (from the left) of the digits of `m` (a `w`-bit unsigned
@@ -826,11 +826,11 @@ proc digitByte(ctx: Z3Context; m: Z3AnyAst; w, digits, j: int): Z3AnyAst =
   var qs = @[m]
   for k in 1 ..< digits:
     qs.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvudiv(ctx.raw, qs[^1].raw,
-      bvNum(ctx, "10", w).raw))
+      bvNumOwned(ctx, "10", w).raw))
   proc val(l: int): Z3AnyAst =
     if j >= l: return bvByte(ctx, 0xFF)
     let d = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvurem(ctx.raw,
-      qs[l - 1 - j].raw, bvNum(ctx, "10", w).raw))
+      qs[l - 1 - j].raw, bvNumOwned(ctx, "10", w).raw))
     let d8 = if w == 8: d
              else: wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw, 7, 0, d.raw))
     wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvadd(ctx.raw, d8.raw,
@@ -840,7 +840,7 @@ proc digitByte(ctx: Z3Context; m: Z3AnyAst; w, digits, j: int): Z3AnyAst =
   for l in countdown(digits - 1, 1):
     # wrapped (held) before `val` builds more terms
     let below = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, m.raw,
-                                         bvNum(ctx, pow10Text(l), w).raw))
+                                         bvNumOwned(ctx, pow10Text(l), w).raw))
     let lv = val(l)
     result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, below.raw,
                                                          lv.raw, result.raw))

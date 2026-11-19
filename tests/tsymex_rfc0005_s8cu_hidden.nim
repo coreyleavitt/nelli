@@ -4,9 +4,19 @@
 ## template or macro from another module, push where they are called, and the scan
 ## cannot expand them. Their `{.pop.}` is in the text, though, and matches no push
 ## the scan read: every call statement before it then reads as possibly pushing
-## every check off, up to that pop. An `import` under a push in a module the walk
-## never enters is found by the import graph from the routine's module and the
-## project file. Each row ran unchecked natively and was a false `sxRaised`.
+## every check off, up to that pop. Each row ran unchecked natively and was a
+## false `sxRaised`; the macro-built and imported pushes still decline.
+##
+## An `import` under a push in a module the walk never enters (`m1` imports
+## `m2` under a push of three checks off) was found by the import graph and
+## declined. RFC-0016 int6 (walker 477, `replayCompileOrder`) replays Nim's
+## compile order: `system` first, then this file's imports depth first, the
+## first import of a module compiling it. Nothing before `m1` imports `m2`, and
+## no module-level call precedes the import, so `m2` is first compiled under
+## `m1`'s push: its routines are walked with those checks off and decide
+## exactly, judged natively (their wrong-branch write and out-of-range
+## conversion reach the label); the down-conversion of a base instance is
+## undefined unchecked and halts as `ubInvalidObjConversion`.
 ##
 ## Each row runs the routine natively on this build beside the walker's verdict.
 import std/[unittest, sets, macros, strutils]
@@ -105,6 +115,14 @@ const callB = devAt(callThenPop, 4)
 const bareHiddenPop =
   scanModuleText(self, "proc a() = discard\n{.pop.}\n").unknownReason
 
+template walkedOff(fn: untyped) =
+  ## A trusted `sxSat`, its witness replayed natively (`pinExact`).
+  block:
+    let r = pinExact(fn, declKey)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+
 suite "S8cu: a push the text does not show":
 
   test "a macro building the pragma from a string":
@@ -127,13 +145,23 @@ suite "S8cu: a push the text does not show":
     check native(macObj(4)) == "hit"
     pinDecline(macObj, declKey, feCheckOption)
 
-  test "an import under a push in a module the walk never enters":
+  test "an import under a push in a module the walk never enters: walked off":
+    # RFC-0016 int6 (walker 477): the compile-order replay finds `m2` first
+    # compiled under `m1`'s push, so it is walked with the three checks off
+    # instead of declining with `feCheckOption`. Native agrees: each reaches
+    # the label, and the walker's witness is replayed natively.
     check native(impField(4)) == "hit"
-    pinDecline(impField, declKey, feCheckOption)
+    walkedOff(impField)
     check native(impRange(300)) == "hit"
-    pinDecline(impRange, declKey, feCheckOption)
+    walkedOff(impRange)
+    # The down-conversion of an `LPar` to an `LCh` with `objChecks` off is no
+    # `ObjectConversionDefect` but type confusion, undefined in C: the walk
+    # halts there as `ubInvalidObjConversion` (as `tsymex_0016_objoff`),
+    # never a false `sxRaised`. Native reads the base field and reaches the
+    # label.
     check native(impObj(4)) == "hit"
-    pinDecline(impObj, declKey, feCheckOption)
+    pinDecline(impObj, declKey, ubInvalidObjConversion,
+               excluding = {feCheckOption})
 
   test "after the pop the checks are back (control)":
     check native(ctlField(4)) == "FieldDefect"

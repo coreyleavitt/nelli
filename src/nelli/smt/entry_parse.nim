@@ -127,6 +127,12 @@ proc entryParse*(fn: NimNode; apiName: string; settings: SymexSettings;
   result.parsed =
     if warn: parseEntryImplWarned(fn, apiName, settings)
     else: parseEntryImpl(fn, apiName, settings.budget.maxInstantiationsPerProc)
+  # RFC-0016 PRC-44: a sink position that runs a user `=dup` is walked through
+  # the hook only once the hooks of its type are probed; then the macro again.
+  let dupProbes = dupHookProbes(result.parsed)
+  if dupProbes != nil:
+    result.again = newTree(nnkStmtListExpr, dupProbes, again)
+    return
   var p = result.parsed  # a copy: a `let` of an object field aliases in the VM (S8x)
   let paramsExpr = p.paramsNimNode
   let bodyExpr = p.bodyNimNode

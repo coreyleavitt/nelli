@@ -22,6 +22,10 @@ type
     read*: proc (path: string): string {.nimcall.}
     anchor*: proc (path: string): string {.nimcall.}
     searchPaths*: seq[string]
+    libDir*: string
+      ## RFC-0016 PRC-43. The compiler's `lib/` (`querySetting(libPath)`),
+      ## which a `--lib:` override may put under any name; "" leaves only the
+      ## spelled `/lib/...` patterns.
 
 # Path text, with no file system behind it. Both separators, as the compiler
 # reports either on Windows.
@@ -117,6 +121,21 @@ proc normalPath*(p: string): string =
   ## For comparing: Windows reports `\\`. A file is READ by the path as the
   ## compiler reported it, never one rebuilt from this.
   p.replace('\\', '/')
+
+proc libRelPath*(path, libDir: string): string =
+  ## RFC-0016 PRC-43. `path` relative to the stdlib directory `libDir`, with
+  ## `/` separators, or "" when it is not under it. Compared without case and
+  ## across both separators, as `dsl_typebridge.isStdlibDecl` compares: a
+  ## `--lib:` override names the directory anything, so stdlib identity is
+  ## the configured path and not the spelling `/lib/`.
+  if libDir.len == 0: return ""
+  var d = normalPath(libDir)
+  if not d.endsWith("/"): d.add '/'
+  if path.len <= d.len: return ""
+  for i in 0 ..< d.len:
+    let c = if path[i] == '\\': '/' else: path[i]
+    if c.toLowerAscii != d[i].toLowerAscii: return ""
+  normalPath(path[d.len .. ^1])
 
 proc merge(a, b: CheckState): CheckState =
   CheckState(maybeOff: a.maybeOff + b.maybeOff, maybeOn: a.maybeOn + b.maybeOn)
@@ -397,8 +416,10 @@ proc isOwnSource*(path: string): bool =
   let p = normalPath(path)
   p == src & "/nelli.nim" or p.startsWith(src & "/nelli/")
 
-proc isLibraryFile*(path: string): bool =
+proc isLibraryFile*(path: string; libDir = ""): bool =
   ## The stdlib and installed packages: not the program's own modules.
+  ## RFC-0016 PRC-43: the stdlib is also whatever is under `libDir`.
+  if libRelPath(path, libDir).len > 0: return true
   let p = "/" & normalPath(path)     # a relative `_deps/...` as well
   "/lib/pure/" in p or "/lib/std/" in p or "/lib/core/" in p or
     "/lib/impure/" in p or "/lib/system" in p or "/lib/packages/" in p or
@@ -464,7 +485,7 @@ proc recordImports(sc: var Scanner; n: NimNode) =
     # Kept as found if it cannot be anchored: reading it then fails closed.
     if found.len > 0 and sc.env.anchor(found).len > 0:
       found = sc.env.anchor(found)
-    if found.len > 0 and not isLibraryFile(found) and found notin sc.res.imports:
+    if found.len > 0 and not isLibraryFile(found, sc.env.libDir) and found notin sc.res.imports:
       sc.res.imports.add found
 
 proc walkWhen(sc: var Scanner; n: NimNode) =

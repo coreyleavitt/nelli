@@ -248,6 +248,20 @@ const mathRows: seq[StdlibRow] = block:
       "asserts follow `assertions` where the generic is first instantiated, " &
       "not the push, so a path outside the precondition declines " &
       "`feCheckOption`"),
+    loweredByName("system.$/float",
+      "dollars.nim:12 / formatfloat.nim: `addFloat`, Dragonbox's shortest " &
+      "round-trip digits laid out by `formatDigits` (PRC-35). Modelled " &
+      "exactly for NaN, the infinities, the two zeros, an integral value of " &
+      "magnitude at most 2^53 (2^24 for float32: `N.0`) and a dyadic value " &
+      "m/2^k, m odd, k <= 13 with |x| < 2^(54-4k) (k <= 6, |x| < " &
+      "2^(25-4k) for float32), whose exact k-digit decimal is the shortest " &
+      "round trip; any other value (`0.1`, `1e22`) declines at the call " &
+      "(`feUnsupportedOp`), as does every value under -d:nimLegacySprintf"),
+    floatModelled("toInt", "system.nim:1320: `if f >= 0: int(f+0.5) else: " &
+      "int(f-0.5)`, the add in round-nearest-even and the conversion " &
+      "`iekConvFloatToInt`'s (undefined outside int's range), exact"),
+    floatModelled("toBiggestInt", "system.nim:1337: `toInt`'s body over " &
+      "BiggestFloat and BiggestInt, the same lowering, exact"),
     floatModelled("abs", "clears the sign bit (fp.abs), exact"),
     floatModelled("min", "fp.min, exact"),
     floatModelled("max", "fp.max, exact"),

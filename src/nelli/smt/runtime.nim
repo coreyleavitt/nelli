@@ -1582,7 +1582,7 @@ proc constSeqArrs(elemTy: IRType; elem: SymVal): seq[Z3AnyAst] =
   let idxHold = mkZ3IntLit(0)
   let idxSort = ctx.checkErr Z3_get_sort(ctx.raw, idxHold.raw)
   let leaves =
-    if isTreeSeqElemTy(elemTy): svLeafTerms(elem, elemTy)
+    if isTreeSeqElemTy(elemTy): svLeafTerms(elem, elemTy, seqCell = true)
     else: @[wrap[Z3AnyAst](ctx, svLeafAsts(elem, elemTy)[0])]
   for leaf in leaves:
     result.add wrap[Z3AnyAst](ctx,
@@ -1736,7 +1736,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # surrounding op (comparison, arithmetic) lowers literals at the
     # right representation.
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekSeqSlice, iekSeqSplice:
+  of iekSeqSlice, iekSeqSplice, iekSeqConcat:
     # v67: a slice VALUE is a seq — no scalar prototype to offer.
     none(SymVal)
   of iekStrLit:
@@ -2071,7 +2071,7 @@ proc conformSV(sv: SymVal; ty: IRType): Option[SymVal] =
     let c = conformSV(seqElemAt(sv, iVar), cellTy)
     if c.isNone or not svFitsHeapTy(c.get, cellTy): return none(SymVal)
     var arrs: seq[Z3AnyAst]
-    for leaf in svLeafTerms(c.get, cellTy):
+    for leaf in svLeafTerms(c.get, cellTy, seqCell = true):
       arrs.add lambdaOver(ctx, iVar, leaf)
     var r = mkSeqSV(sv.seqLen, arrs, cellTy) # [placeholder-audited]
     r.seqSteps = sv.seqSteps
@@ -2109,7 +2109,7 @@ proc seqStoreArrs(seqSV: SymVal; idx: Z3Int; val: SymVal): Option[seq[Z3AnyAst]]
   if c.isNone or not svFitsHeapTy(c.get, elemTy): return none(seq[Z3AnyAst])
   let ctx = requireCurrentContext()
   let arrs = seqArrs(seqSV)
-  let leaves = svLeafTerms(c.get, elemTy)
+  let leaves = svLeafTerms(c.get, elemTy, seqCell = true)   # RFC-0016 INT-78
   if leaves.len != arrs.len: return none(seq[Z3AnyAst])
   for i in 0 ..< arrs.len:
     let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, arrs[i].raw)
@@ -6368,6 +6368,65 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         checkedIte(zctx, inPart.raw, fromPart.raw, fromBase.raw))
       lams.add lambdaOver(zctx, iVar, body)
     mkSeqSV(base.seqLen, lams, base.seqElemTy) # [placeholder-audited]
+  of iekSeqConcat:
+    # RFC-0016 INT-80: system's `&` over two seqs (an element operand is a
+    # one-element literal by now). Nim builds a fresh seq of length
+    # `len(a) + len(b)` and copies `a`'s elements, then `b`'s, into it. The
+    # model is an array-lambda per data array, `ite(i < len(a), a[i],
+    # b[i - len(a)])`, as `iekSeqSplice`'s: each part keeps the sort its
+    # array has (INT-78), the lambda captures the operands' arrays as they
+    # are here (a later write to either is a new store chain and does not
+    # show through, Nim's copy), and a read stays quantifier-free: Z3
+    # beta-reduces a select over the lambda to the `ite`.
+    let left = lower(env, e.scLeft)
+    let right = lower(env, e.scRight)
+    if left.kind == svSeq and left.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      declinePlaceholderInLower(left, "", "concatenation (`&`)")
+      return left
+    if right.kind == svSeq and right.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      declinePlaceholderInLower(right, "", "concatenation (`&`)")
+      return right
+    if left.kind != svSeq or right.kind != svSeq or
+       seqArrs(left).len != seqArrs(right).len:
+      # Unreachable for a typed Nim `&` (both operands are `seq[T]`); a
+      # value some upstream degrade produced declines in-band.
+      let declineMsg = "iekSeqConcat: the operands lowered as " &
+        plainEnglishSymValKind(left.kind) & "/" &
+        plainEnglishSymValKind(right.kind) &
+        " — expected two seqs of one element shape (weInternalWalkerFault)"
+      lowerDegrade(weInternalWalkerFault, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(
+        tUnsupportedFieldSeq(tInt(8, false), declineMsg,
+          kind = weInternalWalkerFault),
+        freshDegradeName("__seqConcatMismatch"), fresh)
+    if not isBackedSeqElemTy(left.seqElemTy):
+      # A seq of an element the model does not back (`seq[seq[T]]`) that
+      # is not a placeholder (an empty literal's): as `iekSeqAdd` declines.
+      let declineMsg = "iekSeqConcat: a seq of " & $left.seqElemTy &
+        ", an element type the model does not back (seNestedSeqUnsupported)"
+      lowerDegrade(seNestedSeqUnsupported, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(tUnsupportedFieldSeq(left.seqElemTy, declineMsg),
+                         freshDegradeName("__seqConcatUnbacked"), fresh)
+    let lenL = left.seqLen # [placeholder-audited]
+    inc sliceViewCounter
+    let zctx = left.seqDataRaw.ctx # [placeholder-audited]
+    let iVar = mkIntVar("__concatview_i" & $sliceViewCounter)
+    let inLeft = iVar < lenL
+    let shifted = iVar - lenL
+    let lArrs = seqArrs(left)
+    let rArrs = seqArrs(right)
+    var lams: seq[Z3AnyAst]
+    for k in 0 ..< lArrs.len:
+      let fromLeft = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, lArrs[k].raw, iVar.raw))
+      let fromRight = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, rArrs[k].raw, shifted.raw))
+      let body = wrap[Z3AnyAst](zctx,
+        checkedIte(zctx, inLeft.raw, fromLeft.raw, fromRight.raw))
+      lams.add lambdaOver(zctx, iVar, body)
+    mkSeqSV(lenL + right.seqLen, lams, left.seqElemTy) # [placeholder-audited]
   of iekStrLit, StrOpKinds:
     # Stage 7 (CR-7) Cluster S: all string literal and string-op arms are
     # extracted into `lowerStrArm` (defined above, before this proc body).

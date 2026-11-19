@@ -1068,7 +1068,8 @@ proc svLeafAsts*(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast] =
   of svSet:   @[sv.setMembersRaw.raw, sv.setSize.raw]
   else:       @[rawAnyAstOf(sv)]
 
-proc heapLeafTerm*(sv: SymVal; ty: IRType; pinForm = false): Z3AnyAst =
+proc heapLeafTerm*(sv: SymVal; ty: IRType; pinForm = false;
+                   seqCell = false): Z3AnyAst =
   ## RFC-0005 S8bc. `heapLeafRaw`, as an owning handle: an `int` part held as
   ## a Z3 Int is converted to the heap's bitvector, a term nothing else
   ## holds, so its raw handle is not valid past the call that made it.
@@ -1079,12 +1080,22 @@ proc heapLeafTerm*(sv: SymVal; ty: IRType; pinForm = false): Z3AnyAst =
   ## terms at the bit-vector sort while every read lifted the select as an
   ## Int: an ill-sorted term at the first comparison, the defect batch 3
   ## fixed in `heapLeafRaw`.
+  ##
+  ## RFC-0016 INT-78: `seqCell`, a leaf of a seq's data array, is not an
+  ## `intHeapCell`: its `int` part is the bit-vector of its width, the sort a
+  ## `seq[int]` element is held at (`allocateSeqDataRaw`). Held as an Int, a
+  ## literal's bit-vector component went in through `bv2int` and came out
+  ## into the bit-vector world (a `seq[int]`, a table's 64-bit cell, a
+  ## bit-vector operand) through `int2bv`, the F5 shape: `{"a": x}.toTable`
+  ## with a `mgetOrPut` took 98 s a target where `initTable` and `[]=` took 4.
+  ## One Nim type, one sort, wherever a seq holds it. The heap (`ref`, field
+  ## families) keeps S8as's Int cells; a seq is not a heap.
   if pinForm and sv.kind in {svBV8, svBV16, svBV32, svBV64}:
     # RFC-0016 K10b: the value's own bit-vector, not its Int projection
     # (`ubv_to_int` under a sign `ite`): an equality on the projection made
     # every query the second walk's pins joined a mixed-theory one.
     return wrap[Z3AnyAst](requireCurrentContext(), rawAnyAstOf(sv))
-  if ty.kind == itInt and intHeapCell(ty):
+  if ty.kind == itInt and intHeapCell(ty) and not seqCell:
     return toAnyAst(heapStoreValue(sv, sv, ty).zi)
   if ty.kind == itInt and sv.kind == svInt:
     case ty.width
@@ -1094,19 +1105,25 @@ proc heapLeafTerm*(sv: SymVal; ty: IRType; pinForm = false): Z3AnyAst =
     else:  return toAnyAst(intToBv[64](sv.zi, Z3BitVec[64]))
   wrap[Z3AnyAst](requireCurrentContext(), rawAnyAstOf(sv))
 
-proc svLeafTerms*(sv: SymVal; ty: IRType; pinForm = false): seq[Z3AnyAst] =
+proc svLeafTerms*(sv: SymVal; ty: IRType; pinForm = false;
+                  seqCell = false): seq[Z3AnyAst] =
   ## RFC-0005 S8bc. `svLeafAsts`, as owning handles (`heapLeafTerm`). A seq
   ## element store writes a value's leaves into the seq's data arrays across
   ## several Z3 calls. Precondition for a tree: `svFitsHeapTy(sv, ty)`.
+  ##
+  ## RFC-0016 INT-78: `seqCell` -- the leaves of a seq element, whose `int`
+  ## parts are held as the bit-vector of their width, as a `seq[int]`
+  ## element is (`allocateSeqDataRaw`), not as an `intHeapCell` Int.
   if ty != nil and heapTreeTy(ty):
     if ty.kind == itDistinct:
       let g = distinctGround(ty)
-      if heapCompoundTy(g): return svLeafTerms(ejectBase(sv), g, pinForm)
-      return @[heapLeafTerm(ejectBase(sv), g, pinForm)]
+      if heapCompoundTy(g): return svLeafTerms(ejectBase(sv), g, pinForm, seqCell)
+      return @[heapLeafTerm(ejectBase(sv), g, pinForm, seqCell)]
     let psvs = svPartsOf(sv, ty)
     for i, part in heapParts(ty):
-      if heapCompoundTy(part.ty): result.add svLeafTerms(psvs[i], part.ty, pinForm)
-      else: result.add heapLeafTerm(psvs[i], part.ty, pinForm)
+      if heapCompoundTy(part.ty):
+        result.add svLeafTerms(psvs[i], part.ty, pinForm, seqCell)
+      else: result.add heapLeafTerm(psvs[i], part.ty, pinForm, seqCell)
     return
   # A container's leaves are the value's own fields, alive while `sv` is.
   let ctx = requireCurrentContext()
@@ -1184,10 +1201,11 @@ proc svFitsHeapTy*(sv: SymVal; ty: IRType): bool =
   of itPtr: sv.kind == svPtr
   else: false
 
-proc liftHeapValue*(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal
+proc liftHeapValue*(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType;
+                    seqCell = false): SymVal
 
 proc svWithLeaves*(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
-                  ty: IRType = nil): SymVal =
+                  ty: IRType = nil; seqCell = false): SymVal =
   ## RFC-0005 S8ap. `proto` (a value of the cell's type) with its leaf terms
   ## replaced by `leaves`. The inverse of `svLeafAsts`. The leaves are
   ## OWNING handles: a raw term Z3 has not been asked to keep is only valid
@@ -1201,8 +1219,9 @@ proc svWithLeaves*(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
     if ty.kind == itDistinct:
       let g = distinctGround(ty)
       if heapCompoundTy(g):   ## RFC-0005 S8at: the base's leaves, re-boxed
-        return reboxDistinct(ty, svWithLeaves(ctx, ejectBase(proto), leaves, g))
-      return liftHeapValue(ctx, leaves[0].raw, ty)
+        return reboxDistinct(ty, svWithLeaves(ctx, ejectBase(proto), leaves, g,
+                                              seqCell))
+      return liftHeapValue(ctx, leaves[0].raw, ty, seqCell)
     var pos = 0
     let pprotos = svPartsOf(proto, ty)   ## RFC-0005 S8at
     var rebuilt: seq[SymVal]
@@ -1211,8 +1230,9 @@ proc svWithLeaves*(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
       let sub = leaves[pos ..< pos + n]
       pos += n
       rebuilt.add(
-        if heapCompoundTy(part.ty): svWithLeaves(ctx, pprotos[i], sub, part.ty)
-        else: liftHeapValue(ctx, sub[0].raw, part.ty))
+        if heapCompoundTy(part.ty):
+          svWithLeaves(ctx, pprotos[i], sub, part.ty, seqCell)
+        else: liftHeapValue(ctx, sub[0].raw, part.ty, seqCell))
     return svWithParts(proto, ty, rebuilt)
   result = proto
   case proto.kind
@@ -1316,7 +1336,8 @@ proc mkHeapArrayVar*(ctx: Z3Context, refSort: RawZ3Sort,
   let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
   wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
 
-proc liftHeapValue*(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal =
+proc liftHeapValue*(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType;
+                    seqCell = false): SymVal =
   ## Phase 15 R1. Wrap the raw value-sorted ast produced by a heap `select`
   ## into the SymVal variant for `pointeeTy`, so the dereffed value flows back
   ## into the ordinary `lower`/`symEq`/binop machinery. R1 covers the primitive
@@ -1324,7 +1345,8 @@ proc liftHeapValue*(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal
   ## pointees (`ref object`, `seq[ref T]`) land R3+.
   case pointeeTy.kind
   of itInt:
-    if intHeapCell(pointeeTy):   # RFC-0005 S8as: an Int-sorted `int` heap
+    # RFC-0016 INT-78: a seq element's `int` part is a bit-vector (`seqCell`).
+    if intHeapCell(pointeeTy) and not seqCell:   # RFC-0005 S8as: an Int-sorted `int` heap
       return SymVal(kind: svInt, zi: wrap[Z3Int](ctx, valRaw),
                     ziWidth: pointeeTy.width, ziSigned: true)
     case pointeeTy.width
@@ -1352,7 +1374,8 @@ proc liftHeapValue*(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal
     # distinct field was havocked (the `else` arm below), as one over a
     # composite base still is (it has no distinct sort to re-box into).
     if heapCompoundTy(pointeeTy):
-      reboxDistinct(pointeeTy, liftHeapValue(ctx, valRaw, pointeeTy.distinctBase))
+      reboxDistinct(pointeeTy, liftHeapValue(ctx, valRaw,
+                                             pointeeTy.distinctBase, seqCell))
     else:
       degradeAlloc(pointeeTy, heUnsupportedPointeeRead,
         "deref of `ref/ptr " & $pointeeTy & "` (a distinct over a " &
@@ -2785,7 +2808,7 @@ proc allocateSeqArrs*(elemTy: IRType; name: string): seq[Z3AnyAst] =
   let proto = seqElemProto(elemTy)
   let idxHold = mkZ3IntLit(0)
   let idxSort = ctx.checkErr Z3_get_sort(ctx.raw, idxHold.raw)
-  let leaves = svLeafTerms(proto, elemTy)
+  let leaves = svLeafTerms(proto, elemTy, seqCell = true)   # RFC-0016 INT-78
   for i, leaf in leaves:
     let valSort = ctx.checkErr Z3_get_sort(ctx.raw, leaf.raw)
     let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, idxSort, valSort)
@@ -4029,7 +4052,7 @@ proc seqElemAt*(seqSV: SymVal, idx: Z3Int): SymVal =
     for a in arrs:
       leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, a.raw, idx.raw))
     result = svWithLeaves(ctx, seqElemProto(seqSV.seqElemTy), leaves,
-                          seqSV.seqElemTy)
+                          seqSV.seqElemTy, seqCell = true)   # RFC-0016 INT-78
     if result.kind == svSeq:
       # RFC-0016 PRC-23. An inner seq's length is a select of the outer
       # seq's length array, which nothing bounds for a free outer seq (no

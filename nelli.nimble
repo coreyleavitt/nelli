@@ -2010,6 +2010,33 @@ task test, "Run the test suite":
             "tsymex_0016_s8ckr_threadstate_audit",
             "tsymex_0016_s8ckr_firstwrite_audit",
             "tsymex_0016_s8cpr_shapes",
+            # RFC-0016 PRC-35: stdlib precision models (toInt, $float, repr, an enum hole, =dup through a user hook).
+            "tsymex_0016_prc35_models",
+            # RFC-0016 PRC-43: a build that overrides --lib: keeps the stdlib models.
+            "tsymex_0016_prc43_libpath",
+            # RFC-0016 PRC-45: the =dup sink positions PRC-44 left declining (except/finally, parameters, containers, cursor inference).
+            "tsymex_0016_prc45_dupmore",
+            "tsymex_0016_prc46_dupfinal",
+            # RFC-0016 PRC-47: the =dup shapes PRC-46 left declining (seq of unknown length, a global, another module, except-as, iterators).
+            "tsymex_0016_prc47_dupclose",
+            # RFC-0016 PRC-48: =dup sinks in an inline iterator's body, classified per inlined copy.
+            "tsymex_0016_prc48_dupiter",
+            # RFC-0016 PRC-49: the =dup shapes PRC-48 left declining (a hooked loop variable, a sink in the iterator, try, openArray).
+            "tsymex_0016_prc49_dupfinal2",
+            # RFC-0016 PRC-50: the =dup shapes PRC-49 left declining (an owning loop variable, an alias of one, a listed inner loop).
+            "tsymex_0016_prc50_dupresid",
+            # RFC-0016 PRC-51: the =dup shapes PRC-50 left declining (a field path, a field of a local, listed system iterators, a loop-local, a mixed iterator).
+            "tsymex_0016_prc51_dupfield",
+            # RFC-0016 INT-73: a conversion to an anonymous tuple's alias aborted the compile.
+            "tsymex_0016_int73_tuplealias",
+            # RFC-0016 INT-75: a `for` destructuring its variable in parentheses failed the parse.
+            "tsymex_0016_int75_fortuple",
+            # RFC-0016 INT-78: an `int` component of a seq's tuple element was an Int, a `seq[int]` element a bit-vector (F5 cost).
+            "tsymex_0016_int78_seqlitsort",
+            # RFC-0016 INT-79: a seq literal as a `for` operand was a walker fault (`lowerLeafInExpr` met `iekSeqLit`).
+            "tsymex_0016_int79_seqlitloop",
+            # RFC-0016 INT-80: seq `&` (and `add` of a seq) declined; no seq concatenation model.
+            "tsymex_0016_int80_seqconcat",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

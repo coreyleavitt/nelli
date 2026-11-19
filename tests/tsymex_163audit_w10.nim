@@ -21,7 +21,7 @@
 ##
 ## Method note (inherited from #162/#163): every symbolic expectation below is
 ## paired with the SAME computation run for real in this file.
-import std/unittest
+import std/[unittest, strutils]
 import nelli/symex
 import nelli/coverage
 
@@ -66,8 +66,10 @@ proc coveredGate(x: int) {.cover.} =
 
 proc strOrderGate(x: int) =
   ## RFC-0005 S8cb modelled string ordering (`cmpString`'s degrade, this gate's
-  ## until then); `$` of a float still degrades there.
-  let s = $float(x)
+  ## until then); `toOct` (no Z3 octal primitive) still degrades there.
+  ## RFC-0016 PRC-35 modelled `$float` on this gate's values, so the gate
+  ## degrades through `toOct` instead.
+  let s = toOct(int64(x), 3)
   if s.len >= 0:                ## degrades via loweringDegradeErrors
     if x > 5:
       symexTarget("hi")

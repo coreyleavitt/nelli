@@ -1346,7 +1346,38 @@ suite "Phase 15 CR-2 — version bumps":
     ## the solver stall backstop; 426-427 reserved): 425->428.
     ## RFC-0016 INT-57 / INT-74 (a byte and a slice of a rendering are
     ## decided without strings; 429-430 reserved): 428->431.
-    check symexWalkerVersion == "435"
+    ## RFC-0016 PRC-35 (stdlib precision models; 402-413 reserved):
+    ## 401->414.
+    ## RFC-0016 PRC-35 (`repr` of a string, `=dup` through a user hook;
+    ## 415 reserved): 414->416.
+    ## RFC-0016 PRC-44 (`=dup` at a sink position its source is surely read
+    ## after; 417 reserved): 416->418.
+    ## RFC-0016 PRC-45 (`=dup` at the sink positions PRC-44 left declining;
+    ## 419 is S8co's): 418->420.
+    ## RFC-0016 PRC-46 (`=dup` over a seq, a generic `sink` parameter, the
+    ## cursor inference through loops, `try`, `defer`, nested routines;
+    ## 421-423 are taken): 420->424.
+    ## RFC-0016 PRC-47 (`=dup` over a seq of unknown length, a global-writing
+    ## hook, another module, a `sink` tuple or array alias, `except E as e`,
+    ## iterators and templates; 425-426 are taken): 424->427.
+    ## RFC-0016 PRC-48 (`=dup` in an inline iterator's loop body, each
+    ## inlined copy classified on its own; 428 is taken): 427->429.
+    ## RFC-0016 PRC-49 (the `=dup` shapes PRC-48 left declining: a cursor
+    ## loop variable, a sink in a yielded expression, `try`, `openArray`):
+    ## 429->430.
+    ## RFC-0016 PRC-50 (an owning loop variable, an alias of a loop
+    ## variable, a magic call in the cursor inference): 430->432.
+    ## RFC-0016 INT-75 / PRC-51 (a `for` destructuring its variable; the
+    ## `=dup` shapes PRC-50 left declining): 432->433.
+    ## RFC-0016 INT-78 (an `int` part of a seq's tuple or object element
+    ## held as a bit-vector; 434-436 are taken): 433->437.
+    ## RFC-0016 INT-79 (a seq literal as a `for` operand is bound to a
+    ## temporary, not a walker fault): 437->438.
+    ## RFC-0016 INT-80 (seq `&` and `add` of an `openArray` modelled as a
+    ## concatenation): 438->439.
+    ## RFC-0016 INT-80 (`sequtils.concat` a left fold of the concatenation;
+    ## 440 is taken): 439->441.
+    check symexWalkerVersion == "441"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

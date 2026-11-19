@@ -78,6 +78,20 @@ template rst(x: int) =
   gX = x
 proc q10(x: int) =
   rst(x)
+  # The table is built by `initTable` and `[]=`; `q10t` builds it with
+  # `{"a": x}.toTable`, the original form. Since INT-75 the walk runs
+  # through `toTable` (its destructuring `for` used to decline), and until
+  # INT-78 (walker 437) a table built from a tuple literal cost about 200 s
+  # a target: the literal's int component was an Int-sorted seq leaf read
+  # back as a bit-vector. The cell is `mgetOrPut` evaluating its key once,
+  # decided since INT-79 (the model evaluates a computed key once; the
+  # stdlib body it walked before declined in the table's internals).
+  gTb = initTable[string, int]()
+  gTb["a"] = x
+  discard gTb.mgetOrPut(key(), 0)
+  if gN == 1: symexTarget("q10_once") else: symexTarget("q10_ne")
+proc q10t(x: int) =
+  rst(x)
   gTb = {"a": x}.toTable
   discard gTb.mgetOrPut(key(), 0)
   if gN == 1: symexTarget("q10_once") else: symexTarget("q10_ne")
@@ -116,6 +130,7 @@ proc q18(x: int) =
 
 for x in [1, 2]:
   nat(q10(x))
+  nat(q10t(x))
   nat(q11(x))
   nat(q12(x))
   nat(q13(x))
@@ -127,8 +142,12 @@ for x in [1, 2]:
 
 suite "tsymex_rfc0005_s8cq_twice11":
   test "verdicts against Nim":
-    pin(q10, "q10_once", true, sxUnknown)
-    pin(q10, "q10_ne", false, sxUnknown)
+    # RFC-0016 INT-79: `mgetOrPut` with a computed key evaluates it once,
+    # in the model; the stdlib body (hash and probe internals) declined.
+    pin(q10, "q10_once", true, sxSat)
+    pin(q10, "q10_ne", false, sxUnsat)
+    pin(q10t, "q10_once", true, sxSat)
+    pin(q10t, "q10_ne", false, sxUnsat)
     pin(q11, "q11_once", true, sxSat)
     pin(q11, "q11_ne", false, sxRaised)
     pin(q12, "q12_once", true, sxUnknown)
@@ -169,24 +188,24 @@ suite "tsymex_rfc0005_s8cq_twice11: the replay candidates' tail walks":
   # RFC-0016 W4 perf (walker 378) sharpens it: a candidate's tail is walked
   # only when a replay confirms it. No replay confirms one here (the verdict
   # stays `sxUnknown`), so no candidate tail is walked at all.
-  test "walker 378: no replay confirms a candidate, so no tail is walked":
+  test "walker 378: no tail walk repeats one check":
     check parseInt(symexWalkerVersion) >= 378
     let log = getTempDir() / ("s8cq_q10_units_" & $getCurrentProcessId() & ".log")
     removeFile(log)
     putEnv(walkUnitsLogEnv, log)
     let r = try: symexFind(q10, tLabel("q10_once"))
             finally: delEnv(walkUnitsLogEnv)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedExprKind)
-    check r.errors.named(feUnsupportedOp)
-    check r.errors.named(feUnsupportedParamType)
-    check r.errors.named(feUnsupportedStmtKind)
+    # RFC-0016 INT-79: `mgetOrPut(key(), 0)` is modelled (the stdlib body
+    # it walked declined), so q10 is decided: its one candidate is replayed
+    # and confirmed, and that one tail is walked (1,163 units, c).
+    check r.status == sxSat
     let tails = if fileExists(log): tailUnitLines(log) else: @[]
     removeFile(log)
     checkpoint "tail walk units: " & $tails
     # Red at 7808bc79: 13 walks (8,014,309 units each but the last), summing
-    # to the whole budget; one walk at walker 354-377.
-    check tails.len == 0
+    # to the whole budget; one walk at walker 354-377; none at 378-437 (no
+    # replay confirmed one); one, the confirmed witness's, at 438.
+    check tails.len <= 1
     let budget = defaultSymexSettings().budget.tailWalkCappedChecks *
                  int(concreteBranchRLimit(defaultSymexSettings()))
     var spent = 0

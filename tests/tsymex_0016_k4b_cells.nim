@@ -109,12 +109,28 @@ proc sNeg64(a: int64) =
   if -a == 5'i64: symexTarget("hit")
 proc sZeroDefault(a: int) =
   if zeroDefault(int) == 0 and a == 3: symexTarget("hit")
+# Repr and Dup are partial rows (PRC-35): each is pinned on the shape that
+# declines. `repr` of a seq declines at the call; a user `=dup` at a sink
+# position on a `sink` parameter of an anonymous tuple type holding the
+# hooked type, read after the site, declines in the route proof (PRC-47:
+# whether the compiler copies it depends on the first structurally equal
+# tuple type written anywhere before the hook, which shares its
+# `tfHasAsgn`; native, c and cpp, `n6t(a: sink (D, int))` moves when a
+# `(D, int)` formal was written before D's hook, and runs the hook when
+# not: information the macro does not read). PRC-48 to PRC-51 made every
+# other probed shape exact (PRC-51: the loop variable of `items` over a
+# `seq`, a view copied at each sink, is exact).
 proc sRepr(a: int) =
-  if repr(a) == "5": symexTarget("hit")
+  if repr(@[a]) == "@[5]": symexTarget("hit")
+type K4Dup = object
+  v: int
+proc `=dup`(x: K4Dup): K4Dup = K4Dup(v: x.v + 1)
+proc k4DupTk(x: sink (K4Dup, int)): int = x[0].v
+proc k4DupVv(x: (K4Dup, int)): int = x[0].v
+proc k4DupAnon(a: sink (K4Dup, int)): int = k4DupTk(a) * 1000 + k4DupVv(a)
 proc sDup(a: int) =
-  var x = a
-  let y = `=dup`(x)
-  if y == 5: symexTarget("hit")
+  if a > 1000 or a < -1000: return
+  if k4DupAnon((K4Dup(v: a), 5)) == 2001: symexTarget("hit")
 proc sSlice(a: int) =
   let s = @[1, 2, 3]
   if a >= 0 and a < 3 and k4LenOA(toOpenArray(s, 0, a)) == 2:
@@ -241,7 +257,7 @@ suite "K4b: the reachable magic cells, through symexFind":
   exactCell(sNeg64, "UnaryMinusI64", k4I64Dom)
   exactCell(sZeroDefault, "ZeroDefault")
   declineCell(sRepr, "Repr", feUnsupportedOp)
-  exactCell(sDup, "Dup")
+  declineCell(sDup, "Dup", feGlobalRouteUnproved)
   exactCell(sSlice, "Slice")
   exactCell(sSetLenUninit, "SetLengthSeqUninit")
   exactCell(sEqProc, "EqProc")

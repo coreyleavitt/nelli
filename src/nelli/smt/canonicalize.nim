@@ -1034,8 +1034,78 @@ const renderAsChoicesVersion* = "12"
   ##   (`strLenOf`), so `($t & "ab")[0 .. 1][0]` holds no string. Verdicts
   ##   change from `sxUnknown` (the stall backstop) to exact. No key bytes
   ##   change.
+  ## - RFC-0016 PRC-35 (401->414; 402-413 are reserved for in-flight W4
+  ##   work): `toInt`/`toBiggestInt`, `$` of a float on its faithful
+  ##   sub-domain, `repr` of an integer, float, char and string, and `$` of an
+  ##   enum hole ("") are modelled where they declined. No key bytes change.
+  ## - RFC-0016 PRC-35 (414->416; 415 is reserved for in-flight W4 work):
+  ##   `repr` of a string is exact only where no byte is escaped and declines
+  ##   elsewhere (the `str.replace_all` form was `unknown` for every escape);
+  ##   a user `=dup` that is not the plain copy no longer declines every read
+  ##   when no sink position runs it: an explicit call walks the hook, a copy
+  ##   is the plain copy, and a sink position on its source's provable last
+  ##   read is the move. Any other sink position declines (PRC-44). No key
+  ## - RFC-0016 PRC-44 (416->418; 417 is reserved for in-flight W4 work): a
+  ##   sink position a read of its source is surely reachable from runs the
+  ##   type's user `=dup` (the parse walks the hook there, staged behind the
+  ##   hook probes), where it declined. No key bytes change.
+  ## - RFC-0016 PRC-45 (418->420; 419 is S8co's): a sink position whose source
+  ##   is read in an `except` branch or a `finally`, a parameter that is not
+  ##   `sink`, and a generic routine's site run the user `=dup` as the
+  ##   compiler's graph has them; a source no read is reachable from moves;
+  ##   a `sink` parameter read after the site is copied only when its type's
+  ##   destructor is not trivial; a value holding the hooked type runs the
+  ##   hook per hooked field and element; a copy of a local is a cursor as
+  ##   the compiler's inference has it. No key bytes change.
+  ## - RFC-0016 PRC-46 (420->424; 421-423 are taken): a `seq` of the hooked
+  ##   type runs the hook per element (a `map`), a generic routine's `sink`
+  ##   parameter read after the site is copied when its instance's type has
+  ##   `tfHasAsgn`, and the cursor inference follows tied last reads, loops,
+  ##   `try`, `defer` and nested routines. No key bytes change.
+  ## - RFC-0016 PRC-47 (424->427; 425-426 are taken): a `seq` of a length the
+  ##   walk does not know runs the hook per element as the compiler's loop,
+  ##   a hook writing a global is folded in index order, a hook or field in
+  ##   another module is bound before the main module, a `sink` tuple or
+  ##   array alias has its flag where it is declared, `except E as e` and
+  ##   iterators and templates are followed by the cursor inference. No key
+  ## - RFC-0016 PRC-48 (427->429; 428 is taken): a sink position in the loop
+  ##   body of a `for` over an inline iterator is classified per inlined copy
+  ##   (the compiler's cursor inference reads the inlined tree), and a `for`
+  ##   over a closure iterator is a loop. No key bytes change.
+  ## - RFC-0016 PRC-49 (429->430): a loop variable the compiler makes a
+  ##   cursor (`transf.isSimpleIteratorVar`) is copied at every sink position,
+  ##   a sink of a formal in the yielded expression is keyed by its `yield`,
+  ##   and an iterator with a `try` or a scalar `openArray` formal is read
+  ##   inlined. No key bytes change.
+  ## - RFC-0016 PRC-50 (430->432; 431 is taken): a loop variable every
+  ##   `yield` gives a value made there owns it, `let b = o` of an inlined
+  ##   loop variable owns, and a magic call mutates no argument through a
+  ##   pointer in the cursor inference. No key bytes change.
+  ## - RFC-0016 INT-75 / PRC-51 (432->433): a parenthesised `for`
+  ##   destructuring is read as the flat one and `items`/`pairs` destructure
+  ##   their element (INT-75); the `=dup` shapes PRC-50 left declining are
+  ##   modelled (PRC-51). No key bytes change.
+  ## - RFC-0016 INT-78 (433->437; 434-436 are taken): an `int` part of a seq's
+  ##   tuple or object element is held as the bit-vector of its width, as a
+  ##   `seq[int]` element is, not as an Int. No key bytes change.
+  ## - RFC-0016 INT-79 (437->438): a seq operand of a `for` that is not a
+  ##   variable or a field chain over one (a seq literal) is bound to a
+  ##   temporary once and the loop indexes it; an inline iterator's formal
+  ##   bound as a copy is a local of the expansion to the S8cn `lent` check;
+  ##   `mgetOrPut` with a computed key evaluates it once in the model. No key
+  ## - RFC-0016 INT-80 (438->439): seq `&` (`seq & seq`, `seq & T`, `T & seq`)
+  ##   and `add` of an `openArray` (`&=`) are modelled as a concatenation
+  ##   (`iekSeqConcat`, an array lambda per data array) where they declined
+  ##   (`feUnsupportedOp`) or faulted (`add` of a seq). It keys as
+  ##   `Ex<SCC:left:right>`; no existing key bytes change.
+  ## - RFC-0016 INT-80 (439->441; 440 is taken): `sequtils.concat(a, b, ...)`
+  ##   over a varargs bracket is a left fold of `iekSeqConcat`, its elements
+  ##   read in order, where its body was walked; `concat[T]()`, the empty
+  ##   seq, was a compile-time parse error.
+  ##   Self-append (`s.add(s)`, `s &= s`) is pinned as doubling. No existing
+  ##   key bytes change.
 
-const symexWalkerVersion* = "435"
+const symexWalkerVersion* = "441"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -7048,6 +7118,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekSeqSplice: "Ex<SSP:" & canonicalize(e.spBase, env) & ":" &
                    canonicalize(e.spAt, env) & ":" &
                    canonicalize(e.spPart, env) & ">"   ## RFC-0005 S8bu
+  of iekSeqConcat: "Ex<SCC:" & canonicalize(e.scLeft, env) & ":" &
+                   canonicalize(e.scRight, env) & ">"   ## RFC-0016 INT-80
   of iekStrLit:    "Ex<S:" & e.sval.escape & ">"
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &

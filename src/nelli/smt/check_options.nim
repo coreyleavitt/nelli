@@ -77,11 +77,15 @@ proc diskExists(p: string): bool = fileExists(p)
 
 proc diskRead(p: string): string = staticRead(p)
 
+const configuredLibDir* = querySetting(libPath)
+  ## RFC-0016 PRC-43. The compiler's `lib/`, under whatever name `--lib:` gave it.
+
 proc compileTimeEnv(): SourceEnv =
   ## The compiler's own view: the project's directories and search paths, and
   ## the compiler's file reader.
   SourceEnv(exists: diskExists, read: diskRead, anchor: anchored,
-            searchPaths: querySettingSeq(searchPaths))
+            searchPaths: querySettingSeq(searchPaths),
+            libDir: configuredLibDir)
 
 proc scanModuleText*(path, text: string): ModuleScan =
   ## The scan of a module whose text is at hand; an `include` is read from disk.
@@ -116,11 +120,16 @@ proc isOwnRuntime(path: string): bool =
 
 proc isSystemFile(path: string): bool =
   ## Compiled before any user code, so no user's import reaches it.
-  path.endsWith("/lib/system.nim") or "/lib/system/" in path
+  let rel = libRelPath(path, configuredLibDir)
+  rel == "system.nim" or rel.startsWith("system/") or
+    path.endsWith("/lib/system.nim") or "/lib/system/" in path
 
 proc isStdlibFile(path: string): bool =
+  let rel = libRelPath(path, configuredLibDir)
   isSystemFile(path) or "/lib/pure/" in path or "/lib/std/" in path or
-    "/lib/core/" in path or "/lib/impure/" in path
+    "/lib/core/" in path or "/lib/impure/" in path or
+    rel.startsWith("pure/") or rel.startsWith("std/") or
+    rel.startsWith("core/") or rel.startsWith("impure/")
 
 proc typeHasFloat(t: NimNode; generic: bool; depth = 0): bool =
   ## `generic`: an uninstantiated `T` may be a float. A callee's own `T` says nothing

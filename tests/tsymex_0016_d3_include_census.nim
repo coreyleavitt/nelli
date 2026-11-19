@@ -71,7 +71,7 @@ const
     "exact", "fieldsUnchecked", "forkAssignRangeCheck", "forkDefect",
     "forkPath", "forkPathTainted", "freshnessCapHints", "globalEntryVals",
     "globalHiddenRoute", "globalInitValue", "guardLiteral", "halted",
-    "heapInputName", "heapKeyValTy", "imgReadDef",
+    "heapEpochPrefix", "heapInputName", "heapKeyValTy", "imgReadDef",
     "inactiveFieldSide", "isConcolicFollowWalk",
     "liveFrame", "loopArmInfeasible", "lowerInExpr",
     "lowerLeafInExpr", "maybeForkDefect", "noteTableKey", "overlaps",

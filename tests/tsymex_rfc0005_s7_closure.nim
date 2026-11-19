@@ -487,6 +487,11 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## RFC-0005 S8bt adds `regexRecFactConds`, after `regexRecDefConds`: the
     ## facts of those values (`regex_parser.replaceLemmas`), each over one
     ## occurrence's own `r` and fresh Ints, true of every receiver.
+    ##
+    ## RFC-0016 INT-82 adds `refProvenanceRoots`, last: for each `Ref` term
+    ## the query reaches, that an allocation of the run is no object of the
+    ## entry state. True of every real execution (the entry state predates
+    ## the walk), so it prunes no real input.
     var drained: seq[string]
     for routine in ["pathRoots", "globalRoots"]:
       for t in routineBody(smtDir / "runtime.nim", routine):
@@ -496,7 +501,8 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
                        "currentClosureCallAxioms", "globalEntryFacts",
                        "stripDecompConds", "regexRecDefConds",
                        "regexRecFactConds", "cardConds",
-                       "indexSplitRoots(currentContext(), reach)"]
+                       "indexSplitRoots(currentContext(), reach)",
+                       "refProvenanceRoots(currentContext(), reach)"]
     check "roots.add globalRoots(roots)" in
       routineBody(smtDir / "runtime.nim", "pathRoots")
     for caller in ["trySolve", "loopArmInfeasible"]:

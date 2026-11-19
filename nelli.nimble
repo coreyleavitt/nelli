@@ -2067,6 +2067,7 @@ task test, "Run the test suite":
             "tsymex_0016_k9cg_unbacked_l",
             "tsymex_0016_k9cg_unbacked_n",
             "tsymex_0016_k9cg_unbacked_p",
+            "tsymex_0016_k9cg_unbacked_table",
             # RFC-0016 K9d: no verdict suite without a native pin (the census of tsymex_* files asserting sxSat/sxUnsat/sxRaised with no native idiom), ratcheted at its ceiling; pinFind, the generator that pins a suite's own symexFind call.
             "tsymex_0016_k9d_census",
             "tsymex_0016_k9d_pinfind",
@@ -2101,9 +2102,6 @@ task test, "Run the test suite":
             "tsymex_0016_int93_localaddr",
             # RFC-0016 INT-87: a cstring parameter is held by value, whether it is nil and its bytes up to the NUL.
             "tsymex_0016_int87_cstringparam",
-            "tsymex_0016_k9cg_unbacked",
-            "tsymex_0016_k9cg_unbacked_np",
-            "tsymex_0016_k9cg_unbacked_table",
             "tsymex_0016_d3b_walklog",
             # RFC-0016 0.10.0 review D3c: the include surface census (include list, no import in runtime_*.nim, symbol-coupling ceilings, the heap-only forward-declaration block, the symval leaf).
             "tsymex_0016_d3_include_census",

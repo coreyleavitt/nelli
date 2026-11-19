@@ -28,3 +28,5 @@ tsymex_rfc0005_s8aa_remainder_checksoff
 tsymex_162_range_base_width
 # a promoted value keeps its overflow obligation (the discharge log)
 tsymex_161_overflow_obligation
+# K9e: pins that kill the division/modulo survivors
+tsymex_0016_k9e_kill_div

@@ -1187,6 +1187,16 @@ const renderAsChoicesVersion* = "12"
   ##   (`defaultZeroTotal`; `newSeq` of one declined). "It holds 0" was a
   ##   false `sxUnsat`; a caller's value still lies in the domain. No key
   ##   bytes change.
+  ## - RFC-0016 INT-87 (444->448, provisional; 445-447 reserved for the
+  ##   in-flight INT-85/INT-86 lanes): a `cstring` is held by value
+  ##   (`tCString`: nil or its bytes, no NUL) instead of declining
+  ##   (`feUnsupportedParamType`). `== nil`/`isNil`, `==` (content, nil
+  ##   only equal to nil), `len`, `high`, `$` and `c[i]` (`c[len]` the NUL,
+  ##   nil a nil dereference, past it undefined) are modelled; a write
+  ##   through one, its address (`<`/`<=`/`cmp` compare addresses), a
+  ##   `cstring(s)` of a held string and a content read beside a possible
+  ##   alias write decline by name. A cstring literal is a value of the
+  ##   tuple (it was a plain string), so a key holding one changes.
   ## - RFC-0016 INT-84 (443->444, provisional): a holey enum input (a
   ##   parameter, its fields, elements, table values, set members, a ref
   ##   cell's fields) ranges over its declared ordinals, not `[low, high]`:
@@ -1271,8 +1281,33 @@ const renderAsChoicesVersion* = "12"
   ##   object's other fields: `#resultdead:<f>`), and a call forwarded into
   ##   such a result. Each was a false `sxRaised(NilAccessDefect)` (`-O0`
   ##   faults, `-O2` returns); a nil there now declines. No key bytes change.
+  ## - RFC-0016 INT-90 (448->451; 449-450 are reserved for in-flight K9d
+  ##   work; provisional): two typed views of one address agree byte-wise.
+  ##   A read or a write of an exact-layout view (a fixed-width integer, a
+  ##   float, a flat padding-free object of those) at an address the run
+  ##   also holds at another such sort of the `pointer` space relates the two
+  ##   sorts' heaps at that address (`crossSortLink`, `crossSortPropagate`,
+  ##   runtime_heap.nim; the design is at `crossSortDesyncKey`,
+  ##   heap_model.nim): `a[] == 5 and b[] > 1.0` over a `ptr int` and a
+  ##   `ptr float` at one address is `sxUnsat` (it was an untrusted, lossy
+  ##   `sxSat`), and a write at one sort is read at the other. No key bytes
+  ##   change.
+  ## - RFC-0016 INT-90b (451->454; 452-453 reserved; provisional): a view
+  ##   object is laid out at the offsets the compiler gives its fields for
+  ##   the target (`IRType.cFieldOffsets`, `macros.getOffset`), so a padded
+  ##   object is a view whose padding bytes are free (it declined to the
+  ##   lossy verdict); an `importc` struct or a field layout pragma other
+  ##   than `packed` leaves the offsets unknown and declines. The witness
+  ##   writes every view's rendered leaves into the shared allocation
+  ##   (`renderCrossSortViews`, `resolveRef`), so a cell held only at view
+  ##   sorts with no desync is trusted, a view wider than its owner or over
+  ##   its padding included (it was lossy). Every write of a path's heaps
+  ##   goes through `heapPut` (heap_model.nim): a store into a shared view's
+  ##   leaf heap that no splice reflects desyncs the path wherever it is
+  ##   made (a `ptr`'s store into a field of a view object was a false
+  ##   `sxUnsat`), and a `new`'s zero is spliced. No key bytes change.
 
-const symexWalkerVersion* = "453"
+const symexWalkerVersion* = "454"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

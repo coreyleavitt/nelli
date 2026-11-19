@@ -12,7 +12,7 @@ census.txt	49
 skipsites.txt	90
 defined.txt	0
 errorkind.txt	65
-ids.txt	72
+ids.txt	70
 linux-host-known-red.txt	1
 magic.txt	0
 nightly-cpp-known-red.txt	1

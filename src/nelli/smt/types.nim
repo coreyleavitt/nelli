@@ -375,6 +375,18 @@ type
                                  ## for a recursion placeholder too (names
                                  ## only, no field types), so a field read
                                  ## through a placeholder keys alike.
+      cFieldOffsets*: seq[int]   ## RFC-0016 INT-90. The C byte offset of
+                                 ## each field (`fields` order) as the
+                                 ## compiler lays the object out for the
+                                 ## target (`macros.getOffset`), -1 where it
+                                 ## does not know it (an `importc` type, a
+                                 ## layout pragma other than `packed`, a
+                                 ## field the compiler sizes otherwise than
+                                 ## the IR); empty where the parser read none
+                                 ## (an anonymous tuple, a generic instance).
+                                 ## Read by `viewLeaves`. Identity only, like
+                                 ## `nominalId`: NOT part of `IRType.==` or
+                                 ## the canonical form.
     of itArray:
       elemTy*: IRType
       size*: int
@@ -3219,7 +3231,8 @@ proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              isPlaceholder: bool = false, nameIsRefAlias: bool = false,
              inheritChain: seq[string] = @[],
              ownedFieldNames: seq[string] = @[],
-             ownedFieldIds: seq[string] = @[]): IRType =
+             ownedFieldIds: seq[string] = @[],
+             cFieldOffsets: seq[int] = @[]): IRType =
   ## `fieldNames.len` must equal `fields.len` or be empty (positional).
   ## RFC-0005 S8bh: `inheritChain`/`ownedFieldNames`/`ownedFieldIds` -- see
   ## the `IRType` field docs; empty for a type declared without `of`.
@@ -3235,7 +3248,8 @@ proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
   IRType(kind: itTuple, fields: fields, fieldNames: names, objectName: objectName,
          nominalId: nominalId, isPlaceholder: isPlaceholder,
          nameIsRefAlias: nameIsRefAlias, inheritChain: inheritChain,
-         ownedFieldNames: ownedFieldNames, ownedFieldIds: ownedFieldIds)
+         ownedFieldNames: ownedFieldNames, ownedFieldIds: ownedFieldIds,
+         cFieldOffsets: cFieldOffsets)
 
 proc inheritTagCode*(nominalId: string): int64 =
   ## RFC-0005 S8bh (item 3). The run-type tag a hierarchy object stores for
@@ -3257,6 +3271,56 @@ proc tArray*(elemTy: IRType, size: int, lo: int64 = 0): IRType =
 
 proc tString*(): IRType =
   IRType(kind: itString)
+
+const cstringObjectName* = "__cstring"
+  ## RFC-0016 INT-87. The `objectName` of the tuple a `cstring` is held as
+  ## (`tCString`); no Nim identifier starts with `_`, so no user object
+  ## shares it.
+
+const cstringIndexOp* = "[]cstring"
+  ## RFC-0016 INT-87. The `strOp` of `c[i]` on a `cstring` (`iekStrAt` over
+  ## its bytes and the NUL): Nim emits no bound check, so an index outside
+  ## `0 .. len` is undefined (`depositUndefinedOob`), never an `IndexDefect`.
+
+proc tCString*(): IRType =
+  ## RFC-0016 INT-87. A `cstring`, held BY VALUE: `(nonNil: bool, bytes:
+  ## string)`, the bytes up to the first NUL. The tuple's zero, `(false, "")`,
+  ## is Nim's zero `cstring`, nil. `allocateSym` adds the well-formedness
+  ## facts (nil holds no bytes; no byte is NUL).
+  ##
+  ## Why by value and not as a `ptr` cell (INT-83's `pointer` shape): every
+  ## read stays in the string theory, and aliasing is observable only through
+  ## a write, which the by-value form cannot express and so declines by name.
+  ## Two `cstring`s at one buffer read the same bytes either way. What the
+  ## pair cannot hold is a write through one alias seen by the other: a
+  ## write through a `cstring` (`c[i] = x`) declines, its address
+  ## (`cast[pointer](c)`, `<`/`<=`/`cmp`, which compare addresses) declines,
+  ## `cstring(s)` of a string the SUT holds declines, and a content read
+  ## where the SUT may write memory a caller's buffer could be (a `var` or
+  ## pointer-holding parameter, a global) declines (`cstrAliasHazard`,
+  ## `dsl_parser.nim`). A ptr cell would relate two `cstring`s, but not a
+  ## `cstring` and the `var string` it was made from, so it would decline
+  ## the same writes at the cost of the heap machinery on every read.
+  tTuple(@[IRType(kind: itBool), IRType(kind: itString)], @["nonNil", "bytes"],
+         objectName = cstringObjectName)
+
+proc isCStringTy*(t: IRType): bool =
+  ## RFC-0016 INT-87. `t` is a `cstring` (`tCString`).
+  t != nil and t.kind == itTuple and t.objectName == cstringObjectName
+
+proc irHoldsCString*(t: IRType; depth = 0): bool =
+  ## RFC-0016 INT-87. A value of `t` holds a `cstring` somewhere by value.
+  if t == nil or depth > 16: return false
+  if isCStringTy(t): return true
+  case t.kind
+  of itTuple:
+    for f in t.fields:
+      if irHoldsCString(f, depth + 1): return true
+  of itArray: return irHoldsCString(t.elemTy, depth + 1)
+  of itSeq: return irHoldsCString(t.seqElemTy, depth + 1)
+  of itDistinct: return irHoldsCString(t.distinctBase, depth + 1)
+  else: discard
+  false
 
 proc tUninterp*(name: string; refKey = ""): IRType =
   ## Phase 15 Z3b: the IR type of an uninterpreted reference (`svUninterpRef`).

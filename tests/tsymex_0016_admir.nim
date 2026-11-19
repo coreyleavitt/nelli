@@ -84,14 +84,16 @@ suite "ADM-IR: verdicts through the real parser are unchanged":
     check b.status == sxUnsat
     check pinFind(zeroSeq, tLabel("hit")).status == sxSat
 
-proc zeroCstring(k: int) =
-  var f: cstring
+proc zeroUninterp(k: int) =
+  # a `cstring` until INT-87 held one by value (its zero is nil); a
+  # `c_longdouble` (float128) is still an uninterpreted placeholder
+  var f: c_longdouble
   if k == 1: symexTarget("hit")
 
 suite "ADM-IR: a declined fieldDefault row still declines through the parser":
   test "an uninterp zero is not built; the walk reports the decline":
     check not admitTypeOp(itUninterp, moFieldDefault, toZeroValue).admitted
-    let r = pinFind(zeroCstring, tLabel("hit"))
+    let r = pinFind(zeroUninterp, tLabel("hit"))
     check r.status == sxUnknown
     var seen = false
     for e in r.errors:

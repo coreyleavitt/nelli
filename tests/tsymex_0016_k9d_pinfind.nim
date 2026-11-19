@@ -200,6 +200,27 @@ proc sutStrTwo(a, b: string) =
 proc sutCstr(s: cstring) =
   if s == "cs-lit" and s == "other": symexTarget("hit")
 
+# A `c_longdouble` has no native domain: Nim sizes it as a float64 while C
+# stores a `long double`, so a seq of one overruns its heap block. The walker
+# declines it (STY-06); pinFind returns the decline without building a domain
+# (it once filled one and died in `dealloc`, a SIGSEGV no test could catch).
+type
+  K9dLdObj = object
+    a: int
+    b: c_longdouble
+  K9dLdRef = ref object
+    next: K9dLdRef
+    v: c_longdouble
+  K9dSelf = ref object
+    next: K9dSelf
+    x: int
+
+proc sutLongDouble(x: c_longdouble; y: int) =
+  if y == 42: symexTarget("hit")
+
+proc sutLongDoubleObj(xs: seq[K9dLdObj]; y: int) =
+  if y == 42: symexTarget("hit")
+
 # The bug sits at a literal's neighbour: it fires on "config" with its last
 # byte removed, which only a neighbour-aware domain reaches.
 proc sutNeighbour(s: string) =
@@ -691,6 +712,11 @@ suite "K9d: pinFind":
     check d.values.allIt(it.len == ($it).len)   # no NUL cut a value short
     check "cs-lit" in d.values.mapIt($it)
     check "cs-lit".cstring in d.values
+    # RFC-0016 INT-87: nil, the empty string and a high byte are values
+    check d.values[0].isNil and d.values.countIt(it.isNil) == 1
+    check d.values.anyIt(not it.isNil and it.len == 0)
+    check d.values.anyIt(not it.isNil and it.len > 0 and ord(it[0]) >= 0x80)
+    check "a".cstring in d.values   # the NUL-holding hint's prefix
 
   test "a string sat witness outside the domain is still replayed exactly":
     let r = pinFind(sutStrSat, tLabel("hit"))
@@ -707,11 +733,30 @@ suite "K9d: pinFind":
     # the record is text: a NUL or a high byte in the domain shows escaped
     check r[0].domain.allIt(it in {' ' .. '~'})
     check pinFind(sutStrLit, tLabel("hit")).status == sxUnsat
-    # the walker declines a cstring parameter: returned as it came, no record
+    # a cstring parameter is held by value (RFC-0016 INT-87): an exact unsat,
+    # pinned over the cstring domain (nil first)
     let cs = pinFind(sutCstr, tLabel("hit"))
-    check cs.status == sxUnknown
-    check cs.errors.named(feUnsupportedParamType)
-    check recordsWith("/sutCstr/").len == 0
+    checkpoint show(cs.errors)
+    check cs.status == sxUnsat
+    check recordsWith("/sutCstr/").len == 1
+
+  test "a parameter with no native domain is declined without one, never crashing":
+    check unsizedNativeOf(c_longdouble) == "clongdouble"
+    check unsizedNativeOf(seq[K9dLdObj]) == "clongdouble"
+    check unsizedNativeOf(K9dLdRef) == "clongdouble"
+    check unsizedNativeOf((int, array[3, c_longdouble])) == "clongdouble"
+    check unsizedNativeOf(float64) == ""
+    check unsizedNativeOf(K9dSelf) == ""
+    check unsizedNativeOf(Table[string, seq[float]]) == ""
+    check unsizedNativeOf(range[1 .. 5]) == ""
+    # the parameter declines by its type; a seq of objects holding one, by
+    # its witness shape
+    for (r, k) in [(pinFind(sutLongDouble, tLabel("hit")), feUnsupportedParamType),
+                   (pinFind(sutLongDoubleObj, tLabel("hit")), feUnsupportedWitnessType)]:
+      checkpoint show(r.errors)
+      check r.status == sxUnknown
+      check r.errors.named(k)
+    check recordsWith("/sutLongDouble").len == 0
 
   test "a planted unsat claim over a literal's neighbour is refused":
     ## sutNeighbour hits on "confi", reachable only as "config" minus a byte;

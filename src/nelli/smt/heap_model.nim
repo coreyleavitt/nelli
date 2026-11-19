@@ -1924,6 +1924,11 @@ proc heapCellWfConds*(ctx: Z3Context; key: string; refSort: RawZ3Sort;
   let sv = heapCellSelect(ctx, input, refAst, valTy)
   svCellWf(sv, valTy, false)
 
+var crossSortAccessed*, crossSortWritten* {.threadvar.}: bool
+  ## RFC-0016 INT-90. Some path of the run read a pointee's heap
+  ## (`crossSortLink`) or stored into one a view's leaf may be (`heapPut`)
+  ## so far (`crossSortEnter`).
+
 proc heapCellStore*(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
                    valSV: SymVal; valTy: IRType): HeapCell =
   ## RFC-0005 S8ap. `cell` with `valSV` stored at `refAst`, leaf by leaf. A
@@ -2424,6 +2429,264 @@ var pointerDecls {.threadvar.}: tuple[ctx: pointer; decls: Table[string, RawZ3Fu
   ## RFC-0016 INT-83. `@toAddr_<T>` / `@fromAddr_<T>` / `@addrKind` of the
   ## run's context.
 
+# ---- RFC-0016 INT-90: two typed views of one address ------------------------
+#
+# Two `ptr` parameters of different pointee types the run puts at one
+# address (`cast[pointer](a) == cast[pointer](b)`) read one cell's bytes, but
+# each sort's heap is its own array, so `a[] == 5 and b[] > 1.0` over a
+# `ptr int` and a `ptr float` was satisfiable in the model (the int 5's bits
+# are a subnormal float natively). The byte-faithful answer (KLEE, angr,
+# SMACK's byte-level memory) is one byte array per address space with every
+# typed access a concatenation of byte selects; that re-encodes every heap
+# read of every run, including the ones with one sort, as 8 selects and a
+# concat, and the walk's value model (an `Int` or a width-stamped
+# bit-vector per cell, an IEEE float, a split field heap per object field)
+# would sit on top of it. This model keeps the per-sort heaps and asserts the
+# consequence of a shared byte array only where two sorts meet:
+#
+#   * a VIEW is a typed access whose bytes the model spells exactly: a
+#     fixed-width integer, a float, or a flat object/tuple of those with
+#     no run-type header, at the offsets the compiler lays it out at for
+#     the target (`viewLeaves`, `IRType.cFieldOffsets`; its padding bytes
+#     are no leaf, so free). A bool
+#     (natively only the bytes 0 and 1), an enum (sized by its ordinals), a
+#     ref, a string, a seq, a case object are not views: a pair holding one
+#     keeps INT-88's lossy, untrusted verdict.
+#   * a READ of a view of sort T at `a`, when another sort U is in the
+#     `pointer` space (`pointerSortsUsed`), relates the two sorts' CURRENT
+#     heaps of this path at the one address: `@fromAddr_U(@toAddr_T(a))`
+#     (`pointerMapAddr`) is `a` as U sees it, and for each pair of leaves
+#     whose byte ranges overlap, the overlapping bytes agree
+#     (`extract(bits(select(heap_T, a))) == extract(bits(select(heap_U,
+#     mapped)))`). The bits of a cell: `fp.to_ieee_bv` of a float, `int2bv`
+#     of an Int-sorted int cell, a bit-vector as is; a byte range is a bit
+#     range by the target's endianness. One ground fact per leaf pair, in
+#     `crossSortFacts`, asserted into every check (`globalRoots`).
+#   * a WRITE of a view's leaf at `a` is also a write of every other sort's
+#     overlapping leaves at `mapped`: the new bytes are spliced into the old
+#     value (`crossSortPropagate`), so both heaps advance together.
+#
+# Soundness: a fact relates two heap terms of ONE path at ONE statement, and
+# is true of every native state iff both terms describe the memory of the
+# same instant; they do when every store and havoc on the path so far was
+# reflected in both heaps. A store the model cannot splice (a whole-object
+# store, a leaf that is no view) marks the path desynced
+# (`crossSortDesyncKey`), as does a havoc epoch (`heapEpochPrefix`), and
+# no further fact is emitted on it: the model falls back to the unrelated
+# heaps, which admit every native state (today's lossy verdict). Relating
+# the entry heaps alone would be unsound once a sort is written: a read of
+# U after a write of T would meet U's entry value, forced equal to T's new
+# one, and a program reading U both before and after would be a false
+# `sxUnsat`. Ordinary runs (no `pointer` cast, or one sort in the space)
+# emit nothing.
+
+const crossSortDesyncKey* = "@xs:desync"
+  ## RFC-0016 INT-90. The `allocCounters` key a path carries once a store
+  ## at one sort of the `pointer` space was not reflected in another sort's
+  ## heap (`crossSortPropagate`): no cross-sort fact is emitted on it (or on
+  ## a path with a havoc epoch) since its heaps no longer describe one
+  ## instant. Copied by every fork, as the counters are.
+
+var pointerSortTypes* {.threadvar.}: Table[string, IRType]
+  ## RFC-0016 INT-90. Each sort converted from or to a `pointer`
+  ## (`pointerSortsUsed`), by id -> its pointee type (`pointerSortPair`).
+var crossSortFacts* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0016 INT-90. The byte agreements of two typed views of one address
+  ## (`crossSortLink`), true of every value: asserted into every check
+  ## (`globalRoots`).
+var crossSortFactIds {.threadvar.}: HashSet[int]
+  ## RFC-0016 INT-90. The facts already in `crossSortFacts`, by ast id (a
+  ## read repeated on sibling paths builds the same term).
+
+var crossSortAnyDesync* {.threadvar.}: bool
+  ## RFC-0016 INT-90. Some path of the run desynced (`crossSortDesyncKey`):
+  ## a cell held at two view sorts may then hold two values no bytes do, and
+  ## the witness keeps INT-88's lossy marking (`crossSortCellFidelity`).
+
+var crossSortFactsOff* {.threadvar.}: bool
+  ## RFC-0016 INT-90. A sort entered the `pointer` space after a heap write
+  ## of the run (`crossSortEnter`): that write was spliced into no sort
+  ## that was not yet in the space, so a later fact relating the written
+  ## heap to one of those would force the other sort's ENTRY bytes to the
+  ## written value -- asserted into every check, a false `sxUnsat` for a
+  ## path that reads them unwritten. No fact is emitted after it.
+
+proc crossSortEnter*(tid: string) =
+  ## RFC-0016 INT-90. The sort `tid` joins the `pointer` space
+  ## (`pointerSortsUsed`, at its first cast). After a write of the run, no
+  ## further cross-sort fact is sound (`crossSortFactsOff`); after a read
+  ## or a write, a view's entry bytes may disagree with what an earlier,
+  ## unrelated access saw, so the witness is not the model's
+  ## (`crossSortAnyDesync`). Accesses after every cast, the shape of a
+  ## program that compares the addresses first, keep both.
+  if tid in pointerSortsUsed: return
+  if crossSortWritten: crossSortFactsOff = true
+  if crossSortAccessed or crossSortWritten: crossSortAnyDesync = true
+  pointerSortsUsed.incl tid
+
+proc addCrossSortFact*(ctx: Z3Context; f: Z3Bool) =
+  ## RFC-0016 INT-90. `f` into `crossSortFacts`, once.
+  if not crossSortFactIds.containsOrIncl(astId(ctx, f.raw)):
+    crossSortFacts.add f
+
+type ViewLeaf* = tuple[key: string; off, size: int; ty: IRType]
+  ## RFC-0016 INT-90. One scalar of a view: its heap key (the pointee's own
+  ## id for a scalar view, a field's `fieldHeapKey` for an object's), its
+  ## byte offset in the view and its size.
+
+func viewScalarSize*(ty: IRType): int =
+  ## RFC-0016 INT-90. The bytes of a fixed-width integer or a float; 0 for
+  ## any other type (`tyScalarSize` less the bool, which is no view).
+  if ty == nil: return 0
+  case ty.kind
+  of itInt: ty.width div 8
+  of itFloat32: 4
+  of itFloat64: 8
+  else: 0
+
+func viewExactTy*(ty: IRType): bool =
+  ## RFC-0016 INT-90. A scalar whose bytes the model spells exactly: a
+  ## fixed-width integer or a float. Not a bool (natively its byte is 0 or
+  ## 1; every other byte is no bool, and the model's Bool has no bits).
+  viewScalarSize(ty) > 0
+
+func viewOffsets(sizes: seq[int]; packed: bool): seq[int] =
+  ## RFC-0016 INT-90. C's layout of a struct of scalars of `sizes`: each at
+  ## its natural alignment, or at none under `{.packed.}` (`armOffsets`).
+  var o = 0
+  for sz in sizes:
+    if not packed and o mod sz != 0: o += sz - (o mod sz)
+    result.add o
+    o += sz
+
+func crossSortLeafShaped*(key: string): bool =
+  ## RFC-0016 INT-90. `key` may be a view's leaf heap: a scalar sort's id or
+  ## a field's `<O>__<f>`, never one of the model's own arrays (an `@` in
+  ## the key: a discriminator, a case branch's field, a union image, a
+  ## pointer's selector). `viewLeaves` holds no other key, so a store into
+  ## any other heap leaves every view's bytes as they were (`heapPut`).
+  '@' notin key
+
+proc viewLeaves*(ty: IRType; typeId: string): seq[ViewLeaf] =
+  ## RFC-0016 INT-90. The scalar leaves of a view of `ty` at their native
+  ## byte offsets, or empty where the model does not know the layout. A
+  ## scalar is one leaf at 0. A flat object or tuple of scalars with no
+  ## run-type header (`inheritChain`) is a leaf per field at the offset the
+  ## compiler gives it for the target (`cFieldOffsets`, `macros.getOffset`:
+  ## its natural C alignment, padding included, or none under
+  ## `{.packed.}`); its padding bytes are no leaf, so they are free. One
+  ## whose offsets the parser did not read (an anonymous tuple) is laid out
+  ## only where no padding can be (the natural offsets are the packed
+  ## ones, under any alignment no wider than a scalar's size). An unknown
+  ## offset (an `importc` struct), a nested object, a case object, an
+  ## array, a ref, a string, a seq, an enum: no leaves.
+  if viewExactTy(ty):
+    if not crossSortLeafShaped(typeId): return
+    return @[(typeId, 0, viewScalarSize(ty), ty)]
+  if ty == nil or ty.kind != itTuple or ty.inheritChain.len > 0 or
+     ty.fields.len == 0 or ty.fieldNames.len != ty.fields.len:
+    return
+  var sizes: seq[int]
+  for f in ty.fields:
+    if not viewExactTy(f): return
+    sizes.add viewScalarSize(f)
+  var offs: seq[int]
+  if ty.cFieldOffsets.len > 0:
+    if ty.cFieldOffsets.len != ty.fields.len: return
+    for o in ty.cFieldOffsets:
+      if o < 0: return
+    offs = ty.cFieldOffsets
+  else:
+    offs = viewOffsets(sizes, false)
+    if offs != viewOffsets(sizes, true): return
+  for i, f in ty.fields:
+    if ty.fieldNames[i].len == 0: return
+    let key = fieldHeapKey(ty, ty.fieldNames[i])
+    if not crossSortLeafShaped(key): return @[]
+    result.add (key, offs[i], sizes[i], f)
+
+proc crossSortSharedLeaf*(key: string): bool =
+  ## RFC-0016 INT-90. `key` is the heap of a leaf of a view sort of the
+  ## `pointer` space while at least one other view sort is in it: the heap
+  ## a cross-sort fact may read (`crossSortLink`), so a store into it that
+  ## no splice reflects in the other sorts' heaps desyncs the path
+  ## (`heapPut`). Decided by key, not by the store's sort or site, so a
+  ## store path cannot miss it by holding a type the author did not think
+  ## of as a view.
+  if pointerSortsUsed.len < 2: return false
+  var views = 0
+  for tid in pointerSortsUsed:
+    if not pointerSortTypes.hasKey(tid): continue
+    let lv = viewLeaves(pointerSortTypes[tid], tid)
+    if lv.len == 0: continue
+    inc views
+    for l in lv:
+      if l.key == key: result = true
+  result = result and views >= 2
+
+type HeapWrite* = enum
+  ## RFC-0016 INT-90. What a write of a path's heap (`heapPut`) is.
+  hwInput    ## the path's input heap of a key it does not hold yet (a
+             ## fresh array constant, a key's known constant array): no
+             ## state changes
+  hwCarry    ## a heap the path read, carried onto a child: the input
+             ## constant of a key the path does not hold yet, or the term it
+             ## already holds
+  hwStore    ## a store, a zero-init, or a havoc that no cross-sort splice
+             ## reflects
+  hwSpliced  ## a store whose bytes `crossSortPropagate` spliced into every
+             ## other view sort's heap (or one of those splices)
+
+proc heapPutIn*(heaps: var Table[string, Z3AnyAst];
+                counters: var Table[string, int]; key: string; arr: Z3AnyAst;
+                how: HeapWrite) =
+  ## RFC-0016 INT-90. The one write of a path's heaps (`heaps`, its
+  ## `allocCounters` as `counters`), through `heapPut` (audited:
+  ## `tsymex_0016_int90_heapput_audit`). A cross-sort fact relates two view
+  ## sorts' heaps of one path at one statement, sound only while every
+  ## change of either heap so far was reflected in both. So every write is
+  ## either spliced (`hwSpliced`) or, when `key` is the leaf heap of a view
+  ## sort sharing the `pointer` space with another (`crossSortSharedLeaf`),
+  ## desyncs the path (`crossSortDesyncKey`): no later fact is emitted on
+  ## it and its witness keeps the lossy marking. An input or carried heap
+  ## that turns out to replace a different term the path holds is a store.
+  ## A change of a heap a view's leaf may be (`crossSortLeafShaped`) also
+  ## counts as a write of the run (`crossSortWritten`), so a sort entering
+  ## the space later emits no fact (`crossSortEnter`).
+  var how = how
+  if how in {hwInput, hwCarry} and heaps.hasKey(key) and
+     heaps[key].raw != arr.raw:
+    how = hwStore
+  heaps[key] = arr   ## the only indexed write of a path's heaps
+  if how in {hwInput, hwCarry}: return
+  if crossSortLeafShaped(key): crossSortWritten = true
+  if how == hwStore:
+    if crossSortSharedLeaf(key):
+      counters[crossSortDesyncKey] = 1
+      crossSortAnyDesync = true
+
+template heapPut*(p: untyped; key: string; arr: Z3AnyAst; how: HeapWrite) =
+  ## RFC-0016 INT-90. `p.heaps[key] = arr` for a walker `Path` `p`, written
+  ## as `how` (`heapPutIn`).
+  heapPutIn(p.heaps, p.allocCounters, key, arr, how)
+
+proc crossSortExactCell*(sorts: seq[string]): bool =
+  ## RFC-0016 INT-90. A cell held at the `Ref_<T>` sorts `sorts` is the
+  ## model's when every sort is a view of the `pointer` space and no path
+  ## desynced: the witness writes each view's rendered leaves into the one
+  ## allocation at their own bytes (`resolveRef`, a view wider than its
+  ## owner included), and the bytes two views share agree wherever the path
+  ## read them before writing them (`crossSortLink`'s facts relate every
+  ## view sort at each read), so the order of the writes does not matter.
+  ## A byte no view's leaf holds (padding) is no constraint of the model.
+  if crossSortAnyDesync: return false
+  for s in sorts:
+    if not s.startsWith("Ref_"): return false
+    let tid = s["Ref_".len .. ^1]
+    if not pointerSortTypes.hasKey(tid): return false
+    if viewLeaves(pointerSortTypes[tid], tid).len == 0: return false
+  true
+
 proc pointerDecl(ctx: Z3Context; name: string; dom, rng: RawZ3Sort): RawZ3FuncDecl =
   if pointerDecls.ctx != cast[pointer](ctx.raw):
     pointerDecls = (ctx: cast[pointer](ctx.raw),
@@ -2450,6 +2713,7 @@ proc pointerSortPair(ctx: Z3Context; pointee: IRType):
   result.fromF = pointerDecl(ctx, "@fromAddr_" & tid, pSort, tSort)
   result.tNil = currentNilConsts[tid]
   result.pNil = currentNilConsts[pointerTypeId]
+  pointerSortTypes[tid] = pointee          # RFC-0016 INT-90
   if fresh:
     let a = pointerApp(ctx, result.toF, result.tNil.raw)
     pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, result.pNil.raw))
@@ -2509,6 +2773,20 @@ proc pointerAsTyped*(ctx: Z3Context; p: Z3AnyAst; pointee: IRType): Z3AnyAst =
   pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, back.raw, p.raw))
   pointerViews.add (addrAst: p, typedAst: result, pointee: pointee)
 
+proc pointerMapAddr*(ctx: Z3Context; x: Z3AnyAst; fromTy, toTy: IRType): Z3AnyAst =
+  ## RFC-0016 INT-90. The address `x` (of `fromTy`'s sort) as an address of
+  ## `toTy`'s sort: `@fromAddr_U(@toAddr_T(x))`, with both round trips as
+  ## ground facts. No `pointerViews` entry: the result is a term of the
+  ## model, not a position of the run the witness renders.
+  let a = pointerSortPair(ctx, fromTy)
+  let b = pointerSortPair(ctx, toTy)
+  let p = pointerApp(ctx, a.toF, x.raw)
+  let backA = pointerApp(ctx, a.fromF, p.raw)
+  pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, backA.raw, x.raw))
+  result = pointerApp(ctx, b.fromF, p.raw)
+  let backB = pointerApp(ctx, b.toF, result.raw)
+  pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, backB.raw, p.raw))
+
 
 # ---- the per-run reset ------------------------------------------------------
 
@@ -2531,6 +2809,13 @@ proc resetHeapModel*() =
   pointerReadSorts = initHashSet[string]()
   pointerAddrSorts = initHashSet[string]()
   pointerDecls = (ctx: nil, decls: initTable[string, RawZ3FuncDecl]())
+  pointerSortTypes = initTable[string, IRType]()   # RFC-0016 INT-90
+  crossSortFacts = @[]
+  crossSortFactIds = initHashSet[int]()
+  crossSortAnyDesync = false
+  crossSortAccessed = false
+  crossSortWritten = false
+  crossSortFactsOff = false
   currentBorrowReboxCounter = 0
   heapKeyShapes = initTable[string, HeapKeyShape]()
   heapFieldOwners = initTable[string, tuple[code: int64; depth: int]]()   ## RFC-0016 INT-81
@@ -3772,27 +4057,40 @@ proc allocateSym*(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     pcOut.add matches(sv, byteRange)
     SymVal(kind: svString, str: sv)
   of itTuple:
-    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
-    var fields: seq[SymVal]
-    for i, ft in ty.fields:
-      let suffix = if ty.fieldNames[i].len > 0: "." & ty.fieldNames[i]
-                   else: "." & $i
-      # Round-6 B5: a traced position allocates svInt directly (only
-      # meaningful for an itInt field — any other field kind at a traced
-      # position is simply not a scan-offset shape, so it falls through to
-      # the ordinary recursive allocation unchanged).
-      if i in intOffsetPositions and ft.kind == itInt:
-        # R3 (S2): stamp the promoted field's static Nim type (`ft.width`/
-        # `ft.signed`) — same rationale as the bare-`itInt` arm above.
-        let v = SymVal(kind: svInt, zi: mkIntVar(baseName & suffix),
-                        ziWidth: ft.width, ziSigned: ft.signed)
-        # Issue #163 W8: same rationale as the bare-itInt arm above.
-        for c in rangeCondsIfNeeded(v, ft):
-          pcOut.add c
-        fields.add v
-      else:
-        fields.add allocateSym(ft, baseName & suffix, pcOut)
-    SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
+    if isCStringTy(ty):
+      # RFC-0016 INT-87: a `cstring` is nil or the bytes before its first
+      # NUL: each byte in 1..0xFF (the byte-faithful range of `itString`
+      # without the NUL), so `c[len(c)]` is the only NUL a read sees. Nil
+      # holds no bytes (`len(nil) == 0`, `$nil == ""`).
+      let nonNil = mkBoolVar(baseName & "." & ty.fieldNames[0])
+      let bytes = mkStringVar(baseName & "." & ty.fieldNames[1])
+      pcOut.add matches(bytes, star(range(mkString("\x01"), mkString("\xff"))))
+      pcOut.add implies(not nonNil, bytes <= mkString(""))
+      SymVal(kind: svTuple, fieldNames: ty.fieldNames,
+             fields: @[SymVal(kind: svBool, bo: nonNil),
+                       SymVal(kind: svString, str: bytes)])
+    else:
+      # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
+      var fields: seq[SymVal]
+      for i, ft in ty.fields:
+        let suffix = if ty.fieldNames[i].len > 0: "." & ty.fieldNames[i]
+                     else: "." & $i
+        # Round-6 B5: a traced position allocates svInt directly (only
+        # meaningful for an itInt field — any other field kind at a traced
+        # position is simply not a scan-offset shape, so it falls through to
+        # the ordinary recursive allocation unchanged).
+        if i in intOffsetPositions and ft.kind == itInt:
+          # R3 (S2): stamp the promoted field's static Nim type (`ft.width`/
+          # `ft.signed`) — same rationale as the bare-`itInt` arm above.
+          let v = SymVal(kind: svInt, zi: mkIntVar(baseName & suffix),
+                          ziWidth: ft.width, ziSigned: ft.signed)
+          # Issue #163 W8: same rationale as the bare-itInt arm above.
+          for c in rangeCondsIfNeeded(v, ft):
+            pcOut.add c
+          fields.add v
+        else:
+          fields.add allocateSym(ft, baseName & suffix, pcOut)
+      SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
   of itArray:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # #142: nested arrays land via the existing recursion. The
@@ -4738,6 +5036,8 @@ proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
     heapChainKinds, allocInputDomain, enumHolesMade, heapFieldOwners,
     preExistingNames, madeKinds, allocatedNames, preDecls, provKinds,
     pointerFacts, pointerViews, pointerSortsUsed, pointerReadSorts,
-    pointerAddrSorts, pointerDecls)
+    pointerAddrSorts, pointerDecls, crossSortAccessed, crossSortWritten,
+    pointerSortTypes, crossSortFacts, crossSortFactIds, crossSortAnyDesync,
+    crossSortFactsOff)
 
 registerThreadStateRelease(releaseThreadState)

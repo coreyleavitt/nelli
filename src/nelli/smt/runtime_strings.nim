@@ -740,7 +740,8 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     let inLoCond = idxZi >= mkInt(0)
     let inHiCond = idxZi < strLenZi
     let oob = not (inLoCond and inHiCond)
-    lowerHooks.depositStrIndexOob(oob)
+    if e.strOp == cstringIndexOp: lowerHooks.depositUndefinedOob(oob)   # RFC-0016 INT-87
+    else: lowerHooks.depositStrIndexOob(oob)
     # RFC-0016 INT-74: a byte of a rendering (or of a slice or concatenation
     # over one) at a fixed index is a bit-vector formula (`strByteAt`).
     liftBV(strByteAt(recv.str, idxZi), false)

@@ -59,13 +59,15 @@ proc pprocG(c: bool) =
   if gf != nil: symexTarget("hit")
 
 suite "RFC-0016 W3-z P6: nil in a composite slot":
-  test "cstring nil arms decline by name (were a walker fault)":
-    check parseInt(symexWalkerVersion) >= 317
-    pinDecline(pcsGlobal, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
-    pinDecline(pcsLocal, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
+  test "a cstring nil arm is modelled and agrees with native (INT-87)":
+    # declined by name (`feUnsupportedExprKind`, walker 317) until INT-87
+    # held a cstring by value, whose zero is nil
+    check parseInt(symexWalkerVersion) >= 448
+    discard pinExact(pcsGlobal, cellKey(axTypeClass, "cstring"), domain = sampled([true, false]))
+    discard pinExact(pcsLocal, cellKey(axTypeClass, "cstring"), domain = sampled([true, false]))
 
-  test "the case-expression form declines by name (was an unbound temp fault)":
-    pinDecline(pcsCase, cellKey(axTypeClass, "cstring"), feUnsupportedExprKind)
+  test "the case-expression form is modelled (was an unbound temp fault)":
+    discard pinExact(pcsCase, cellKey(axTypeClass, "cstring"), domain = sampled([0, 1, 2]))
     let r = symexFind(pcsCase, tLabel("hit"), pinSettingsConst)
     for e in r.errors:
       check "coerceIntLit" notin e.msg

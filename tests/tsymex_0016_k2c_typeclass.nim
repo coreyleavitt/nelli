@@ -146,9 +146,8 @@ suite "RFC-0016 K2c: one snippet per NimTypeKind":
                      domain = sampled([Box[int](v: 3), Box[int]()]))
 
   test "refused kinds decline with the kind their row names":
-    for k in [ntyCString, ntyProc]:
+    for k in [ntyProc]:
       check not admitTypeClass(k, tcClassify).admitted
-    pinDecline(pcstr, cellKey(axTypeClass, "cstring"), feUnsupportedParamType)
     pinDecline(pproc, cellKey(axTypeClass, "proc"), ceUnsupportedHof)
 
   test "classified kinds are the table's tcClassify rows":
@@ -172,6 +171,13 @@ suite "RFC-0016 K2c: the pointer and view kinds":
 
   test "a pointer parameter is modelled (RFC-0016 INT-83), pinned on its witness":
     let r = pinFind(ppointer, tLabel("hit"))
+    checkpoint $r.errors
+    check r.status == sxSat
+    check r.trusted
+
+  test "a cstring parameter is modelled (RFC-0016 INT-87), pinned on its witness":
+    check admitTypeClass(ntyCString, tcClassify).admitted
+    let r = pinFind(pcstr, tLabel("hit"))
     checkpoint $r.errors
     check r.status == sxSat
     check r.trusted

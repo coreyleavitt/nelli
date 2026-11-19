@@ -1405,7 +1405,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## reserved; provisional): 450->452.
     ## RFC-0016 INT-92 remaining shapes (a dead value through a local, a
     ## forwarded call, a formal, a field; provisional): 452->453.
-    check symexWalkerVersion == "453"
+    ## RFC-0016 INT-87 (a `cstring` is held by value; 445-447 reserved;
+    ## provisional): 444->448.
+    ## RFC-0016 INT-90 (two typed views of one address agree byte-wise;
+    ## 449-450 reserved; provisional): 448->451.
+    ## RFC-0016 INT-90b (a padded view object and a view wider than its
+    ## owner; 452-453 reserved; provisional): 451->454.
+    check symexWalkerVersion == "454"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

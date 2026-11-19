@@ -91,6 +91,8 @@ proc stdName(name: string): NimNode =
   of "readFloat": bindSym"readFloat"
   of "readFloat32": bindSym"readFloat32"
   of "readString": bindSym"readString"
+  of "readCString": bindSym"readCString"          # RFC-0016 INT-87
+  of "cstring": bindSym"cstring"                  # RFC-0016 INT-87
   of "readSeqInt": bindSym"readSeqInt"
   of "readSeqInt8": bindSym"readSeqInt8"
   of "readSeqInt16": bindSym"readSeqInt16"
@@ -117,6 +119,7 @@ proc stdName(name: string): NimNode =
   of "resolveRef": bindSym"resolveRef"            # RFC-0005 S8h
   of "refElemPos": bindSym"refElemPos"            # RFC-0005 S8h
   of "registerCellType": bindSym"registerCellType"  # RFC-0016 INT-81
+  of "registerPtrSize": bindSym"registerPtrSize"    # RFC-0016 INT-88
   of "buildCellAs": bindSym"buildCellAs"            # RFC-0016 INT-81
   of "WitnessCellBuild": bindSym"WitnessCellBuild"  # RFC-0016 INT-81
   of "pointer": bindSym"pointer"                  # RFC-0016 INT-83
@@ -287,6 +290,11 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
                            witId: NimNode): (NimNode, NimNode) =
   ## Recursive: returns (Nim type AST, witness-construction expression). The
   ## result may use one node at several places; `emitTyAndReader` unshares.
+  if isCStringTy(ty):
+    # RFC-0016 INT-87: nil, or a buffer of the bytes and a NUL
+    # (`readCString`), passed as the `cstring` it is.
+    return (stdName("cstring"), newCall(stdName("readCString"), witId,
+                                        newLit(path)))
   case ty.kind
   of itUninterp:
     if ty.uninterpName == "__closure":
@@ -1103,6 +1111,51 @@ proc emitCellTypes(params: seq[IRParam]; ctxId, witId: NimNode): NimNode =
     result.add newCall(stdName("registerCellType"), ctxId,
                        nnkPrefix.newTree(ident"@", codes), build)
 
+proc collectPtrTypes(ty: IRType; acc: var seq[IRType];
+                     seen: var HashSet[string]; depth = 0) =
+  ## RFC-0016 INT-88. Every typed `ptr` type (not `pointer`) a position in the
+  ## type tree `ty` may have, each sort once.
+  if ty == nil or depth > 16: return
+  case ty.kind
+  of itRef, itPtr:
+    let p = refPointeeOf(ty)
+    if ty.kind == itPtr and not isPointerTy(ty) and resolvesByRef(ty) and
+       not seen.containsOrIncl(refPointeeTypeId(p)):
+      acc.add ty
+    collectPtrTypes(p, acc, seen, depth + 1)
+  of itTuple:
+    for f in ty.fields: collectPtrTypes(f, acc, seen, depth + 1)
+  of itArray: collectPtrTypes(ty.elemTy, acc, seen, depth + 1)
+  of itSeq: collectPtrTypes(ty.seqElemTy, acc, seen, depth + 1)
+  of itDistinct: collectPtrTypes(ty.distinctBase, acc, seen, depth + 1)
+  of itVariant:
+    for f in ty.vPlainFieldTypes: collectPtrTypes(f, acc, seen, depth + 1)
+    for arm in ty.vArms:
+      for f in arm.fieldTypes: collectPtrTypes(f, acc, seen, depth + 1)
+  of itMultiVariant:
+    for f in ty.mvPlainFieldTypes: collectPtrTypes(f, acc, seen, depth + 1)
+    for ax in ty.mvAxes:
+      for arm in ax.arms:
+        for f in arm.fieldTypes: collectPtrTypes(f, acc, seen, depth + 1)
+  else: discard
+
+proc emitPtrSizes(params: seq[IRParam]; ctxId, witId: NimNode): NimNode =
+  ## RFC-0016 INT-88. Register with the witness's `RefWitness` the pointee
+  ## size of each `ptr` sort its positions may hold (`registerPtrSize`), so a
+  ## cell one address holds at two sorts is allocated for the larger.
+  result = newStmtList()
+  var seen: HashSet[string]
+  var tys: seq[IRType]
+  for p in params: collectPtrTypes(p.ty, tys, seen)
+  for t in tys:
+    let ptrTy = refWitnessTypeNode(t, "", witId)
+    let sort = newLit("Ref_" & refPointeeTypeId(refPointeeOf(t)))
+    let call = newCall(stdName("registerPtrSize"), ctxId, sort,
+      newCall(ident"sizeof", newCall(ident"typeof",
+        nnkBracketExpr.newTree(newCall(ident"default", ptrTy)))))
+    result.add nnkWhenStmt.newTree(nnkElifBranch.newTree(
+      newCall(ident"compiles", copyNimTree(call)), newStmtList(call)))
+
 proc emitWitnessTuple*(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode) =
   ## The witness tuple of `params` over the `RawWitness` `witId`: (its type,
   ## its value). RFC-0005 S8h: every `ref`/`ptr` position in it resolves
@@ -1134,6 +1187,7 @@ proc emitWitnessTuple*(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode)
   # replay refuted a sound `sxSat`. The tuple keeps parameter order.
   var stmts = newStmtList(newLetStmt(ctxId, ctxInit))
   stmts.add emitCellTypes(params, ctxId, witId)   # RFC-0016 INT-81
+  stmts.add emitPtrSizes(params, ctxId, witId)    # RFC-0016 INT-88
   var ids = newSeq[NimNode](params.len)
   for rank in 0 .. 3:
     for i, p in params:

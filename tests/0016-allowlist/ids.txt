@@ -72,5 +72,3 @@ PRC-02b	W4-z	follow-up toolchain slice; the decline it would lift is pinned in t
 INT-48	W4-z	upstream Nim issue candidate; nelli has no cell for it
 INT-50	W4-z	intake #173-#175 ceiling regressions (F-0009): a CI-D time ratchet, no cell can name it; closes when rfc-0016-w4perf and rfc-0016-w4perfb land and a nightly ceiling step is clean
 INT-51	W4-z	intake #173-#175 new ceiling offenders (F-0010): a CI-D time ratchet, no cell can name it; closes when a Wave 4 split slice splits or speeds up the six tests
-INT-87	K9d	precision: a cstring parameter declines; red reproducer tsymex_0016_int87_cstringparam (registered when it is green)
-INT-88	K9d	witness fidelity: a cross-type ptr alias witness builds two cells; red reproducer tsymex_0016_int88_crossptralias (registered when it is green)

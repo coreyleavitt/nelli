@@ -179,7 +179,7 @@ suite "symex N43 -- predicate matrix (unallocatableFieldIssue)":
 
   test "itUninterp: the three classified marker prefixes are unallocatable; an unrecognized name is the Defect-class sentinel arm (predicate returns none -- allocateSym's own doc comment: unreachable from valid DSL surface)":
     check unallocatableFieldIssue(tUninterp("__ownership:Atomic")).isSome
-    check unallocatableFieldIssue(tUninterp("__unsupported:cstring")).isSome
+    check unallocatableFieldIssue(tUninterp("__unsupported:c_longdouble")).isSome
     check unallocatableFieldIssue(tUninterp("__unsupported_witness:seq[Foo]")).isSome
     check unallocatableFieldIssue(tUninterp("__closure")).isNone
 
@@ -399,7 +399,7 @@ type
     # layout); one holding a ref inside a Table is not.
     a: Table[string, ref int]
 
-proc n43ParamUnsupported(x: cstring, y: int) =
+proc n43ParamUnsupported(x: c_longdouble, y: int) =  # a cstring until INT-87 modelled it
   if y == 42:
     symexTarget("n43_param_unsupported")
 
@@ -410,7 +410,7 @@ proc n43ParamUnsupportedWitness(xs: seq[N43WitnessObj], y: int) =
 suite "symex N43 -- companion: param-boundary confirmation for the two structurally-walk-unreachable itUninterp prefixes":
 
   test "N43-P1: an unresolved parameter type (__unsupported:) -- predicted unallocatable (Part 1), raiseParamAllocIssue confirms: whole-run sxUnknown, feUnsupportedParamType":
-    check unallocatableFieldIssue(tUninterp("__unsupported:cstring")).isSome
+    check unallocatableFieldIssue(tUninterp("__unsupported:c_longdouble")).isSome
     let r = pinFind(n43ParamUnsupported, tLabel("n43_param_unsupported"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)

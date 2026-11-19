@@ -1036,7 +1036,11 @@ var cstringArena {.threadvar.}: seq[string]
   ## domain's values never dangle
 
 proc cstringDomain(h: StringHints): Domain[cstring] =
-  var vs: seq[cstring]
+  ## nil, then the string domain's values without a NUL (a NUL ends a
+  ## cstring, so a value holding one is its prefix, already in the set).
+  ## RFC-0016 INT-87: nil is a value of the type (`len` 0, `$` "", equal
+  ## only to nil), which a caller passes as readily as any string.
+  var vs: seq[cstring] = @[cstring(nil)]
   for s in stringDomainValues(h):
     if '\0' notin s:
       cstringArena.add s
@@ -2117,22 +2121,29 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
     {.error: "pinFind: no generated domain for " & $T & " (" & underlyingName(T) & ")" &
              "; pin this call with pinExact and an explicit domain".}
 
+proc pinFindJudges*[T](res: SymexResult[T]; tgt: SymexTarget): bool =
+  ## Whether `pinFind` judges `res` natively: a definite, trusted, replayable
+  ## verdict. Anything else (a decline is K9c's, an undefined-behaviour target
+  ## is K10's) is returned as it came, with no record, and no native domain
+  ## is built for it: a parameter the walker declines need not have one.
+  if res.status == sxUnknown or not res.trusted or
+     tgt.kind == stkUndefined or
+     (res.status == sxSat and res.soundness.witnessUnsafe):
+    return false
+  # A nil dereference is a SIGSEGV natively, which no `except` sees
+  # (RFC-0005 S8cu): its witness would end this process. It is pinned in a
+  # child (`tsymex_rfc0005_s8cu_nil`), never replayed here (K9d-10).
+  not (res.status == sxRaised and
+       res.raisedTypeId.endsWith("NilAccessDefect"))
+
 proc pinFindJudge*[T](res: SymexResult[T]; key: CellKey; tgt: SymexTarget;
                       file: string; runW: proc (w: T): NativeRun;
                       runD: proc (hit: proc (n: NativeRun): bool;
                                   cap: int): string;
                       combos: int; exh: bool; desc: string): SymexResult[T] =
-  ## A definite, trusted, replayable verdict is judged by `pinJudge` and
-  ## recorded; anything else is returned as it came, with no record (a decline
-  ## is K9c's, an undefined-behaviour target is K10's).
-  if res.status == sxUnknown or not res.trusted or
-     tgt.kind == stkUndefined or
-     (res.status == sxSat and res.soundness.witnessUnsafe):
-    return res
-  # A nil dereference is a SIGSEGV natively, which no `except` sees
-  # (RFC-0005 S8cu): its witness would end this process. It is pinned in a
-  # child (`tsymex_rfc0005_s8cu_nil`), never replayed here (K9d-10).
-  if res.status == sxRaised and res.raisedTypeId.endsWith("NilAccessDefect"):
+  ## A verdict `pinFindJudges` admits is judged by `pinJudge` and recorded;
+  ## anything else is returned as it came, with no record.
+  if not pinFindJudges(res, tgt):
     return res
   let n = min(combos, pinFindCap)
   var idx = newSeq[int](n)
@@ -2254,6 +2265,46 @@ proc fnParamTypes(fn: NimNode): seq[NimNode] =
         u = nnkBracketExpr.newTree(ident"seq", u[1])
       result.add u
 
+proc unsizedNative(t: NimNode; seen: var HashSet[string]): string =
+  ## The type inside `t` (itself, an element, a field, a generic argument, a
+  ## ref's or ptr's target) that has no native domain, "" if none. That is
+  ## `c_longdouble` (`clongdouble`): Nim declares it `BiggestFloat`, so it
+  ## sizes it as 8 bytes, while C stores a `long double` (16 on x86-64). A
+  ## `seq` of one is allocated at Nim's size and indexed at C's, so filling
+  ## it overruns the heap block (K9d: the dealloc SIGSEGV a `c_longdouble`
+  ## parameter's domain once caused).
+  case t.kind
+  of nnkSym:
+    if t.symKind == nskType and t.eqIdent("clongdouble") and
+       t.owner.strVal in ["system", "ctypes"]:
+      return t.strVal
+    if t.symKind != nskType: return ""
+    # (a builtin's or generic's symbol is a fresh one at each look, so the
+    # key is its name and owner, not its signature hash)
+    let h = t.strVal & "/" & t.owner.strVal
+    if h in seen: return ""
+    seen.incl h
+    let impl = t.getTypeImpl
+    # a builtin's impl is its own name again (a fresh symbol each time)
+    if impl.kind == nnkSym and impl.strVal == t.strVal: return ""
+    unsizedNative(impl, seen)
+  of nnkIdentDefs:
+    unsizedNative(t[^2], seen)
+  of nnkEmpty, nnkIdent, nnkLiterals: ""
+  else:
+    for c in t:
+      let r = unsizedNative(c, seen)
+      if r.len > 0: return r
+    ""
+
+proc unsizedNative(t: NimNode): string =
+  var seen: HashSet[string]
+  unsizedNative(t, seen)
+
+macro unsizedNativeOf*(T: typedesc): string =
+  ## `unsizedNative` of `T` at compile time, for the K9d self-test
+  newLit(unsizedNative(T.getTypeInst[1]))
+
 proc namesQuit(n: NimNode): bool =
   ## the routine body calls `quit` (system's): it ends the process that runs it
   if n.kind == nnkSym and n.strVal == "quit" and n.symKind == nskProc and
@@ -2280,6 +2331,23 @@ macro pinFind*(fn: typed; target: untyped;
   let find = newCall(ident"symexFind", fn, target)
   for a in rest: find.add a
   let res = genSym(nskLet, "res")
+  # A parameter type with no native domain (`unsizedNative`) is never given
+  # one: the call is returned as it came when it is not judged (the walker
+  # declines such a parameter), and a definite verdict over it fails the pin,
+  # since no native run could reproduce it.
+  for i, t in types:
+    let u = unsizedNative(t)
+    if u.len > 0:
+      let msg = "pinFind: no native domain for parameter " & $(i + 1) &
+        " of " & fn.repr & " (" & t.repr & " holds " & u & ", which Nim " &
+        "sizes as a float64 while C stores a long double), so a definite " &
+        "verdict over it cannot be pinned"
+      return quote do:
+        block:
+          let `res` = `find`
+          if pinFindJudges(`res`, `target`):
+            raise newException(PinFailure, `msg`)
+          `res`
   let w = genSym(nskParam, "w")
   let hit = genSym(nskParam, "hit")
   let cap = genSym(nskParam, "cap")

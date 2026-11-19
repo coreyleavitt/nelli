@@ -8970,7 +8970,9 @@ proc parseToIntCall(n, calleeSym: NimNode; preamble: var seq[IRStmt];
   preamble.add mkIf(@[mkBranch(mkBinop(bGe, mkVar(v), zero), arm(bAdd))],
                     arm(bSub))
   mkVar(res)
+
 proc parseRuneSize(opnd: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): IRExpr =
   ## RFC-0016 INT-72. `unicode.size(r)` (unicode.nim:932), by its thresholds:
   ## `v = r.uint32`, then 1/2/3/4/5/6 bytes up to 0x7F/0x7FF/0xFFFF/0x1FFFFF/
   ## 0x3FFFFFF/0x7FFFFFFF, else 1. Over the int32 value that is: a negative

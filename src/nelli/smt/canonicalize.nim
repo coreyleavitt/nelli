@@ -983,6 +983,7 @@ const renderAsChoicesVersion* = "12"
   ##   (`nilClosure`, also an uninitialised proc variable): compared with nil
   ##   it is decided (`closureEq`), a call through nil declines
   ##   `ceUnsupportedHof`. Verdicts change from `sxUnknown` to exact. No key
+  ##   bytes change.
   ## - RFC-0016 INT-76 (434->435): a `c_longdouble` value (a declared local,
   ##   initialised or not, or an expression of the type) declines
   ##   `feUnsupportedParamType` and halts the path (`declineLongDouble`, a
@@ -1045,6 +1046,7 @@ const renderAsChoicesVersion* = "12"
   ##   when no sink position runs it: an explicit call walks the hook, a copy
   ##   is the plain copy, and a sink position on its source's provable last
   ##   read is the move. Any other sink position declines (PRC-44). No key
+  ##   bytes change.
   ## - RFC-0016 PRC-44 (416->418; 417 is reserved for in-flight W4 work): a
   ##   sink position a read of its source is surely reachable from runs the
   ##   type's user `=dup` (the parse walks the hook there, staged behind the
@@ -1068,6 +1070,7 @@ const renderAsChoicesVersion* = "12"
   ##   another module is bound before the main module, a `sink` tuple or
   ##   array alias has its flag where it is declared, `except E as e` and
   ##   iterators and templates are followed by the cursor inference. No key
+  ##   bytes change.
   ## - RFC-0016 PRC-48 (427->429; 428 is taken): a sink position in the loop
   ##   body of a `for` over an inline iterator is classified per inlined copy
   ##   (the compiler's cursor inference reads the inlined tree), and a `for`
@@ -1093,6 +1096,7 @@ const renderAsChoicesVersion* = "12"
   ##   temporary once and the loop indexes it; an inline iterator's formal
   ##   bound as a copy is a local of the expansion to the S8cn `lent` check;
   ##   `mgetOrPut` with a computed key evaluates it once in the model. No key
+  ##   bytes change.
   ## - RFC-0016 INT-80 (438->439): seq `&` (`seq & seq`, `seq & T`, `T & seq`)
   ##   and `add` of an `openArray` (`&=`) are modelled as a concatenation
   ##   (`iekSeqConcat`, an array lambda per data array) where they declined
@@ -1173,6 +1177,7 @@ const renderAsChoicesVersion* = "12"
   ##   `new`'s fields) holds +0.0: a float read site goes through
   ##   `readRangeConds` as an ordinal one does, so INT-77's interval bounds
   ##   only a caller's value. "It holds 0.0" was a false `sxUnsat`. No key
+  ##   bytes change.
   ## - RFC-0016 INT-85 (444->445, provisional): a zero-initialised slot of
   ##   an enum or `range` whose declared values exclude 0 (`newSeq`,
   ##   `setLen` growth, `new`'s cells, a read through a container) holds 0:
@@ -1181,6 +1186,7 @@ const renderAsChoicesVersion* = "12"
   ##   heap_model.nim), and a `range` excluding 0 has a zero
   ##   (`defaultZeroTotal`; `newSeq` of one declined). "It holds 0" was a
   ##   false `sxUnsat`; a caller's value still lies in the domain. No key
+  ##   bytes change.
   ## - RFC-0016 INT-84 (443->444, provisional): a holey enum input (a
   ##   parameter, its fields, elements, table values, set members, a ref
   ##   cell's fields) ranges over its declared ordinals, not `[low, high]`:

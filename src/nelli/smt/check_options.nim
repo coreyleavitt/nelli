@@ -399,9 +399,15 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   # chain from what it names is not read. `system.nim` and `math.nim` import under
   # their own pushes, so a stdlib importer hands it on to what it names alone.
   # Importers are found by the import graph from this module and the project file.
+  # Each once: this runs for every routine the walk registers, and a list
+  # re-appended per routine made the loop below quadratic in the program's
+  # callees (the compile-time VM's iteration limit, on the replay suites).
   for l in moduleScans[root].importLeak:
-    runLeaks.add (root: root, name: l.name, opts: l.opts)
-  if not isStdlibFile(root):
+    let e = (root: root, name: l.name, opts: l.opts)
+    if e notin runLeaks: runLeaks.add e
+  let rootStdlib = isStdlibFile(root)
+  let rootSystem = isSystemFile(root)
+  if not rootStdlib:
     enterGraph(rootRaw)
     enterGraph(querySetting(projectFull))
     if runUnknown.len > 0:
@@ -413,8 +419,8 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
     let rk = l.root & "|" & l.name
     let reaches =
       if l.name == moduleName: true
-      elif isStdlibFile(l.root) or isSystemFile(root): false
-      elif rk in runReach: root in runReach[rk] or isStdlibFile(root)
+      elif rootSystem or isStdlibFile(l.root): false
+      elif rk in runReach: root in runReach[rk] or rootStdlib
       else: true          # the named module was not found: any may be under it
     if reaches:
       result.checks = result.checks + l.opts

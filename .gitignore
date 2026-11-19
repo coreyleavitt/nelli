@@ -11,6 +11,7 @@ htmldocs/
 tests/tsmoke
 tests/t*[!.]
 tests/k1lite
+tests/zdbg*
 !tests/*.nim
 !tests/*.nim.cfg
 examples/symex_*[!.nim]

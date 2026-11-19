@@ -15,6 +15,20 @@ import ./s8cu_helpers
 
 const declKey = cellKey(faGeneric, "s8cu_modules")
 
+template writesExact(fn: untyped) =
+  ## RFC-0016 int6-f: a wrong-branch write under a pushed-off `fieldChecks`
+  ## is the off build's: a store into the union's bytes (c), the member it
+  ## makes active (cpp). Exact, its witness run natively; no `FieldDefect`
+  ## on any input of the domain.
+  block:
+    let r = pinExact(fn, declKey)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    let d = pinFind(fn, tFieldDefect())
+    checkpoint show(d.errors)
+    check d.status == sxUnsat
+
 template hitIfWraps(call: untyped) =
   if v == high(int):
     let w = call
@@ -94,10 +108,9 @@ suite "S8cu: a callee in another module":
 
   test "an unchecked callee declines":
     check native(viaUncheckedField(4)) == "hit"
-    # RFC-0016 int6: the callee's `fieldChecks: off` is modelled; its
-    # wrong-branch write declines on its own path (`inactiveFieldSide`).
-    pinDecline(viaUncheckedField, declKey, feUnsupportedOp,
-               excluding = {feCheckOption})
+    # RFC-0016 int6: the callee's `fieldChecks: off` is modelled; int6-f:
+    # its wrong-branch write is the off build's, exact.
+    writesExact(viaUncheckedField)
     check native(viaUncheckedAdd(high(int))) == "hit"
     pinDecline(viaUncheckedAdd, declKey, ubSignedOverflow)
 

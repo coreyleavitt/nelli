@@ -18,6 +18,20 @@ import nelli/smt/definedness
 import ./s8cu_helpers
 
 const declKey = cellKey(faGeneric, "s8cu_push")
+
+template writesExact(fn: untyped) =
+  ## RFC-0016 int6-f: a wrong-branch write under a pushed-off `fieldChecks`
+  ## is the off build's: a store into the union's bytes (c), the member it
+  ## makes active (cpp). Exact, its witness run natively; no `FieldDefect`
+  ## on any input of the domain.
+  block:
+    let r = pinExact(fn, declKey)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    let d = pinFind(fn, tFieldDefect())
+    checkpoint show(d.errors)
+    check d.status == sxUnsat
 const idxKey = cellKey(axDefinedness, "index/unchecked")
 const objKey = cellKey(axDefinedness, "conv/objDowncast")
 
@@ -119,10 +133,8 @@ suite "S8cu: the push form":
 
   test "fieldChecks":
     check native(fieldOff(4)) == "hit"
-    # The wrong-branch write declines on its own path (`inactiveFieldSide`).
-    pinDecline(fieldOff, declKey, feUnsupportedOp, excluding = {feCheckOption})
-    let d = symexFind(fieldOff, tFieldDefect())
-    check d.status == sxUnknown
+    # The wrong-branch write is the off build's (int6-f).
+    writesExact(fieldOff)
 
   test "a routine after the pop has the check back (control)":
     check native(fieldAfterPop(4)) == "FieldDefect"

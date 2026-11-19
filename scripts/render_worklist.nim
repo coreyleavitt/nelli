@@ -5,6 +5,8 @@
 ##   render_worklist check   exit 1 if the committed RFC differs from the render
 ##                           (the staleness check; CI's `pins` job). Default.
 ##   render_worklist write   rewrite the RFC's marked regions in place.
+##   Either mode takes an optional TOML path as a second argument (the
+##   check-worklist.sh self-test feeds it a copy with a duplicate key).
 ##
 ## Run it with scripts/check-worklist.sh [check|write] (podman, or the host's
 ## nim under NELLI_HOST=1). The TOML reader and the renderer are
@@ -22,7 +24,10 @@ proc main(): int =
   if mode notin ["check", "write"]:
     stderr.writeLine "usage: render_worklist [check|write]"
     return 2
-  let w = parseWorklist(readFile(tomlPath), "docs/rfc-data/0016-worklist.toml")
+  # An optional second argument names another TOML (the self-test's temp copy).
+  let src = if paramCount() >= 2: paramStr(2) else: tomlPath
+  let w = parseWorklist(readFile(src), if paramCount() >= 2: src
+                                       else: "docs/rfc-data/0016-worklist.toml")
   var bad = w.validate()
   let have = readFile(rfcPath)
   let (want, problems) = renderRfc(have, w)

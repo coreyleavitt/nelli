@@ -30,7 +30,19 @@ if [ "${1:-}" = "--self-test" ]; then
   if bash "$0" check >/dev/null 2>&1; then
     echo "self-test: the check passed after a hand edit to a table row" >&2; exit 1
   fi
-  echo "self-test: ok (a hand-edited row fails the check)"
+  # A key set twice in one row must fail, naming the row id and the key.
+  dup=tests/.pins/worklist-dup.toml
+  mkdir -p tests/.pins
+  sed '0,/^id = "SND-02"$/s//&\nstate = "open"\nstate = "open"/' docs/rfc-data/0016-worklist.toml > "$dup"
+  trap 'mv -f "$rfc.selftest.bak" "$rfc"; rm -f "$dup"' EXIT
+  msg=$(nimrun tests/.pins/worklist-build check "$dup" 2>&1) && {
+    echo "self-test: a duplicate key in a row passed the check" >&2; exit 1; }
+  case "$msg" in
+    *"row SND-02"*"duplicate key \`state\`"*) ;;
+    *) echo "self-test: the duplicate-key failure did not name the row and key:" >&2
+       echo "$msg" >&2; exit 1;;
+  esac
+  echo "self-test: ok (a hand-edited row and a duplicate key both fail the check)"
   exit 0
 fi
 mode="${1:-check}"

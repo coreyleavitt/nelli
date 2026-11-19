@@ -65,15 +65,18 @@ proc skipWs(s: string; i: var int) =
   while i < s.len and s[i] in {' ', '\t'}: inc i
 
 proc parseWorklist*(text: string; file = "worklist.toml"): Worklist =
-  ## Fails (doAssert) on anything outside the flat subset or an unknown key,
-  ## so a typo in a field name cannot silently drop data.
+  ## Fails (doAssert) on anything outside the flat subset, an unknown key, or a
+  ## key set twice in one table (TOML forbids it), so neither a typo in a field
+  ## name nor a repeated key can silently drop data. Dotted keys, `[table]`
+  ## headers and quoted keys are outside the subset and already rejected.
   var kind = ""
   var curT: WTable
   var curR: WRow
+  var seen = initHashSet[string]()   # keys already set in the open table
   proc flush(w: var Worklist) =
     if kind == "table": w.tables.add curT
     elif kind == "row": w.rows.add curR
-    curT = WTable(); curR = WRow(); kind = ""
+    curT = WTable(); curR = WRow(); kind = ""; seen.clear()
   var n = 0
   for raw in text.splitLines():
     inc n
@@ -86,6 +89,13 @@ proc parseWorklist*(text: string; file = "worklist.toml"): Worklist =
     let eq = line.find('=')
     doAssert eq > 0, where & ": expected key = value"
     let key = line[0 ..< eq].strip()
+    # TOML forbids redefining a key within a table; a last-wins reader would
+    # drop the earlier value silently (PRC-23 lost its cells this way).
+    let owner = if kind == "row": "row " & (if curR.get("id").len > 0: curR.get("id") else: "(id not yet set)")
+                else: "table " & curT.name
+    doAssert key notin seen, where & ": " & owner & ": duplicate key `" & key &
+      "` (TOML forbids redefining a key within a table)"
+    seen.incl key
     var i = eq + 1
     skipWs(line, i)
     var sval = ""

@@ -11146,31 +11146,26 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
   # where the passes below walk each top-level conjunct's depth on its own.
   block:
     var seen: HashSet[int]
-    var stack: seq[RawZ3Ast]
-    for r in roots: stack.add r.raw
+    var stack: seq[Z3AnyAst]
+    for r in roots: stack.add toAnyAst(r)
     var found = false
     while stack.len > 0:
       let t = stack.pop()
-      let id = astId(ctx, t)
+      let id = astId(ctx, t.raw)
       if id in seen: continue
       seen.incl id
       chargeWalkerTerms(1)
-      if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
-      let app = Z3_to_app(ctx.raw, t)
-      let k = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)))
-      let n = int(Z3_get_app_num_args(ctx.raw, app))
-      if k == kinds.inRe and n == 2 and
-         astId(ctx, Z3_get_app_arg(ctx.raw, app, 1)) != byteReId:
+      if getAstKind(t) != akApp: continue
+      let k = kindOf(t)
+      let args = unpackApp(t).args
+      if k == kinds.inRe and args.len == 2 and
+         astId(ctx, args[1].raw) != byteReId:
         found = true
         break
-      if k == bk.notK and n == 1:
-        let a = Z3_get_app_arg(ctx.raw, app, 0)
-        if Z3_get_ast_kind(ctx.raw, a) == Z3_APP_AST and
-           ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw,
-             Z3_to_app(ctx.raw, a)))) == kinds.inRe:
-          found = true
-          break
-      for i in 0 ..< n: stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+      if k == bk.notK and args.len == 1 and kindOf(args[0]) == kinds.inRe:
+        found = true
+        break
+      for a in args: stack.add a
     if not found: return @roots
   type
     Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]

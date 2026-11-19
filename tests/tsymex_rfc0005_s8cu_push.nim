@@ -171,12 +171,15 @@ suite "S8cu: the push form":
     let r = symexFind(umbrella, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
-    # int6: the four are modelled off (the field write declines on its own
-    # path); int6-o: so is the overflow push, whose `v + 1` at `high(int)`
-    # is a signed-overflow halt, as in an off build.
+    # int6 / int6-f: the four are modelled off, and the wrong-branch field
+    # write is the off build's (`writesExact(fieldOff)` pins it alone), so
+    # it no longer declines `feUnsupportedOp`; int6-o: the overflow push is
+    # modelled too, and its `v + 1` at `high(int)` (the one input native
+    # reaches the label on) is a signed-overflow halt, as in an off build.
+    # That halt is the whole decline.
     check not r.errors.named(feCheckOption)
     check not r.errors.named(feOverflowCheckOption)
-    check r.errors.named(feUnsupportedOp)
+    check not r.errors.named(feUnsupportedOp)
     check r.errors.named(ubSignedOverflow)
 
   test "a raise the model catches is no `sxUnsat`":

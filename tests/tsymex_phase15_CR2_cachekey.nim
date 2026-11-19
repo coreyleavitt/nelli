@@ -1453,6 +1453,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## the entry's call site): 476->477. RFC-0016 int6-a5 (also 477): a
     ## check push and pop inside a routine body is modelled as a region of
     ## its own (scope and arithmetic), where it declined `feCheckOption`.
+    ## RFC-0016 int6-a6 (also 477): a push leaked through the import that
+    ## first compiles a module is that module's position state, the compile
+    ## order replayed.
     check symexWalkerVersion == "477"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

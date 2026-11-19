@@ -25,6 +25,13 @@
 ## - `{.checks: off.}` as a statement holds until a `{.pop.}` restores what was
 ##   pushed, or the module ends. `{.push checks: off.}` before an `import` reaches
 ##   a module first compiled there, and what that module imports.
+## - RFC-0016 int6-a6. Nim compiles `system` first, then the import graph
+##   depth first: each module at the first import that reaches it, under the
+##   options open at that import, and the importer's options come back after
+##   it. A later import of a compiled module changes nothing; a module's own
+##   trailing `{.rangeChecks: off.}` does not reach its importer
+##   (`tests/tsymex_0016_int6a_leak.nim`). `replayCompileOrder` replays that
+##   order over the user modules, so a leak is a position state.
 ## - `checks: on` and `floatChecks: on` turn the float checks ON, which are off by
 ##   default. Where they are on at every reading the walker models them
 ##   (`RoutineChecks.nanOn`/`infOn`, RFC-0016 PRC-07); where a reading leaves
@@ -126,9 +133,9 @@ proc scanModuleText*(path, text: string): ModuleScan =
   ## The scan of a module whose text is at hand; an `include` is read from disk.
   scanModuleText(path, text, compileTimeEnv())
 
-proc scanModule*(path: string): ModuleScan =
-  ## The scan of a module on disk.
-  scanModule(path, compileTimeEnv())
+proc scanModule*(path: string; start = commandLineChecks): ModuleScan =
+  ## The scan of a module on disk, compiled from `start` (RFC-0016 int6-a6).
+  scanModule(path, compileTimeEnv(), start)
 
 # ---- a routine ---------------------------------------------------------------
 
@@ -222,12 +229,16 @@ proc touchesFloat(n: NimNode): bool =
 
 var moduleScans {.compileTime.}: Table[string, ModuleScan]
 
-proc scanOf(key, raw: string): ModuleScan =
+proc scanOf(key, raw: string; start = commandLineChecks): ModuleScan =
   ## The scan of the module at `key`, read once, and again once a `defined`
-  ## it was undecided on is resolved (RFC-0016 int6-a2).
-  if key notin moduleScans or stale(moduleScans[key]):
-    moduleScans[key] = scanModule(raw)
-  moduleScans[key]
+  ## it was undecided on is resolved (RFC-0016 int6-a2). RFC-0016 int6-a6:
+  ## per state it is compiled from; the command line's is keyed by the path
+  ## alone.
+  let k = if start == commandLineChecks: key
+          else: key & "|" & $start.maybeOff & "|" & $start.maybeOn
+  if k notin moduleScans or stale(moduleScans[k]):
+    moduleScans[k] = scanModule(raw, start)
+  moduleScans[k]
 var runLeaks {.compileTime.}: seq[tuple[root, name: string; opts: set[CheckOption]]]
 var runReach {.compileTime.}: Table[string, seq[string]]
   ## Per user importer and name: the modules the named one reaches by import,
@@ -235,12 +246,27 @@ var runReach {.compileTime.}: Table[string, seq[string]]
 var runSeen {.compileTime.}: seq[string]
 var runUnknown {.compileTime.}: string
 
+type CompileReplay = object
+  ## RFC-0016 int6-a6. Nim's compile order replayed over the user modules
+  ## (`replayCompileOrder`).
+  done, exact: bool
+  why: string                       ## why not `exact`: the coarse reading stands
+  entry: Table[string, CheckState]  ## per user module, the state it is first compiled from
+  compiled: seq[string]             ## user keys and `lib:` targets, in compile order
+  libTaint: set[CheckOption]
+    ## what an import under a push may hand a library module it first
+    ## compiles: every library routine but `system`'s reads as under it
+  callAt: string                    ## the first module-level call, in compile order
+
+var runReplay {.compileTime.}: CompileReplay
+
 proc beginCheckOptionRun*() =
   ## Each entry macro's parse: what one program's importers leak is its own.
   runLeaks.setLen 0
   runSeen.setLen 0
   runUnknown = ""
   runReach.clear()
+  runReplay = CompileReplay()
 
 proc reachOf(start: string): seq[string] =
   ## `start` and the user modules its imports reach.
@@ -274,6 +300,164 @@ proc enterGraph(startRaw: string) =
           runReach[key & "|" & l.name] = reachOf(i)
           break
     for i in m.imports: queue.add i
+
+proc namesImportSwitch*(text: string): bool =
+  ## RFC-0016 int6-a6. Does a configuration text (a `nim.cfg`, a `.nims`, the
+  ## command line) set `import` or `include`: `--import:x`, `import = x`,
+  ## `switch("import", x)`? Comments after `#` are skipped; `cincludes:`,
+  ## `importc:` and a NimScript `import`/`include` statement are not it.
+  for raw in text.splitLines:
+    var line = raw
+    let h = line.find('#')
+    if h >= 0: line = line[0 ..< h]
+    let l = line.toLowerAscii
+    for word in ["import", "include"]:
+      var i = l.find(word)
+      while i >= 0:
+        let before = if i == 0: ' ' else: l[i - 1]
+        var j = i + word.len
+        while j < l.len and l[j] in {' ', '\t'}: inc j
+        let after = if j < l.len: l[j] else: ' '
+        if before notin {'a' .. 'z', '0' .. '9', '_'} and
+           (after in {':', '='} or (before == '"' and after == '"')):
+          return true
+        i = l.find(word, i + 1)
+
+var configImportRead {.compileTime.}: bool
+var configImportWhy {.compileTime.}: string
+
+proc configuredImport(): string =
+  ## RFC-0016 int6-a6. "" or where `--import:`/`--include:` is set: the command
+  ## line, or a configuration file the compiler reads (its own `config/`, the
+  ## user's, every directory from the project's up, `<project>.nim.cfg` and
+  ## `<project>.nims`). A module so imported is compiled ahead of the
+  ## program's own imports, and the scan does not read it. Read once.
+  if configImportRead: return configImportWhy
+  configImportRead = true
+  if namesImportSwitch(querySetting(commandLine)):
+    configImportWhy = "the command line sets `--import` or `--include`"
+    return configImportWhy
+  var files: seq[string]
+  let globalDir = configuredLibDir.parentDir / "config"
+  files.add globalDir / "nim.cfg"
+  files.add globalDir / "config.nims"
+  for v in ["XDG_CONFIG_HOME", "APPDATA"]:
+    if getEnv(v).len > 0: files.add getEnv(v) / "nim" / "nim.cfg"
+  if getEnv("HOME").len > 0:
+    files.add getEnv("HOME") / ".config" / "nim" / "nim.cfg"
+    files.add getEnv("HOME") / ".config" / "nim" / "config.nims"
+  let proj = querySetting(projectPath)
+  let name = querySetting(projectName)
+  files.add proj / name & ".nim.cfg"
+  files.add proj / name & ".nims"
+  var dir = proj
+  while dir.len > 0:
+    files.add dir / "nim.cfg"
+    files.add dir / "config.nims"
+    let up = dir.parentDir
+    if up == dir: break
+    dir = up
+  for f in files:
+    if fileExists(f) and namesImportSwitch(staticRead(f)):
+      configImportWhy = "`" & f & "` sets `--import` or `--include`"
+      return configImportWhy
+  ""
+
+proc replayFail(why: string) =
+  if runReplay.exact:
+    runReplay.exact = false
+    runReplay.why = why
+
+proc isUserTarget(t: string): bool =
+  not t.startsWith("lib:") and not t.startsWith("lib?:") and
+    not t.startsWith("?")
+
+proc replayModule(raw: string; start: CheckState) =
+  ## Compiles the user module `raw` from `start`, as the first import that
+  ## reaches it does, and in turn each module its statements first compile.
+  let key = normalPath(raw)
+  runReplay.compiled.add key
+  runReplay.entry[key] = start
+  let m = scanOf(key, raw, start)
+  if m.unknown.len > 0:
+    replayFail("`" & raw.extractFilename & "`: " & m.unknown)
+    return
+  for ev0 in m.events:
+    if not runReplay.exact: return
+    # Nelli's own modules are library ones, as `enterGraph` reads them,
+    # however the search path spelled them.
+    var ev = ev0
+    for t in ev.targets.mitems:
+      if isUserTarget(t):
+        let r = anchored(t)
+        let k = normalPath(if r.len > 0: r else: t)
+        if isOwnRuntime(k) or isOwnSource(k): t = "lib:" & k
+    let dev = deviation(ev.st) - deviation(commandLineChecks)
+    let at = "`" & ev.file.extractFilename & ":" & $ev.line & "`"
+    if ev.call:
+      if dev != {}:
+        replayFail("a module-level call at " & at & " runs with " & $dev &
+                   " pushed and may be a macro or template that imports")
+        return
+      if runReplay.callAt.len == 0: runReplay.callAt = at
+      continue
+    if ev.uncertain:
+      if dev != {}:
+        replayFail("the import at " & at & " under a push is under a `when` " &
+                   "the scan does not decide")
+        return
+      for t in ev.targets:
+        if isUserTarget(t):
+          replayFail("the import at " & at & " of a user module is under a " &
+                     "`when` the scan does not decide")
+          return
+      continue      # a library module so imported is not proven compiled
+    if dev != {} and runReplay.callAt.len > 0:
+      replayFail("the module-level call at " & runReplay.callAt & " comes " &
+                 "before the import at " & at & " under a push, and may be a " &
+                 "macro or template that imports")
+      return
+    for t in ev.targets:
+      if t.startsWith("?"):
+        if dev != {}:
+          replayFail("the import at " & at & " under a push names a module " &
+                     "the scan cannot find")
+          return
+      elif not isUserTarget(t):
+        if t in runReplay.compiled or
+           (t.startsWith("lib:") and isSystemFile(t[4 .. ^1])):
+          continue
+        # A library module's own imports are not read: under a push, any
+        # library module may be first compiled here.
+        if dev != {}: runReplay.libTaint = runReplay.libTaint + dev
+        if t.startsWith("lib:"): runReplay.compiled.add t
+      else:
+        let raw2 = anchored(t)
+        let k2 = normalPath(if raw2.len > 0: raw2 else: t)
+        if k2 notin runReplay.compiled:
+          replayModule(if raw2.len > 0: raw2 else: t, ev.st)
+
+proc replayCompileOrder() =
+  ## RFC-0016 int6-a6. Nim's compile order over the program, once per run:
+  ## `system` first, then from the project file depth first, each user module
+  ## scanned from the state at the import that first compiles it, which a
+  ## push open there reaches. Not exact (`why`), and the coarse reading
+  ## stands, where an import under a push is under an undecided `when`, a
+  ## module-level call (a possible importing macro) comes before an import
+  ## under a push or runs under one, or `--import:` is configured. A library
+  ## module is never scanned: one an import under a push names, and no
+  ## earlier import compiled, taints every library routine (`libTaint`).
+  ## Cost: each user module is scanned once from the state it is first
+  ## compiled from, beside its command-line scan (`scanOf` keys by state).
+  if runReplay.done: return
+  runReplay = CompileReplay(done: true, exact: true)
+  let cfg = configuredImport()
+  if cfg.len > 0:
+    replayFail(cfg)
+    return
+  let proj = querySetting(projectFull)
+  let raw = anchored(proj)
+  replayModule(if raw.len > 0: raw else: proj, commandLineChecks)
 
 type RoutineChecks* = object
   checks*: set[CheckOption]
@@ -323,7 +507,9 @@ type RoutineChecks* = object
     ## RFC-0016 int6. Of the four checks (range, bound, field, object) and,
     ## int6-o, `overflowChecks`, those
     ## on in the build and off at the routine's position on every reading, in
-    ## a user module, with no importer's push reaching it: the routine is
+    ## a user module, with no importer's push reaching it (RFC-0016 int6-a6:
+    ## where the compile order is replayed, a push the import that first
+    ## compiled the module was under is its position's state): the routine is
     ## walked with them off (its body's check scope leaves them out; for
     ## `coOverflow` its body is stamped `asPushedOff`), as the
     ## build route walks a build that has them off. They are not in `checks`.
@@ -540,26 +726,39 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if moduleScans[root].unknown.len > 0:
     return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
                          why: moduleScans[root].unknown)
+  # RFC-0016 int6-a6: the compile order replayed. A user module it reaches is
+  # read from the state it was first compiled from; a library one takes what
+  # an import under a push may hand it (`libTaint`).
+  replayCompileOrder()
+  let rootLib = isLibraryFile(root, configuredLibDir)
+  let replayed = runReplay.exact and (rootLib or root in runReplay.entry)
+  let scan =
+    if replayed and not rootLib: scanOf(root, rootRaw, runReplay.entry[root])
+    else: moduleScans[root]
+  if scan.unknown.len > 0:
+    return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
+                         why: scan.unknown)
   # RFC-0016 int6-w: the scan's text is read from disk when a macro first asks,
   # not when the compiler parsed the module; a file edited in between places
   # the routine against pushes it was not compiled under. Not read, then.
   if not isStdlibFile(file):
-    let stale = textDisagrees(moduleScans[root], file,
+    let stale = textDisagrees(scan, file,
                               nameOf(if impl[0].kind == nnkPostfix: impl[0][1]
                                      else: impl[0]), li.line)
     if stale.len > 0:
       return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
         why: "the module's text on disk is not the text the compiler parsed: " &
              stale)
-  let st = stateAt(moduleScans[root], file, li.line, li.column)
+  let st = stateAt(scan, file, li.line, li.column)
   # RFC-0016 int6-a2: a position read both ways may be decided by a
   # `defined(x)` the scan could not evaluate; the entry macro asks its call
   # site (`undecidedDefines`) and expands again.
-  if st.maybeOn * st.maybeOff != {}: noteUndecided(moduleScans[root])
+  if st.maybeOn * st.maybeOff != {}: noteUndecided(scan)
   result.checks = deviation(st)
   result.assertsMaybeOff = coAssert in st.maybeOff or
-    coAssert in moduleScans[root].everything.maybeOff
-  # A user's importer hands on what it pushed to any module this walk reaches: the
+    coAssert in scan.everything.maybeOff
+  # The coarse reading, where the compile order is not replayed (`runReplay.why`):
+  # a user's importer hands on what it pushed to any module this walk reaches: the
   # chain from what it names is not read. `system.nim` and `math.nim` import under
   # their own pushes, so a stdlib importer hands it on to what it names alone.
   # Importers are found by the import graph from this module and the project file.
@@ -578,17 +777,26 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
       return RoutineChecks(checks: allChecks, assertsMaybeOff: true, why: runUnknown)
   let moduleName = root.extractFilename.changeFileExt("")
   var leaked: set[CheckOption]
-  for l in runLeaks:
-    if l.root == root: continue
-    let rk = l.root & "|" & l.name
-    let reaches =
-      if l.name == moduleName: true
-      elif rootSystem or isStdlibFile(l.root): false
-      elif rk in runReach: root in runReach[rk] or rootStdlib
-      else: true          # the named module was not found: any may be under it
-    if reaches:
-      result.checks = result.checks + l.opts
-      leaked = leaked + l.opts
+  if replayed:
+    # RFC-0016 int6-a6: a user module's leak is in its scan's start state,
+    # a plain position state; `system` is compiled before any user code.
+    if rootLib and not rootSystem:
+      leaked = runReplay.libTaint
+      result.checks = result.checks + leaked
+  else:
+    # The coarse reading (`runReplay.why`): an importer's push reaches every
+    # module the named one may reach.
+    for l in runLeaks:
+      if l.root == root: continue
+      let rk = l.root & "|" & l.name
+      let reaches =
+        if l.name == moduleName: true
+        elif rootSystem or isStdlibFile(l.root): false
+        elif rk in runReach: root in runReach[rk] or rootStdlib
+        else: true          # the named module was not found: any may be under it
+      if reaches:
+        result.checks = result.checks + l.opts
+        leaked = leaked + l.opts
   if result.checks * defaultOff != {} and not touchesFloat(impl[6]):
     result.checks = result.checks - defaultOff
   # RFC-0016 PRC-07 (float half): a float check on at every reading is walked.
@@ -600,7 +808,7 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
     result.checks.excl coInf
   result.overflowOn = coOverflow notin result.checks
   result.bodyRegions = not isStdlibFile(file)
-  let unreadable = positionUnreadable(impl, file, li.line, st, moduleScans[root],
+  let unreadable = positionUnreadable(impl, file, li.line, st, scan,
                                       result.bodyPragmas)
   if unreadable.len > 0:
     result.why = "the routine's range, bound, field, object or overflow checks differ " &
@@ -617,7 +825,7 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   # text is the scan's (`stdlibDefClean`), so a pragma inside its definition
   # is seen; one that names any of the checks leaves them deviations.
   let stdlibClean = rootStdlib and result.why.len == 0 and
-                    stdlibDefClean(impl, file, li.line, moduleScans[root])
+                    stdlibDefClean(impl, file, li.line, scan)
   if result.why.len == 0 and (not rootStdlib or stdlibClean):
     for co in scopedChecks * buildSemantics.checks:
       if co in result.checks and co in st.maybeOff and co notin st.maybeOn and

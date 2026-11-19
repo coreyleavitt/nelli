@@ -1474,6 +1474,12 @@ const renderAsChoicesVersion* = "12"
   ##   `feCheckOption`; unbalanced shapes still decline, and the opaque
   ##   defect scan reads such a body as unreadable. Key bytes change: such a
   ##   body's region blocks, their scope and stamp.
+  ##   RFC-0016 int6-a6 (also 477): a push open at the import that first
+  ##   compiles a user module (Nim's compile order, replayed from the
+  ##   project file) is that module's position state, walked as such, where
+  ##   it was a leak that declined `feCheckOption`; a stdlib module compiled
+  ##   before the push is not reached. Key bytes change: such a body's
+  ##   scope, stamp and digest.
 
 const symexWalkerVersion* = "477"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

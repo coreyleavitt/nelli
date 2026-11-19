@@ -2107,8 +2107,14 @@ task test, "Run the test suite":
             "tsymex_0016_int6w_scantext",
             # RFC-0016 int6-a: a stdlib routine under its module's push is walked under that scope; ambiguous and float positions still decline.
             "tsymex_0016_int6a_scopes",
-            # RFC-0016 int6-a: a push leaked through an import still declines, and is read as reaching the stdlib.
+            # RFC-0016 int6-a: a push leaked through an import reaches the modules that import first compiles (the compile order replayed), and no stdlib module compiled before it.
             "tsymex_0016_int6a_leak",
+            # RFC-0016 int6-a: the leak fallbacks keep the coarse reading: an undecided when, a call before or under the push, a configured import, a stdlib import.
+            "tsymex_0016_int6a_leakwhen",
+            "tsymex_0016_int6a_leakcall",
+            "tsymex_0016_int6a_leakcallin",
+            "tsymex_0016_int6a_leakcfg",
+            "tsymex_0016_int6a_leaklib",
             # RFC-0016 K2: a c_longdouble value from an element, slot, dereference or cast declines, never faults.
             "tsymex_0016_k2_longdouble_sentinel",
             # RFC-0016 INT-82: an allocation is distinct from every object of the walk's entry state (parameters, what they reach, globals).

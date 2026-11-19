@@ -111,6 +111,20 @@ where that note does not yet cover it.
   be undefined"): it read the body as one scope, so in a `--boundChecks:off`
   build a handler for the `IndexDefect` of a `boundChecks: on` region was a
   trusted false `sxUnsat`.
+- **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
+  scan replays Nim's compile order (`system` first, then the import graph
+  depth first from the project file, each module at the first import that
+  reaches it): a user module first compiled under a `{.push rangeChecks:
+  off.}` is walked under it as a position state, and so is what it first
+  compiles, where both declined `feCheckOption`. A module compiled before the
+  push keeps its checks, and a stdlib routine of a module no import under a
+  push names is no longer read as under it. The coarse reading (decline)
+  stands where the order cannot be replayed: an import under a push and an
+  undecided `when`, a module-level call (a possible importing macro) before
+  or under such an import, `--import:`/`--include:` on the command line or
+  in a configuration file; and a stdlib module imported under a push that no
+  earlier import compiled still makes every library routine read as under
+  it.
 - **Scanner text guard** (migration 1, int6-w, walker 468). The region reads
   place a routine in its module's text, read from disk during the compile. A
   routine whose text on disk ends before its position, or defines its name but

@@ -14,9 +14,10 @@
 ##     macro has its call site evaluate each `defined(x)` and expands again,
 ##     so both are walked exactly; a `when` on a `const` still declines
 ##     (`ambConst` keeps 300);
-##   * leaked: in `tsymex_0016_int6a_leak` (its own file: a user import
-##     under a push is read as reaching every stdlib module, which would
-##     taint the stdlib rows here);
+##   * leaked: in `tsymex_0016_int6a_leak` (its own file: the compile
+##     order is replayed per program, and its fallbacks, each its own
+##     program, read an import under a push as reaching every stdlib
+##     module, which would taint the stdlib rows here);
 ##   * float: a routine under `when defined(int6aPushed): {.push nanChecks:
 ##     on.}` raises `FloatInvalidOpDefect` on `inf - inf`, and one under
 ##     `when defined(int6aNotDefined)` reaches the label with a NaN; under

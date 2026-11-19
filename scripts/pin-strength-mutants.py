@@ -49,7 +49,6 @@ SCOPES = [
     ("lowerArith", r"^proc lowerArith\*?\(", None),
     ("lowerCmp", r"^proc lowerCmp\*?\(", None),
     ("lowerConvIntRange", r"^proc lowerConvIntRange\*?\(", None),
-    ("forkAssignRangeCheck", r"^proc forkAssignRangeCheck\*?\(", None),
     ("lowerExpr.uNeg", r"^    of uNeg:\s*$", r"^    of uNot:\s*$"),
     ("drain.DivByZero", r"^genRaiseForkDrain\(drainDivByZeroRaises,", None),
     ("drain.Overflow", r"^genRaiseForkDrain\(drainOverflowRaises,", None),
@@ -121,7 +120,6 @@ FAMILIES = {
     "lowerArith": ARITH,
     "lowerCmp": BV,
     "lowerConvIntRange": BOUND + CMP,
-    "forkAssignRangeCheck": DEFECT,
     "lowerExpr.uNeg": [],
     "drain.DivByZero": DEFECT,
     "drain.Overflow": DEFECT,
@@ -156,7 +154,7 @@ DROP_BRANCH = {
     "lowerExpr.uNeg": re.compile(r"[sS]igned"),
     "lowerConvIntRange": re.compile(r"conds\.len > 0"),
 }
-FORCE_RETURN_SCOPES = {"forkAssignRangeCheck", "wrapIntToWidth", "depositSignedOverflow"}
+FORCE_RETURN_SCOPES = {"wrapIntToWidth", "depositSignedOverflow"}
 
 
 def code_part(line):

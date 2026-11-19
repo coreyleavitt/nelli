@@ -16778,63 +16778,6 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
     laxSurv.defectSurvivorPc.add anyLax
     result.add laxSurv
 
-proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
-                          w: var WalkCtx): Path =
-  ## Issue #163 review R22. `nelli/symex`'s ONLY prior `RangeDefect` fork was
-  ## R16-2's float→int conversion fork (reversed by RFC-0005 S8g: Nim
-  ## never raises there) — an assignment
-  ## into a `range[lo..hi]`-typed local (`var v: range[1..100]; v = x + y`)
-  ## forked NOTHING: `symexFind` could never locate a genuine `RangeDefect`
-  ## at such a site. This closes that gap for `isAssign` targets whose
-  ## declared type the parser can resolve by true symbol identity — see
-  ## `IRStmt.isAssign.aty`'s doc comment (`types.nim`). #163 review R27
-  ## replaced the original WalkCtx-wide, name-keyed `localRangeTypes` table
-  ## this comment used to point to — that table collided across sibling
-  ## branches and inlined call frames; `aty` is parse-time-resolved per
-  ## statement instead, with no shared mutable state to collide.
-  ##
-  ## Mirrors R16-2's (since-retired) float→int raise-and-narrow pair's
-  ## combined two-obligation shape (not `genRaiseForkDrain`'s ValueError/
-  ## OverflowDefect/DivByZeroDefect/IndexDefect family): fork the
-  ## out-of-range sub-path as a routed raise, and hard-narrow the survivor's
-  ## `pc` to the in-range domain — exactly as that bounds-drain narrowed a
-  ## float→int conversion's
-  ## survivor to its valid domain.
-  ##
-  ## Precision (the caller-mandated "do not fork when provably in range"
-  ## case): if `av`'s own interval (`ziIvl`, issue #161 slice 2's sound
-  ## over-approximation, already populated for a promoted `range[lo..hi]`
-  ## param and propagated through `arithInt`) already fits inside
-  ## `targetTy`'s declared bounds, the obligation is statically discharged —
-  ## no fork, no solver call — reusing `tryDischargeOverflowInt`'s own
-  ## reasoning (`abstraction.nim`) rather than re-deriving it. `av.ziIvl`
-  ## is `none` for anything not traced (a bare literal, a BV-represented
-  ## value under `isExact`, a field/seq/call-return read, ...) — the
-  ## obligation then stays LIVE (forked), which can only ever cost a
-  ## redundant solver fork, never delete a real defect path.
-  if av.kind == svInt and av.ziIvl.isSome and
-     av.ziIvl.get.lo >= targetTy.rangeLo and av.ziIvl.get.hi <= targetTy.rangeHi:
-    return cp   ## provably in range: no fork, no solver call.
-  let conds = rangeCondsIfNeeded(av, targetTy, holes = false)  # INT-84: a check
-  if conds.len == 0:
-    return cp   ## `av`'s kind carries no bound assertion (e.g. a degrade
-                ## placeholder reaching an itInt target) — honest-incomplete,
-                ## matching `bvRangeConds`'s own `else` contract.
-  if coRange notin buildSemantics.checks:  ## build-only: range is no regime
-    # Same gate `drainRangeRaises` uses, but this site's OWN
-    # off-behaviour matches `genRaiseForkDrain`'s family instead of
-    # float→int's: when the check is disabled the assignment is not
-    # modeled at all (no fork AND no narrowing) so `v`'s value stays
-    # exactly what it was before this fix — honest-incomplete, not a
-    # forced narrowing to "valid" that unchecked semantics never promised.
-    return cp
-  var inRangeCond = conds[0]
-  for i in 1 ..< conds.len: inRangeCond = inRangeCond and conds[i]
-  let raisePath = forkPath(cp, cp.pc & @[not inRangeCond], cp.env)
-  discard routeRaise(raisePath, "RangeDefect",
-                     some("value out of range"), w)
-  forkPath(cp, cp.pc & @[inRangeCond], cp.env)
-
 ## Phase 16 R16-3. div/mod-by-zero predicates from `lowerArith` (bDiv/bMod on
 ## svInt or BV operands). Gated by `acDivByZero`: when disabled, honest-
 ## incomplete (the division result is still usable, matching pre-R16-3
@@ -20227,14 +20170,7 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
             survivors.add forkPathTainted(vp, vp.pc & @[inLoCond, inHiCond],
                                           vp.env, d)
             continue
-          # A `range[lo..hi]` element type forks its RangeDefect exactly as
-          # the seq arm below does (#163 review R22 site 3).
-          let vpRanged =
-            if elemTy != nil and elemTy.kind == itInt and elemTy.hasRange and
-               not carriesRangeCheck(stmt.iaVal, elemTy):
-              forkAssignRangeCheck(vp, valSV, elemTy, w)
-            else: vp
-          let vpM = drainPendingLowerEffects(vpRanged)
+          let vpM = drainPendingLowerEffects(vp)
           var newEnv = vpM.env
           newEnv[stmt.iaRecvName] = SymVal(kind: svArray,
             arrElems: arrayStore(recvSV.arrElems, idxSV, stmt.iaLo, aligned.get),
@@ -20302,20 +20238,6 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
           survivors.add unbackedElemSurvivor(vp, vp.pc & @[inLoCond, inHiCond],
             envD, recvSV, stmt.iaLoc, "an element store", w)
           continue
-        # #163 review R22 site 3: a seq element write whose declared
-        # element type is `range[lo..hi]` forks exactly like the plain
-        # field write (site 1) and `isAssign`'s own local-variable case --
-        # see `forkAssignRangeCheck`'s doc comment. The declared type is
-        # already live on `recvSV.seqElemTy` (the SAME field
-        # `seqElemLitProto` above already reads), so no new IR field is
-        # needed. Checked BEFORE `storeSeqElem` (whose own internal
-        # svInt->BV reconciliation is independent of this) so the
-        # discharge can still see `valSV`'s `ziIvl`.
-        let vpRanged =
-          if recvSV.seqElemTy.kind == itInt and recvSV.seqElemTy.hasRange and
-             not carriesRangeCheck(stmt.iaVal, recvSV.seqElemTy):   # RFC-0005 S8j
-            forkAssignRangeCheck(vp, valSV, recvSV.seqElemTy, w)
-          else: vp
         # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`); a
         # value that does not fit declines on this path.
         let storedOpt = seqStoreArrs(recvSV, idxZi, valSV)
@@ -20326,14 +20248,14 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
             "isIndexAssign: a " & plainEnglishSymValKind(valSV.kind) &
             " that does not fit an element of the seq (" &
             $recvSV.seqElemTy & ") (" & $kind & ")")
-          var envD = vpRanged.env
+          var envD = vp.env
           var scratch: seq[Z3Bool]
           envD[stmt.iaRecvName] = allocateSym(
             tUnsupportedFieldSeq(recvSV.seqElemTy, "a store that does not " &
               "fit the element type", kind = kind),
             freshDegradeName("__seqAssignDecline"), scratch)
-          survivors.add forkPathTainted(vpRanged,
-            vpRanged.pc & @[inLoCond, inHiCond], envD, d)
+          survivors.add forkPathTainted(vp,
+            vp.pc & @[inLoCond, inHiCond], envD, d)
           continue
         # N27 audit (item 1, round-6 fix round 3): rebinding the receiver
         # after a successful store. `recvSV` was already declined above
@@ -20341,10 +20263,10 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
         # of the `for p in paths` loop, `continue`d on the placeholder
         # branch) and is never reassigned before this point — the
         # `.seqLen` read below is reached only on the non-placeholder path.
-        var newEnv = vpRanged.env
+        var newEnv = vp.env
         newEnv[stmt.iaRecvName] = mkSeqSV(recvSV.seqLen, storedOpt.get, # [placeholder-audited]
           recvSV.seqElemTy)
-        survivors.add forkPath(vpRanged, vpRanged.pc & @[inLoCond, inHiCond], newEnv)
+        survivors.add forkPath(vp, vp.pc & @[inLoCond, inHiCond], newEnv)
   exact(survivors)
 
 proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
@@ -22432,18 +22354,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
       let (av, pb) = lowerInExpr(p, stmt.avalue, w,
                                  envLitProto(p.env, stmt.aname))
       for cp0 in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
-        ## #163 review R27 (was R22): `stmt.aty` is the target's declared
-        ## range type, resolved at PARSE TIME by true symbol identity
-        ## (`classifyType` on the real `nnkSym` this statement's target
-        ## resolved from — see `IRStmt.isAssign.aty`'s doc comment). Forks a
-        ## RangeDefect raise for an out-of-range `av` (see
-        ## `forkAssignRangeCheck`'s doc comment) — a no-op when `stmt.aty`
-        ## is nil (the ordinary case: no declared range, or not `itInt`).
-        let cp = if stmt.aty != nil: forkAssignRangeCheck(cp0, av, stmt.aty, w)
-                 else: cp0
-        var newEnv = cp.env
+        ## A range target's `RangeDefect` is its RHS conversion's
+        ## (`lowerConvIntRange`), drained above with the other raises.
+        var newEnv = cp0.env
         newEnv[stmt.aname] = av
-        out2.add forkPath(cp, cp.pc, newEnv)
+        out2.add forkPath(cp0, cp0.pc, newEnv)
     exact(out2)
   of isWhile:
     case w.mode

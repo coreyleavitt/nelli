@@ -1332,8 +1332,12 @@ const renderAsChoicesVersion* = "12"
   ##   signed base under overflow checks), `i = i + 1` raises `RangeDefect`
   ##   (under range checks), and unchecked the side declines. The `inc`
   ##   spelling was a trusted `sxRaised` `RangeDefect` Nim never raises,
-  ##   and a false `sxUnsat` for its `OverflowDefect`. The write's `aty` is
-  ##   nil.
+  ##   and a false `sxUnsat` for its `OverflowDefect`. And a store into a
+  ##   range target is checked by its RHS conversion alone
+  ##   (`lowerConvIntRange`): `*=` on a range local is the product converted
+  ##   into the range, a `char` converted into a `char` range takes the
+  ##   conversion arm, and the walker's site check (`forkAssignRangeCheck`,
+  ##   `isAssign.aty`) is deleted, so every assignment's key loses `;aty=`.
 
 const symexWalkerVersion* = "457"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
@@ -7482,15 +7486,10 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Lt:$" & $slot & ":" & canonicalize(s.lty) & "=" &
       canonicalize(s.lvalue, env) & ">"
   of isAssign:
-    # #163 review R27: `aty` (the target's declared range type, resolved by
-    # true symbol identity at parse time, replacing R22's unscoped
-    # name-keyed WalkCtx table) is now part of the statement's semantic
-    # identity -- two programs differing only in whether the walker treats
-    # this assignment as range-checked must not collide on one cache key.
-    # `canonicalize(IRType)` is already nil-safe ("Ty<nil>" for the common
-    # untracked case), mirroring `isCall`'s own `;opaque=`/`;inert=` idiom.
+    # RFC-0016 K9e: no `;aty=` -- a range target's check is the value's own
+    # conversion, rendered with it.
     "St<As:" & lookupLocal(env, s.aname) & "=" &
-      canonicalize(s.avalue, env) & ";aty=" & canonicalize(s.aty) & ">"
+      canonicalize(s.avalue, env) & ">"
   of isWhile:
     "St<W:" & canonicalize(s.wcond, env) & ";body=" &
       canonicalize(s.wbody, env) & ">"

@@ -68,7 +68,7 @@ const
     "crashRaise", "deadElemRefs",
     "degrade", "discConst", "drainPendingLowerEffects",
     "drainScalarRaiseForks", "effectiveHeapDepthLimit", "entryValueOf",
-    "exact", "fieldsUnchecked", "forkAssignRangeCheck", "forkDefect",
+    "exact", "fieldsUnchecked", "forkDefect",
     "forkPath", "forkPathTainted", "freshnessCapHints", "globalEntryVals",
     "globalHiddenRoute", "globalInitValue", "guardLiteral", "halted",
     "heapEpochPrefix", "heapInputName", "heapKeyValTy", "imgReadDef",

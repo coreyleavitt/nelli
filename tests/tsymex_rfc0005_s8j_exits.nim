@@ -504,8 +504,8 @@ proc seqWrite(s: var seq[range[1..100]]; x: int) =
 
 proc rangeChecks(canon: string): int =
   ## Range checks in a canonical program: every range-carrying int
-  ## conversion (`Ex<CIW:...:lo..hi:`) plus every range-typed assignment
-  ## target (`;aty=` other than nil).
+  ## conversion (`Ex<CIW:...:lo..hi:`). RFC-0016 K9e: an assignment carries
+  ## no check of its own (`;aty=` is gone with the walker's site check).
   var i = 0
   while true:
     let j = canon.find("Ex<CIW:", i)
@@ -516,7 +516,6 @@ proc rangeChecks(canon: string): int =
     let colon = canon.find(':', k)
     if colon > 0 and ".." in canon[k ..< colon]: inc result
     i = j + 1
-  result += canon.count(";aty=") - canon.count(";aty=Ty<nil>")
 
 suite "S8j (4) a plain assignment to a range variable checks once":
   test "oracle":
@@ -540,10 +539,13 @@ suite "S8j (4) a plain assignment to a range variable checks once":
     # scan (`dupScan`) read the type child's `..` as a call.
     check canonicalize(progOf(castRangeAnon)).len > 0
 
-  test "q += 1 keeps its assignment check":
+  test "q += 1 is checked by its step alone":
+    # `+=` is the `Inc` magic: past the range it raises `OverflowDefect`
+    # (RFC-0005 R1-02), the only check; no range conversion is stored.
     let canon = canonicalize(progOf(assignRangeInc))
     checkpoint(canon)
-    check rangeChecks(canon) == 1
+    check rangeChecks(canon) == 0
+    check "OverflowDefect" in canon
 
   test "the verdicts are unchanged":
     let r = symexFind(assignRange, tRaisedExn("RangeDefect"))
@@ -557,9 +559,8 @@ suite "S8j (4) a plain assignment to a range variable checks once":
       check reproduces(assignRange(s.witness[0]), "s8j_assign_range")
 
 # A field write and a seq element write carry the same hidden conversion;
-# the walker's site check (`forkAssignRangeCheck`) skips a value that
-# already carries it (`carriesRangeCheck`). Probe: `p.v = 0` and
-# `s[0] = 101` each raise one RangeDefect.
+# it is their only check (RFC-0016 K9e deleted the walker's separate site
+# check). Probe: `p.v = 0` and `s[0] = 101` each raise one RangeDefect.
 
 suite "S8j (4b) a field or seq element write checks once, verdicts unchanged":
   test "oracle":

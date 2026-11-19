@@ -659,10 +659,7 @@ proc noCopyMemExpr(t: IRType): NimNode =
   newCall(nnkBracketExpr.newTree(bindSym"symexNoCopyMem", sym))
 
 proc emitIRType*(t: IRType): NimNode =
-  # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
-  # target has no declared range, or isn't `itInt` at all) -- mirror
-  # `emitStmt`'s own `s == nil` guard so a nil `aty` round-trips as `nil`
-  # instead of crashing on `t.kind` here.
+  # A nil type round-trips as `nil`, as `emitStmt`'s `s == nil` guard does.
   if t == nil:
     return newNilLit()
   case t.kind
@@ -965,8 +962,7 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue),
             newLit(s.lIsIntOffsetLocal))
   of isAssign:
-    newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue),
-            emitIRType(s.aty))
+    newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue))
   of isWhile:
     newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody),
             newLit(s.wHasAssumedBound))
@@ -13710,7 +13706,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
          (n.typeKind in {ntyRange, ntyEnum} or isRuneTyped(n)) and
          operand.typeKind in {ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
                               ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32,
-                              ntyUInt64, ntyRange, ntyEnum} and
+                              ntyUInt64, ntyRange, ntyEnum, ntyChar} and
          classifyType(n).ty.kind == itInt and classifyType(n).range.hasRange and
          classifyType(operand).ty.kind == itInt:
       # RFC-0005 S8i: an integer converted to a `range` or enum target
@@ -22986,22 +22982,10 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
       let classified = classifyType(lhs)
       if classified.ty.kind in {itRef, itPtr}:
         return mkNewT(nm, classified.ty)
-    let val = asgnRhs()
-    # #163 review R27: resolve the target's declared range type by TRUE
-    # SYMBOL IDENTITY (`classifyType(lhs)`, `lhs` being the real `nnkSym`
-    # this assignment targets — not its printed name) so the walker's
-    # RangeDefect fork (`forkAssignRangeCheck`) can find it without the
-    # unscoped, name-keyed `WalkCtx` table R22 used to route through.
-    # RFC-0005 S8j: nil too when `val` is itself the range-checked
-    # conversion into the target's bounds (S8i: the hidden conversion Nim
-    # puts on `q = x`, or an explicit `q = R(x)`) -- one check, as Nim
-    # makes, not the conversion's and then this site's.
-    let assignCls = classifyType(lhs)
-    let assignTy = if assignCls.ty.kind == itInt and assignCls.ty.hasRange and
-                      not carriesRangeCheck(val, assignCls.ty):
-                     assignCls.ty
-                   else: nil
-    return mkAssign(nm, val, assignTy)
+    # A range target's check is the conversion Nim puts on the RHS (S8i:
+    # the hidden one on `q = x`, or an explicit `q = R(x)`), lowered with
+    # it. An RHS of the target's own type has none and Nim checks nothing.
+    return mkAssign(nm, asgnRhs())
   # Phase 11 cycle 6: `obj.kind = tagLiteral` — discriminator
   # reassignment. Requires (a) the object to be a Sym in env,
   # (b) the field to be the variant's discriminator name, and
@@ -24648,19 +24632,7 @@ proc parseStmtInner(n: NimNode,
       let nm = recv.strVal
       let stepIR = if n.len >= 3: parseExpr(n[2], preamble, ctx) else: mkIntLit(1)
       let bop = if n[0].strVal == "inc": bAdd else: bSub
-      # #163 review R27: `inc`/`dec` on a ranged receiver raises RangeDefect
-      # in real Nim exactly like a plain assignment — resolve by true
-      # symbol identity, same as the plain-assign arm above.
       let incCls = classifyType(recv)
-      # #163 review (rev item 3, R30): match the five sibling `aty` sites'
-      # gate (plain-assign, aug-assign, and the three scan-recognizer sites)
-      # by also checking `.kind == itInt` rather than `hasRange` alone — a
-      # `hasRange` type always classifies `itInt` at THIS site today (the
-      # `inc`/`dec` receiver gate above already requires `itInt`), so this is
-      # a consistency fix, not a behavior change: one way this check is done.
-      let incTy = if incCls.ty.kind == itInt and incCls.ty.hasRange:
-                    incCls.ty
-                  else: nil
       # RFC-0005 review R1-02: an enum, a `char` or a `range` receiver is
       # checked against its own type's bounds, `OverflowDefect` outside them
       # (probed: `inc` of 3 in a `range[0..3]` variable raises
@@ -24668,12 +24640,12 @@ proc parseStmtInner(n: NimNode,
       var lo, hi: int64
       case ordStepBounds(recv, ownRange = true, lo, hi)
       of oscIntFamily:
-        return mkAssign(nm, siteBinop(bop, mkVar(nm), stepIR, n), incTy)
+        return mkAssign(nm, siteBinop(bop, mkVar(nm), stepIR, n))
       of oscBounds:
         let stepTy = if n.len >= 3: classifyType(n[2]).ty else: nil
         let checked = checkedOrdinalStep(mkVar(nm), incCls.ty, stepIR,
           stepTy, bop == bAdd, lo, hi, preamble, ctx)
-        if checked != nil: return mkAssign(nm, checked, incTy)
+        if checked != nil: return mkAssign(nm, checked)
       of oscUnknown: discard
       ctx.declineAtSite(feUnsupportedOp,
         siteMsg(n, "`" & n[0].strVal & "` on `" & recv.repr &
@@ -25232,9 +25204,6 @@ proc parseStmtInner(n: NimNode,
               &"sxUnknown (sound, Invariant 3)")
         let bop      = binopForInfix(baseOpStr)
         let rhsIR    = parseExpr(n[2], preamble, ctx)
-        # #163 review R27: `+=`/`-=`/`*=` on a ranged receiver raises
-        # RangeDefect in real Nim exactly like a plain assignment —
-        # resolve by true symbol identity, same as the plain-assign arm.
         let augCls = classifyType(lhs)
         let augTy = if augCls.ty.kind == itInt and augCls.ty.hasRange:
                       augCls.ty
@@ -25247,13 +25216,32 @@ proc parseStmtInner(n: NimNode,
           if ordStepBounds(lhs, ownRange = true, lo, hi) == oscBounds:
             let checked = checkedOrdinalStep(mkVar(nm), augTy, rhsIR,
               classifyType(n[2]).ty, baseOpStr == "+", lo, hi, preamble, ctx)
-            if checked != nil: return mkAssign(nm, checked, augTy)
+            if checked != nil: return mkAssign(nm, checked)
           return ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`" & augOp.strVal & "` on `" & lhs.repr &
                     "`: the bounds of its type are not modelled -- path " &
                     "degraded to sxUnknown"),
             "`" & augOp.strVal & "` on this receiver is not modelled")
-        return mkAssign(nm, siteBinop(bop, mkVar(nm), rhsIR, n), augTy)
+        let opIR = siteBinop(bop, mkVar(nm), rhsIR, n)
+        if augTy != nil:
+          # RFC-0016 K9e: the other system `op=` on an integer is `*=`, the
+          # routine `x = x * y`: the product is taken in the base type
+          # (`OverflowDefect` there, `siteBinop`) and stored through the
+          # range conversion Nim puts on it, `RangeDefect` outside the range
+          # (probed: `v *= 4` at `v == 3` in a `range[0..10]` raises). That
+          # conversion is compiled in system's routine, so the build's range
+          # check governs it and a caller's `push rangeChecks: off` does not
+          # (probed: it still raises), as `lowerConvIntRange`'s drain is
+          # gated. Any other operator on a range is no system routine.
+          if baseOpStr != "*":
+            return ctx.declineAtSite(feUnsupportedOp,
+              siteMsg(n, "`" & augOp.strVal & "` on `" & lhs.repr &
+                      "`: the operator on a range is not modelled -- path " &
+                      "degraded to sxUnknown"),
+              "`" & augOp.strVal & "` on this receiver is not modelled")
+          return mkAssign(nm, mkConvIntWidth(opIR, augTy.width, augTy.signed,
+            augTy.width, augTy.signed, true, augTy.rangeLo, augTy.rangeHi))
+        return mkAssign(nm, opIR)
       elif lhs.kind == nnkDerefExpr and lhs.len == 1 and
            augOp.strVal != "&=" and
            ((classifyType(lhs).ty.kind == itInt and

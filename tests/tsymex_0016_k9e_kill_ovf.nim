@@ -136,7 +136,7 @@ suite "K9e range: conversion to a range type":
   test "Int operand: range[0..10](10) is in range (upper bound inclusive)":
     check pinFind(intR10Top, tRaisedExn("RangeDefect")).status == sxUnsat
 
-# --- forkAssignRangeCheck ---------------------------------------------------
+# --- a store into a range target ---------------------------------------------
 
 proc asgRange(x, y: range[0 .. 100]) =
   ## x + y reaches 200: outside 1..100 (and 0 + 0 is below it)
@@ -151,19 +151,17 @@ suite "K9e range: assignment into a range local":
     check r.status == sxRaised
     check r.raisedTypeId == "RangeDefect"
 
-# `v = x + y` takes Nim's hidden range conversion (`carriesRangeCheck`, so
-# `isAssign.aty` stays nil and `forkAssignRangeCheck` is not called). An RHS
-# of the target's own type has no conversion: the fork is built (its two
-# bound conditions reached) and its raise side is unsatisfiable, since the
-# value is already confined to the range.
-#
-# `v *= x` does reach the fork with a raise side Nim takes: `system.*=` is
-# `x = x * y`, an `int` product stored into the range, so the store's own
-# conversion raises `RangeDefect` (native: 3 * 4 raises, 3 * 3 does not).
-# The parser lowers it to an assignment whose `aty` is the range (no
-# conversion node), so this is the fork's live raise, and the pin that tells
-# it from the arms behind the discharge (`conds.len == 0`, the `coRange`
-# gate, the routed type).
+# A store into a range target is checked by the conversion Nim puts on its
+# RHS (`lowerConvIntRange`); an RHS of the target's own type has none and
+# raises nothing (the suite below). K9e-r2 deleted the walker's separate
+# site check (`forkAssignRangeCheck`): its one live raise was `v *= x`.
+# `system.*=` is `x = x * y`, an `int` product stored into the range, so the
+# store's conversion raises `RangeDefect` (native: 3 * 4 raises, 3 * 3 does
+# not). The parser now lowers it as that conversion, so these pins fail when
+# `lowerConvIntRange` drops its deposit (mutant `m6f175ffe82`). The
+# conversion is compiled in system's routine, so a caller's `push
+# rangeChecks: off` leaves it checked (native: still raises); the walker
+# declines such a caller whole.
 
 proc mulAsgRange(x: range[0 .. 10]) =
   var v: range[0 .. 10] = 3
@@ -171,11 +169,47 @@ proc mulAsgRange(x: range[0 .. 10]) =
   symexTarget("t")
   discard v
 
+{.push rangeChecks: off.}
+proc mulAsgRangeOff(x: range[0 .. 10]) =
+  var v: range[0 .. 10] = 3
+  v *= x
+  symexTarget("t")
+  discard v
+{.pop.}
+
+proc charAsgRange(ch: char) =
+  var c: range['a' .. 'z'] = 'a'
+  c = ch
+  symexTarget("t")
+  discard c
+
 suite "K9e range: `*=` on a range local":
   test "v *= x raises RangeDefect outside 0..10":
     let r = pinFind(mulAsgRange, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "RangeDefect"
+
+  test "v *= x within 0..10 reaches the label":
+    check pinFind(mulAsgRange, tLabel("t")).status == sxSat
+
+  test "under a caller's push rangeChecks: off, v *= x is never claimed safe":
+    # Nim still raises (system's routine is compiled checked). A routine that
+    # pushes a check off in a checked build declines whole (`pushedOn`), so
+    # the honest verdict is sxUnknown; it must never be sxUnsat.
+    let r = pinFind(mulAsgRangeOff, tRaisedExn("RangeDefect"))
+    checkpoint $r.status
+    check r.status != sxUnsat
+    if r.status == sxRaised:
+      check r.raisedTypeId == "RangeDefect"
+
+suite "K9e range: a char converted into a char range":
+  test "c = ch raises RangeDefect outside 'a'..'z'":
+    let r = pinFind(charAsgRange, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+    check r.raisedTypeId == "RangeDefect"
+
+  test "c = ch inside 'a'..'z' reaches the label":
+    check pinFind(charAsgRange, tLabel("t")).status == sxSat
 
 type R100 = range[1 .. 100]
 type RangeBox = ref object

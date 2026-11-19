@@ -1416,7 +1416,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 INT-90d (a view's fact and splice at the program's own
     ## alias; a splice's bit-vector recorded): 455->456.
     ## RFC-0016 K9e (a scan counter's step past its range raises what the
-    ## step raises: `OverflowDefect` for `inc`): 456->457.
+    ## step raises: `OverflowDefect` for `inc`; a range store is checked by
+    ## its conversion alone, `;aty=` dropped): 456->457.
     check symexWalkerVersion == "457"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

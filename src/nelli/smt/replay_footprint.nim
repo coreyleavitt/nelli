@@ -8,6 +8,7 @@
 ## `CacheTable` for runtime files live here and nowhere else.
 
 import std/[macros, sets, tables, strutils, macrocache, compilesettings]
+from std/os import fileExists
 from ./check_scan import libRelPath
 import ./dsl
 import ./scan_kinds
@@ -244,12 +245,17 @@ proc fileDeclaresHook(path: string): bool =
   ## RFC-0005 S8ct. A type's hooks must be declared in its module. The macro API
   ## cannot ask a type for its hooks, so the module's text is what is read; one
   ## it cannot read counts as declaring them.
+  ## A path with no file behind it (a type declared by code a macro made with
+  ## `parseStmt`, which carries a pseudo path, empty under Windows) is not
+  ## read at all: the compile-time VM's `readFile` raises past the VM, so the
+  ## `try` below cannot catch it and the compiler stops ("cannot open:").
   if path in fileHookMemo: return fileHookMemo[path]
   result = true
-  try:
-    result = textNamesHook(readFile(path))
-  except CatchableError:
-    discard
+  if path.len > 0 and fileExists(path):
+    try:
+      result = textNamesHook(readFile(path))
+    except CatchableError:
+      discard
   fileHookMemo[path] = result
 
 proc typeMayHaveHook(t: NimNode; seen: var seq[string]): bool =

@@ -68,11 +68,19 @@ type
     line, col: int
     st: CheckState
 
+  RoutineDefs = Table[string, seq[int]]
+    ## RFC-0016 int6-w. Per routine name (`defKey`), the lines its definitions
+    ## start on in one text, at any depth.
+
   ScanVisit = object
     ## One reading of one file. A file included twice has two.
     file: string              ## `normalPath`ed
     events: seq[ScanEvent]
     regions: seq[tuple[first, last: int]]   ## template and macro definitions
+    defs: RoutineDefs         ## RFC-0016 int6-w: the routines the text defines
+    lines: int                ## RFC-0016 int6-w: the text's line count
+    parse: int                ## RFC-0016 int6-w: the text as parsed, an index
+                              ## into `parsedAsts` (`scannedAst`); -1 for none
 
   ModuleScan* = object
     visits: seq[ScanVisit]
@@ -271,7 +279,45 @@ proc collectHidden(sc: var Scanner; n: NimNode) =
 
 proc walk(sc: var Scanner; n: NimNode)
 
-var parsedFiles {.compileTime.}: Table[string, tuple[text: string, ast: NimNode]]
+var parsedFiles {.compileTime.}:
+  Table[string, tuple[text: string, ast: NimNode, defs: RoutineDefs, parse: int]]
+var parsedAsts {.compileTime.}: seq[NimNode]
+  ## RFC-0016 int6-w. Every text a scan parsed, in parse order: a `ScanVisit`
+  ## names its own by index, so a later read of the same file under another
+  ## text does not replace the one it was scanned from. An index and not the
+  ## node, so a `ModuleScan` stays a value a `const` can hold.
+
+func defKey*(name: string): string =
+  ## RFC-0016 int6-w. A routine name as Nim compares identifiers: the first
+  ## character as written, the rest without case or underscores.
+  nimIdentNormalize(name)
+
+proc defName(n: NimNode): string =
+  ## The name a routine definition's first child spells: `p`, `p*`, `` `+` ``.
+  case n.kind
+  of nnkIdent, nnkSym: n.strVal
+  of nnkPostfix: (if n.len == 2: defName(n[1]) else: "")
+  of nnkAccQuoted:
+    var s = ""
+    for c in n: s.add defName(c)
+    s
+  of nnkPragmaExpr: (if n.len > 0: defName(n[0]) else: "")
+  else: ""  # k2: n/a: a name this cannot spell records no definition; textDisagrees says nothing of it and the position is read as before
+
+proc collectDefs(n: NimNode; acc: var RoutineDefs) =
+  ## RFC-0016 int6-w. Every routine definition in a parsed text, nested ones
+  ## and those inside templates included, by name and starting line.
+  if n.kind in RoutineNodes and n.kind != nnkLambda and n.len > 0:
+    let nm = defName(n[0])
+    if nm.len > 0:
+      # The definition's line and its name's: a position is either.
+      let k = defKey(nm)
+      var lines = acc.getOrDefault(k)
+      lines.add n.lineInfoObj.line
+      if n[0].lineInfoObj.line != n.lineInfoObj.line:
+        lines.add n[0].lineInfoObj.line
+      acc[k] = lines
+  for c in n: collectDefs(c, acc)
 
 proc movesState(n: NimNode): bool =
   ## Does this `when` branch hold a pragma that moves the stack or a check?
@@ -299,7 +345,7 @@ proc readSource*(env: SourceEnv; path: string; text: var string): string =
   ""
 
 proc scanFile(sc: var Scanner; path, text: string) =
-  sc.res.visits.add ScanVisit(file: normalPath(path))
+  sc.res.visits.add ScanVisit(file: normalPath(path), parse: -1)
   let saved = sc.visit
   sc.visit = sc.res.visits.high
   sc.including.add path
@@ -310,7 +356,16 @@ proc scanFile(sc: var Scanner; path, text: string) =
     # Keyed by path, checked by text: hashing a `system.nim`-sized key on every
     # lookup spends the VM's iteration budget.
     if path notin parsedFiles or parsedFiles[path].text != text:
-      parsedFiles[path] = (text: text, ast: parseStmt(text, path))
+      let ast = parseStmt(text, path)
+      var defs: RoutineDefs
+      collectDefs(ast, defs)
+      parsedAsts.add ast
+      parsedFiles[path] = (text: text, ast: ast, defs: defs,
+                           parse: parsedAsts.high)
+    sc.res.visits[sc.visit].defs = parsedFiles[path].defs
+    sc.res.visits[sc.visit].lines = text.count('\n') +
+      (if text.len > 0 and text[^1] != '\n': 1 else: 0)
+    sc.res.visits[sc.visit].parse = parsedFiles[path].parse
     walk(sc, parsedFiles[path].ast)
   except ValueError as e:
     if sc.res.unknown.len == 0:
@@ -680,6 +735,41 @@ proc stateAt*(m: ModuleScan; file: string; line, col: int): CheckState =
     else: result = here
     found = true
   if not found: result = m.everything
+
+proc scannedAst*(m: ModuleScan; file: string): NimNode =
+  ## RFC-0016 int6-w. The text of `file` the scan read, parsed; nil where the
+  ## scan did not read it. A second read of the file from disk is another
+  ## snapshot, which an edit during the compile can make disagree with this.
+  let file = normalPath(file)
+  for v in m.visits:
+    if v.file == file and v.parse in 0 .. parsedAsts.high:
+      return parsedAsts[v.parse]
+  nil
+
+proc textDisagrees*(m: ModuleScan; file, name: string; line: int): string =
+  ## RFC-0016 int6-w. "" when the text the scan read can be the text the
+  ## compiler parsed at a routine `name` it places at `line` of `file`, else
+  ## why not. The scan reads the module from disk when a macro first asks,
+  ## which may be after the compiler parsed it: a file edited during the
+  ## compile is read as the new text and its positions as the old, so a push
+  ## two lines above a routine read two lines late is not over it (a pushed-
+  ## off routine read checked, a trusted `OverflowDefect` its binary never
+  ## raises). The text disagrees when it ends before `line`, or defines a
+  ## routine `name` but not starting there. A routine a macro made, with a
+  ## position its name is not written at, defines no `name` and is not told
+  ## apart. A file the scan did not read says nothing.
+  let file = normalPath(file)
+  let key = defKey(name)
+  for v in m.visits:
+    if v.file != file: continue
+    if line > v.lines:
+      return "`" & baseName(file) & "` on disk has " & $v.lines &
+        " lines, and the compiler placed `" & name & "` at line " & $line
+    if key in v.defs and line notin v.defs[key]:
+      return "`" & baseName(file) & "` on disk defines `" & name &
+        "` at line " & v.defs[key].join(", ") & ", not at line " & $line &
+        ", where the compiler placed it"
+  ""
 
 proc unknownReason*(m: ModuleScan): string = m.unknown
 proc importLeak*(m: ModuleScan): set[CheckOption] =

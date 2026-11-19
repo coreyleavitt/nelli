@@ -49,6 +49,12 @@ type
                 ## overflow checks off (`math.nim`'s `checks: off`) in a build
                 ## that checks: unchecked signed arithmetic, as `asBuild` is
                 ## in a checks-off build. Only a `stdlibAxis` row stamps it.
+    asPushedOff ## RFC-0016 int6-o. A user routine under `push overflowChecks:
+                ## off` (or `checks: off`) in a build that checks, read off at
+                ## its position on every reading: unchecked signed arithmetic,
+                ## as in a `--overflowChecks:off` build (undefined on overflow,
+                ## a defined wrap at 8 and 16 bits or under `-fwrapv`). The
+                ## pragma row stamps it, as `asChecked` for the opposite push.
 
   ArithCheck* = enum
     ## R16-1 (Phase 16 ADR-0011 F2). Which arithmetic defect forks the walker
@@ -95,6 +101,12 @@ type
                             ## and `overflowOn == false`.
     overflowRowKey*: string ## the stdlib row behind `overflowModelled`, "" if
                             ## none (`RoutineChecks.overflowRow.cell.key`)
+    overflowOff*: bool      ## RFC-0016 int6-o. `coOverflow in
+                            ## RoutineChecks.offModelled`: a user routine's
+                            ## position turns the build's overflow checks off
+                            ## on every reading, with no importer's push
+                            ## reaching it. Not a deviation (`overflowDeviates`
+                            ## is false): the routine is walked `asPushedOff`.
     inherit*: bool          ## a magic: expanded at the call site, under the
                             ## caller's options
 
@@ -117,9 +129,20 @@ func buildRegime*(b: BuildSemantics = buildSemantics): Regime =
   if coOverflow in b.checks: rgChecked else: rgUnchecked
 
 func programMayWrap*(b: BuildSemantics = buildSemantics): bool =
-  ## Whether any part of the program may run unchecked signed arithmetic. The
-  ## abstraction asks about the whole program (F-5): in D1 it is the build's
-  ## own regime, so it is `buildRegime() == rgUnchecked`.
+  ## Whether the build's own signed arithmetic is unchecked: the abstraction's
+  ## whole-program question (F-5), which picks how a parameter is ENCODED
+  ## before the walk (`runtime.nim`'s wrap scan and `offsetExact`).
+  ##
+  ## RFC-0016 int6-o: a program in a build that checks may still hold
+  ## unchecked regions (`asPushedOff`, K4c's `asUnchecked`), and this stays
+  ## the build's answer on purpose. It is an encoding choice, not the wrap
+  ## model: every parameter it lets promote to an Int is width-stamped
+  ## (`promoteSound`, `offsetStamp`), and the arithmetic on a stamped Int
+  ## reads the regime where the walk stands (`regime`, `wrapDefined`,
+  ## `emits`), so in an unchecked region it halts on undefined overflow or
+  ## wraps exactly as the bit-vector does (RFC-0005 S8w), and a value it
+  ## leaves behind is inside its type's window for the checked code after
+  ## the call. Each consumer is annotated where it reads this.
   buildRegime(b) == rgUnchecked
 
 func modelled(f: RoutineArithFacts): bool = f.overflowRowKey.len > 0
@@ -133,12 +156,13 @@ func parseScope(f: RoutineArithFacts; b: BuildSemantics): ArithScope =
   let wraps = buildRegime(b) == rgUnchecked
   if wraps and f.overflowOn and f.readable: asChecked
   elif f.modelled and not wraps: asUnchecked
+  elif f.overflowOff and f.readable and not wraps: asPushedOff
   else: asBuild
 
 func scopeRegime(s: ArithScope; b: BuildSemantics): Regime =
   case s
   of asChecked: rgChecked
-  of asUnchecked: rgUnchecked
+  of asUnchecked, asPushedOff: rgUnchecked
   of asBuild: buildRegime(b)
   of asInherit: raiseAssert "scopeRegime: asInherit is no regime"
 
@@ -157,10 +181,10 @@ proc decide*(f: RoutineArithFacts;
     result.stamp = ArithStamp(scope: asInherit)
     return
   case parseScope(f, b)
-  of asChecked:
+  of asChecked, asPushedOff:
     let a = admitPragma(ppRoutine, "overflowChecks", psRoutineDecl)
     doAssert a.admitted, "decide: the overflowChecks pragma row is declined"
-    result.stamp = ArithStamp(scope: asChecked)
+    result.stamp = ArithStamp(scope: parseScope(f, b))
   of asUnchecked:
     let a = admitStdlibBody(f.overflowRowKey, ssBodyWalk)
     doAssert a.admitted, "decide: the stdlib row " & f.overflowRowKey &
@@ -201,8 +225,8 @@ proc ensureBase(f: var ArithFrames; b: BuildSemantics) =
 proc enterBody*(f: var ArithFrames; st: ArithStamp;
                 b: BuildSemantics = buildSemantics): bool =
   ## The walk rule (the `enterBody` call in `runtime.nim`'s block arm): a stamp that claims
-  ## pushes its regime (`asBuild` the build's, `asUnchecked` unchecked,
-  ## `asChecked` checked). `asInherit` pushes NOTHING: it is a block that is
+  ## pushes its regime (`asBuild` the build's, `asUnchecked` and
+  ## `asPushedOff` unchecked, `asChecked` checked). `asInherit` pushes NOTHING: it is a block that is
   ## not a routine body, or a magic's, which runs under the enclosing
   ## regime. F-2 (D1-F2): every other routine body claims, so no callee takes
   ## its caller's regime by inheritance, as natively. Answers whether it
@@ -212,7 +236,7 @@ proc enterBody*(f: var ArithFrames; st: ArithStamp;
   of asInherit: return false
   of asChecked: f.frames.add rgChecked
   of asBuild: f.frames.add buildRegime(b)
-  of asUnchecked: f.frames.add rgUnchecked
+  of asUnchecked, asPushedOff: f.frames.add rgUnchecked
   true
 
 proc enterParse*(f: var ArithFrames; facts: RoutineArithFacts;
@@ -276,10 +300,11 @@ func inlinableIterator*(f: RoutineArithFacts; caller: Regime;
   ## The overflow half of whether a closure iterator may be inlined
   ## (`dsl_parser.nim`'s closure-iterator inlining test, the
   ## `inlinableIterator` call sites): its position was read, its overflow checks
-  ## agree with the build's (no deviation in a build that checks), and where
-  ## the build is unchecked the iterator is compiled under the caller's regime
-  ## (inlined, it is walked under that one). The other check options stay the
-  ## caller's business.
+  ## agree with the build's (no deviation in a build that checks), and the
+  ## iterator is compiled under the caller's regime (inlined, it is walked
+  ## under that one). RFC-0016 int6-o: in either build, since a build that
+  ## checks now holds unchecked regions (`asPushedOff`) too. The other check
+  ## options stay the caller's business.
   let wraps = buildRegime(b) == rgUnchecked
   f.readable and (not f.overflowDeviates or wraps) and
-    (not wraps or scopeRegime(parseScope(f, b), b) == caller)
+    scopeRegime(parseScope(f, b), b) == caller

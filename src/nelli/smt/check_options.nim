@@ -280,10 +280,12 @@ type RoutineChecks* = object
     ## access raises `FieldDefect` (modelled, int6). `checks` never carries
     ## `coField` in such a build.
   offModelled*: set[CheckOption]
-    ## RFC-0016 int6. Of the four checks (range, bound, field, object), those
+    ## RFC-0016 int6. Of the four checks (range, bound, field, object) and,
+    ## int6-o, `overflowChecks`, those
     ## on in the build and off at the routine's position on every reading, in
     ## a user module, with no importer's push reaching it: the routine is
-    ## walked with them off (its body's check scope leaves them out), as the
+    ## walked with them off (its body's check scope leaves them out; for
+    ## `coOverflow` its body is stamped `asPushedOff`), as the
     ## build route walks a build that has them off. They are not in `checks`.
     ## A position that may be either way keeps the option in `checks` and
     ## declines; so does a stdlib module's push (the K4c delta, no row models
@@ -302,6 +304,9 @@ type RoutineChecks* = object
     ## the position was not read (own runtime, `why`) or may be off.
 
 const fourChecks = {coRange, coBound, coField, coObj}
+const scopedChecks = fourChecks + {coOverflow}
+  ## RFC-0016 int6-o. The checks a routine's position is read for as one
+  ## setting (`positionUnreadable`) and modelled off at (`offModelled`).
 
 var bodyAsts {.compileTime.}: Table[string, NimNode]
 
@@ -338,7 +343,7 @@ proc inRoutineChecks(n: NimNode; off, on: set[CheckOption]): string =
     if r.len > 0: return r
 
 proc positionUnreadable(impl: NimNode; file: string; line: int;
-                        st: CheckState): string =
+                        st: CheckState; m: ModuleScan): string =
   ## RFC-0016 PRC-07. Why the routine's check state at the four checks cannot be
   ## taken as one answer: "" when it can. The walker models a routine compiled
   ## with such an option off as unchecked and one compiled with it on as
@@ -348,14 +353,18 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   ## In a build with the option on, an ambiguous position is a deviation
   ## already (`checks` keeps it, and the routine declines); a pragma inside the
   ## routine's own definition is not, and is caught here.
-  let off = fourChecks - buildSemantics.checks
-  let on = fourChecks * buildSemantics.checks
+  let off = scopedChecks - buildSemantics.checks
+  let on = scopedChecks * buildSemantics.checks
   let both = off * st.maybeOn * st.maybeOff
   if both != {}:
     return "its position is both pushed on and off for " & $both
   if not isStdlibFile(file):
-    var ast: NimNode
-    if file in bodyAsts: ast = bodyAsts[file]
+    # RFC-0016 int6-w: the text the scan read (`m`), where it read this file:
+    # a second read from disk is another snapshot of a file that may be
+    # edited during the compile.
+    var ast = scannedAst(m, file)
+    if ast != nil: discard
+    elif file in bodyAsts: ast = bodyAsts[file]
     else:
       var text: string
       if readSource(compileTimeEnv(), file, text).len == 0:
@@ -406,6 +415,17 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if moduleScans[root].unknown.len > 0:
     return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
                          why: moduleScans[root].unknown)
+  # RFC-0016 int6-w: the scan's text is read from disk when a macro first asks,
+  # not when the compiler parsed the module; a file edited in between places
+  # the routine against pushes it was not compiled under. Not read, then.
+  if not isStdlibFile(file):
+    let stale = textDisagrees(moduleScans[root], file,
+                              nameOf(if impl[0].kind == nnkPostfix: impl[0][1]
+                                     else: impl[0]), li.line)
+    if stale.len > 0:
+      return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
+        why: "the module's text on disk is not the text the compiler parsed: " &
+             stale)
   let st = stateAt(moduleScans[root], file, li.line, li.column)
   result.checks = deviation(st)
   result.assertsMaybeOff = coAssert in st.maybeOff or
@@ -450,15 +470,18 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
     result.infOn = true
     result.checks.excl coInf
   result.overflowOn = coOverflow notin result.checks
-  let unreadable = positionUnreadable(impl, file, li.line, st)
+  let unreadable = positionUnreadable(impl, file, li.line, st, moduleScans[root])
   if unreadable.len > 0:
-    result.why = "the routine's range, bound, field or object checks differ " &
+    result.why = "the routine's range, bound, field, object or overflow checks differ " &
       "within it, not modelled as one setting: " & unreadable
   # RFC-0016 int6: a check the build has on and the routine's position has off
   # on every reading is modelled (`offModelled`): the walker scopes the body
   # without it. Ambiguous, leaked and stdlib positions stay deviations.
+  # RFC-0016 int6-o: `overflowChecks` likewise; its body is walked unchecked
+  # (`asPushedOff`), as the build route walks a `--overflowChecks:off` build.
+  # `overflowOn` above was read before the move, so it stays false for it.
   if result.why.len == 0 and not rootStdlib:
-    for co in fourChecks * buildSemantics.checks:
+    for co in scopedChecks * buildSemantics.checks:
       if co in result.checks and co in st.maybeOff and co notin st.maybeOn and
          co notin leaked:
         result.checks.excl co

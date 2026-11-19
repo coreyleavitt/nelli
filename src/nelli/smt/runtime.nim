@@ -27975,6 +27975,14 @@ proc runSymexImpl(prog: SymexProgram,
   # to catch is not a raise but a defined result. So promotion must be
   # proven statically or declined — which is what finally puts Phase 2's
   # `tryEvalInterval` to work; it has had no caller in `src/` until now.
+  #
+  # RFC-0016 int6-o: the build's answer, also in a build that checks but holds
+  # unchecked regions (`asPushedOff`, `asUnchecked`). The scan is no longer
+  # what keeps a wrap sound: every Int it lets a parameter promote to is
+  # width-stamped (`promoteSound`, below), and `lowerArith` reads the regime
+  # where the walk stands for a stamped Int (the `ubSignedOverflow` halt, or
+  # `wrapIntToWidth` where `wrapDefined`), so an unchecked region computes
+  # what the bit-vector would and hands its caller an in-window value.
   let wrapScan = settings.integerSemantics == isOptimised and programMayWrap()
   var banPol = BanPolicy(intVars: intParamNames, wrapScan: wrapScan)
   if wrapScan:
@@ -28138,6 +28146,10 @@ proc runSymexImpl(prog: SymexProgram,
       # under checked arithmetic (`acOverflow`): a bit-vector wraps where
       # an unbounded Int does not, and `isExact` runs no wrap scan
       # (`collectBan`'s `wrapScan` is `isOptimised`-only).
+      # RFC-0016 int6-o: the build's answer is sound under mixed regions for
+      # the same reason (`wrapScan` above): the promoted offset is stamped,
+      # so an unchecked region's arithmetic on it is the regime's, and an
+      # unchecked build stamps it all the same (`offsetStamp`).
       let offsetExact = settings.integerSemantics == isExact and
                         isOffsetParam and not programMayWrap()
       let promoteSound = (settings.integerSemantics == isOptimised or
@@ -28237,6 +28249,8 @@ proc runSymexImpl(prog: SymexProgram,
               " window, width-stamped" &
               (if not p.ty.signed: " (wraps: unsigned)"
                elif programMayWrap():
+                 # The build's regime; an unchecked region of a checked
+                 # build is the stamped lowering's (RFC-0016 int6-o).
                  " (unchecked arithmetic: overflow is undefined)"
                else: " (overflow forks kept)"))
         if promoteSound:

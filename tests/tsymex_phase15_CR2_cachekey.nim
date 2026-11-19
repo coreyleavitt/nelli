@@ -1429,7 +1429,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 int6 check scopes (a check option belongs to the region it
     ## was compiled under, both directions; every routine body is scoped;
     ## 464 reserved by a sibling branch): 463->465.
-    check symexWalkerVersion == "465"
+    ## RFC-0016 int6-o (overflowChecks belongs to its region too: a routine
+    ## pushed off in a checked build is walked unchecked, `@asPushedOff:`;
+    ## system's integer `*=` is the build's; 466 reserved): 465->467.
+    ## RFC-0016 int6-w (a routine whose module text on disk disagrees with
+    ## the position the compiler parsed declines `feCheckOption`): 467->468.
+    check symexWalkerVersion == "468"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

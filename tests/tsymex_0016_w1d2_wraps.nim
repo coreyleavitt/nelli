@@ -9,7 +9,9 @@
 ## with the operand through a `noinline` identity or not; `id(high(int)) + 1`
 ## computes `low(int)`. A walker `sxSat` at `high(int)` is a witness the
 ## binary does not reach, and nothing in the arithmetic knows which routine
-## it sits in, so a pushed-off routine declines on every setting.
+## it sits in. RFC-0016 int6-o: the pushed region is walked as an off build
+## walks it, so `v + 1` at `high(int)` is an `ubSignedOverflow` halt (the
+## compiler-dependent outcome above is what undefined behaviour permits).
 import std/[unittest, strutils]
 import nelli/smt/arith_regime
 import nelli
@@ -53,19 +55,19 @@ suite "W1-d2 push route and explicit settings":
       check "hit" notin nativeRun(sutPushed(high(int))).hits
       check "hit" notin nativeRun(sutPushedViaId(high(int))).hits
 
-  test "push: the marker declines, the verdict is not a trusted sxSat":
+  test "push: the region is an undefined overflow, not a trusted sxSat":
     pinDecline(sutPushed, cellKey(axDefinedness, "add/signed/pushOff"),
-               feOverflowCheckOption)
+               ubSignedOverflow)
 
   test "push: through a noinline identity too":
     pinDecline(sutPushedViaId, cellKey(axDefinedness, "add/signed/pushOffId"),
-               feOverflowCheckOption)
+               ubSignedOverflow)
 
   test "push: an explicit opt-out no longer passes the marker":
     let r = symexFind(sutPushed, tLabel("hit"), defaultSymexSettings())
     check not r.trusted
     check r.status != sxSat
-    check r.errors.named(feOverflowCheckOption)
+    check r.errors.named(ubSignedOverflow)
 
   test "the default settings agree with the build":
     let r = pinExact(sutPlain, cellKey(axDefinedness, "arithChecks/default"))

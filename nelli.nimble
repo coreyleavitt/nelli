@@ -2094,6 +2094,12 @@ task test, "Run the test suite":
             "tsymex_0016_int6p2_checkscope",
             # RFC-0016 int6: the same scopes under --rangeChecks:off --boundChecks:off (push on raises).
             "tsymex_0016_int6p2_checkscope_off",
+            # RFC-0016 int6-o: overflowChecks belongs to its region too (push off in a checked build is walked unchecked; system *= keeps the build's).
+            "tsymex_0016_int6o_overflow",
+            # RFC-0016 int6-o: the same regions under -d:nelliFwrapv (the region's wrap is exact).
+            "tsymex_0016_int6o_overflow_fwrapv",
+            # RFC-0016 int6-w: a module edited during the compile is not read against the positions the compiler parsed.
+            "tsymex_0016_int6w_scantext",
             # RFC-0016 K2: a c_longdouble value from an element, slot, dereference or cast declines, never faults.
             "tsymex_0016_k2_longdouble_sentinel",
             # RFC-0016 INT-82: an allocation is distinct from every object of the walk's entry state (parameters, what they reach, globals).

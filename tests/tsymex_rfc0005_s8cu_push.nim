@@ -7,8 +7,9 @@
 ## RFC-0016 int6: a check of `rangeChecks`, `boundChecks`, `fieldChecks`,
 ## `objChecks` pushed off is now modelled (the routine is walked as a build
 ## with it off walks it), so those rows are judged against the native binary
-## (`pinFind`) or as the build route's undefined access. `overflowChecks` off
-## in a checked build still declines (`feOverflowCheckOption`).
+## (`pinFind`) or as the build route's undefined access. int6-o: so is
+## `overflowChecks` off in a checked build; the pushed region walks as an
+## off build does, a signed overflow there is an `ubSignedOverflow` halt.
 import std/[unittest, sets, strutils]
 import nelli
 import nelli/symex
@@ -129,7 +130,7 @@ suite "S8cu: the push form":
 
   test "overflowChecks, with the settings modelling them on":
     check native(overOff(high(int))) == "hit"
-    pinDecline(overOff, declKey, feOverflowCheckOption)
+    pinDecline(overOff, declKey, ubSignedOverflow)
 
   test "rangeChecks":
     check native(rangeOff(300)) == "hit"
@@ -159,16 +160,18 @@ suite "S8cu: the push form":
     checkpoint show(r.errors)
     check r.status == sxUnknown
     # int6: the four are modelled off (the field write declines on its own
-    # path); the overflow push still declines.
+    # path); int6-o: so is the overflow push, whose `v + 1` at `high(int)`
+    # is a signed-overflow halt, as in an off build.
     check not r.errors.named(feCheckOption)
+    check not r.errors.named(feOverflowCheckOption)
     check r.errors.named(feUnsupportedOp)
-    check r.errors.named(feOverflowCheckOption)
+    check r.errors.named(ubSignedOverflow)
 
   test "a raise the model catches is no `sxUnsat`":
     check native(caughtOff(high(int))) == "hit"
-    pinDecline(caughtOff, declKey, feOverflowCheckOption)
+    pinDecline(caughtOff, declKey, ubSignedOverflow)
     check native(neverRaisesHere(high(int))) == "hit"
-    pinDecline(neverRaisesHere, declKey, feOverflowCheckOption)
+    pinDecline(neverRaisesHere, declKey, ubSignedOverflow)
 
   test "a decline is never trusted":
     let r = symexFind(caughtOff, tLabel("hit"))

@@ -2107,6 +2107,8 @@ task test, "Run the test suite":
             "tsymex_0016_int6u_hostpush",
             # RFC-0016 int6-u: sequtils' own audited loop-counter step is read through by the opaque scan (pre-int6-t verdicts).
             "tsymex_0016_int6u_seqinc",
+            # RFC-0016 int6-w2: an opaque toSeq(s.items) builds (the effect summary skips a type slot; an untyped expression declines).
+            "tsymex_0016_int6w2_opaquetoseq",
             # RFC-0016 int6-f: fieldChecks belongs to its region (push off in a checked build reads the union as the off build does; a checked caller keeps FieldDefect).
             "tsymex_0016_int6f_fieldscope",
             # RFC-0016 int6-o: overflowChecks belongs to its region too (push off in a checked build is walked unchecked; system *= keeps the build's).

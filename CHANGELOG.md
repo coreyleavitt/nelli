@@ -152,6 +152,13 @@ where that note does not yet cover it.
   `count` (it steps `result`, which the region's shape does not admit) and
   the exported templates `findIt`, `keepItIf` and `toSeq`, which expand the
   step into the caller's own routine; a callee using them stays unreadable.
+- **An opaque `toSeq(s.items)` builds** (int6-w2; walker 483). The opaque
+  effect summary read a declaration's type slot as code, and `toSeq` leaves
+  `seq[typeof(iter)]` untyped there in the typed body: the build stopped with
+  `Error: node has no type`. A type slot and a conversion's target type are
+  no longer read (they run nothing), and an expression whose type the
+  summary would read but which has none makes the call non-inert (the
+  caller keeps the opaque call's taint), never a compile failure.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

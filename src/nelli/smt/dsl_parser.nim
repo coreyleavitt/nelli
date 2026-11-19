@@ -4752,6 +4752,17 @@ proc namesRoutineDirectly(e: NimNode): bool =
   (e.kind == nnkSym and symKind(e) notin procValueHeadKinds) or
     e.kind in {nnkLambda, nnkDo}
 
+proc typeless*(n: NimNode): bool =
+  ## RFC-0016 int6-w2. Has the expression `n` no type? `typeKind` answers
+  ## `ntyNone` for a node without one (it is the one type reader that does not
+  ## stop the compile); `getTypeInst` and `getTypeImpl` on such a node are a
+  ## hard `Error: node has no type`. A typed body keeps untyped nodes where a
+  ## template expanded a type expression (`toSeq`'s `seq[typeof(iter)]`,
+  ## `range[0 .. 10](x)`): a scan that reads an expression's type asks this
+  ## first, and declines on yes. (`nnkEmpty` has no type either; the callers
+  ## take it apart first.)
+  n.typeKind == ntyNone
+
 proc scanCall(n: NimNode; acc: var OpaqueEffects;
               seen, stack: var seq[NimNode]) =
   ## RFC-0005 S8cc. A call in a summarised body: the routine, then each
@@ -4783,6 +4794,11 @@ proc scanCall(n: NimNode; acc: var OpaqueEffects;
      not magicIn(routineMagic(n[0]),
                  @["LengthStr", "CStrToStr", "High", "EqCString"]):
     for i in 1 ..< n.len:
+      if n[i].kind notin {nnkEmpty, nnkNilLit} and typeless(n[i]):
+        # RFC-0016 int6-w2: no type to read (`typeless`): fail closed.
+        acc.notInert("`" & n.repr & "` has an argument the compiler left " &
+                     "untyped, whose type the summary cannot read")
+        return
       if n[i].kind notin {nnkEmpty, nnkNilLit} and
          scanArgHoldsPtr(n[i].getTypeInst):
         mayWriteAnyVariable(acc)
@@ -4834,11 +4850,20 @@ proc scanRead(e: NimNode; acc: var OpaqueEffects;
       scanOpaqueEffects(e, acc, seen, stack)
   of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenDeref,
      nnkDerefExpr:
-    if irTypeRefFree(classifyType(e.getTypeInst).ty):
+    if typeless(e):
+      # RFC-0016 int6-w2: no type to read (`typeless`): fail closed.
+      acc.notInert("it reads `" & e.repr & "`, which the compiler left " &
+                   "untyped")
+    elif irTypeRefFree(classifyType(e.getTypeInst).ty):
       scanReadPath(e, acc, seen, stack)
     else:
       for c in e: scanRead(c, acc, seen, stack)
-  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkPar, nnkBracket,
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+    # RFC-0016 int6-w2: the operand; the first child is the target type,
+    # which runs nothing (an anonymous one, `range[0 .. 10](x)`, is an
+    # untyped call in the typed body).
+    if e.len > 0: scanRead(e[^1], acc, seen, stack)
+  of nnkPar, nnkBracket,
      nnkTupleConstr, nnkCurly, nnkObjConstr, nnkExprColonExpr:
     for c in e: scanRead(c, acc, seen, stack)
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
@@ -4899,7 +4924,13 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
     else:
       scanRead(n[1], acc, seen, stack)
   of nnkIdentDefs, nnkVarTuple:
-    for i in 0 ..< n.len - 1: scanOpaqueEffects(n[i], acc, seen, stack)
+    # RFC-0016 int6-w2: the names, then the value; the type slot (`n[^2]`) is
+    # a type, which runs nothing. A template can leave it an untyped
+    # expression in the typed body (`toSeq`'s `seq[typeof(iter)]`), which
+    # was read as a call: `Error: node has no type` on its `typeof`'s
+    # argument, and before that a call through a non-symbol head, which may
+    # write any variable.
+    for i in 0 ..< n.len - 2: scanOpaqueEffects(n[i], acc, seen, stack)
     scanRead(n[^1], acc, seen, stack)
   of nnkElifBranch, nnkElifExpr:
     scanRead(n[0], acc, seen, stack)
@@ -5016,7 +5047,12 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
     # RFC-0016 K2F-3: a literal, a type, a declaration that runs nothing; an
     # untyped template or macro body is expanded where it is used.
     discard
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+    # RFC-0016 int6-w2: the operand alone; the target type runs nothing
+    # (`scanRead`'s arm).
+    if n.len > 0: scanOpaqueEffects(n[^1], acc, seen, stack)
   of mayScanStructuralKinds + RoutineNodes - {nnkTemplateDef, nnkMacroDef,
+      nnkHiddenStdConv, nnkHiddenSubConv, nnkConv,
       nnkDerefExpr, nnkHiddenDeref, nnkAsgn, nnkFastAsgn, nnkIdentDefs,
       nnkVarTuple, nnkElifBranch, nnkElifExpr, nnkCaseStmt, nnkCall,
       nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
@@ -20856,7 +20892,10 @@ proc mayWrite(n: NimNode; st: var MayWriteState): bool =
       # body is a hook of its own, walked by `readHooks`.
       for j in 1 ..< n.len:
         if n[j].kind in {nnkEmpty, nnkNilLit}: continue
-        if n[j].typeKind in {ntyPtr, ntyPointer, ntyCString, ntyRef, ntyProc} or
+        # RFC-0016 int6-w2: an argument without a type (`typeless`) may be
+        # anything: fail closed, as for a pointer.
+        if typeless(n[j]) or
+           n[j].typeKind in {ntyPtr, ntyPointer, ntyCString, ntyRef, ntyProc} or
            argHoldsCell(n[j].getTypeInst):
           return st.decide(wsStdlibPointerArg)
     if st.decide(wsLocalWork): return true

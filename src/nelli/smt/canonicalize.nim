@@ -1524,8 +1524,17 @@ const renderAsChoicesVersion* = "12"
   ##   `insert` has its pre-int6-t verdict again. Verdicts move (a trusted
   ##   verdict through such a routine now declines; such a callee is readable
   ##   again). No key bytes change.
+  ## - RFC-0016 int6-w2 (482->483): the opaque effect summary
+  ##   (`dsl_parser.scanOpaqueEffects`) reads a declaration's names and value,
+  ##   not its type slot, and a conversion's operand, not its target type:
+  ##   a type runs nothing, and a template can leave one untyped in the typed
+  ##   body (`toSeq`'s `seq[typeof(iter)]`), which stopped the compile with
+  ##   `node has no type`. An expression whose type it reads but which has
+  ##   none (`dsl_parser.typeless`) makes the call non-inert; `mayWrite`
+  ##   reads such a stdlib argument as a pointer. Verdicts move (an opaque
+  ##   `toSeq(s.items)` builds). No key bytes change.
 
-const symexWalkerVersion* = "482"
+const symexWalkerVersion* = "483"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

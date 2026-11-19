@@ -258,6 +258,18 @@ if [ "$host" -eq 1 ]; then
   warn_root="$PWD"
 else
   podman image exists "localhost/nelli-dev:$image" || scripts/build-dev-image.sh "$image" >&2 || exit 2
+  # Hold the image to the toolchain pin once for the whole sweep (dt-bounded.sh
+  # skips its own check for this image): a sweep on a stale image records
+  # another compiler's verdicts against CI's baseline.
+  if ! bash scripts/check-toolchain-parity.sh --image "$image" >&2; then
+    if [ "${NELLI_TOOLCHAIN_DRIFT_OK:-}" = 1 ]; then
+      echo "sweep.sh: localhost/nelli-dev:$image drifts from scripts/nim-toolchain.pin; sweeping anyway (NELLI_TOOLCHAIN_DRIFT_OK=1)" >&2
+    else
+      echo "sweep.sh: localhost/nelli-dev:$image drifts from scripts/nim-toolchain.pin; rebuild it (scripts/build-dev-image.sh $image) or set NELLI_TOOLCHAIN_DRIFT_OK=1 for a deliberate trial toolchain" >&2
+      exit 2
+    fi
+  fi
+  export NELLI_TOOLCHAIN_CHECKED="$image"
   z3_full="$(podman run --rm "localhost/nelli-dev:$image" bash -c "$(declare -f write_probe); write_probe > /tmp/zv.c && gcc -o /tmp/zv /tmp/zv.c -lz3 && /tmp/zv" 2>&1 | tail -n1)"
   z3_full="${z3_full#Z3 }"
   [ -n "$z3_full" ] || z3_full="unknown"

@@ -1349,8 +1349,13 @@ const renderAsChoicesVersion* = "12"
   ##   conversion change (457) and R2-08's heap write taint drain (458) were
   ##   written on separate branches, each from 456; their merge is one tip
   ##   above both. No key bytes change.
+  ## - RFC-0016 K2 c_longdouble sentinel (459->460): an element, tuple slot or
+  ##   dereference of a container typed with `c_longdouble`, and a `cast` to
+  ##   it, are `c_longdouble` values (`isLongDoubleTyped`): they declined as
+  ##   a `weInternalWalkerFault` where the other sites decline
+  ##   `feUnsupportedParamType`. No key bytes change.
 
-const symexWalkerVersion* = "459"
+const symexWalkerVersion* = "460"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -159,6 +159,46 @@ proc isBuiltinTypeHead*(head: NimNode; names: openArray[string]): bool =
     return false
   head.kind == nnkIdent or isStdlibTypeSym(head)
 
+proc typeTreeNamesLongDouble(t: NimNode): bool =
+  ## RFC-0016 K2. True iff the type tree `t` names `c_longdouble` anywhere
+  ## (`array[2, c_longdouble]`, `ptr c_longdouble`, `(c_longdouble, int)`).
+  if t == nil: return false
+  if isBuiltinTypeHead(t, ["c_longdouble", "clongdouble"]): return true
+  if t.kind == nnkSym: return false  # a named type is not expanded here
+  for c in t:
+    if typeTreeNamesLongDouble(c): return true
+  false
+
+proc containerHoldsLongDouble(n: NimNode): bool =
+  ## RFC-0016 K2. An element, tuple slot or dereference reads a value out of
+  ## its container, and the element node carries no type of its own to read:
+  ## true iff the container's root symbol (or call result) is typed with
+  ## `c_longdouble` somewhere in its structure. Over-approximate on purpose
+  ## (a tuple `(c_longdouble, int)` indexed at the `int` slot is true too):
+  ## the caller declines, which is the safe side.
+  var r = n
+  while r != nil and r.kind in {nnkBracketExpr, nnkDerefExpr, nnkHiddenDeref,
+                                 nnkHiddenAddr, nnkAddr, nnkDotExpr,
+                                 nnkCheckedFieldExpr, nnkPragmaExpr,
+                                 nnkPar} and r.len > 0:
+    r = r[0]
+  if r == nil: return false
+  case r.kind
+  of nnkSym:
+    if r.symKind notin {nskVar, nskLet, nskParam, nskConst, nskResult,
+                        nskForVar, nskField, nskTemp}:
+      return false
+    typeTreeNamesLongDouble(r.getTypeInst)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix:
+    if r.len == 0 or r[0].kind != nnkSym or
+       r[0].symKind notin {nskProc, nskFunc, nskMethod, nskConverter}:
+      return false
+    let sig = r[0].getTypeInst
+    sig.kind == nnkProcTy and sig.len > 0 and sig[0].kind == nnkFormalParams and
+      sig[0].len > 0 and typeTreeNamesLongDouble(sig[0][0])
+  else:
+    false
+
 proc isLongDoubleTyped*(n: NimNode): bool =
   ## RFC-0016 INT-76. True iff the typed node `n` (an expression, or a
   ## declared name) has the type `c_longdouble`: the C target's `long double`,
@@ -184,9 +224,13 @@ proc isLongDoubleTyped*(n: NimNode): bool =
     return n.len > 0 and isLongDoubleTyped(n[0])
   of nnkDotExpr:
     return n.len == 2 and n[1].kind == nnkSym and isLongDoubleTyped(n[1])
-  of nnkConv:
+  of nnkConv, nnkCast:
     if n.len != 2: return false
     t = n[0]
+  of nnkBracketExpr, nnkDerefExpr, nnkHiddenDeref:
+    # k2: fail-closed: an element, slot or dereference of a container typed
+    # with c_longdouble is read as one (the node carries no type of its own)
+    return n.len > 0 and containerHoldsLongDouble(n)
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix:
     if n.len == 0 or n[0].kind != nnkSym or
        n[0].symKind notin {nskProc, nskFunc, nskMethod, nskConverter}:
@@ -197,7 +241,7 @@ proc isLongDoubleTyped*(n: NimNode): bool =
       return false
     t = sig[0][0]
   else:
-    return false  # k2: n/a: a node kind that carries no c_longdouble type to read; a value of that type from another kind meets the placeholder sort and declines downstream
+    return false  # k2: n/a: a literal, a statement or a type node carries no c_longdouble value; the value-producing kinds (an if, a case, a block) yield one of their branches' symbols, which are read here (probed: tsymex_0016_k2_longdouble_sentinel)
   if t != nil and t.kind == nnkVarTy and t.len == 1: t = t[0]
   t != nil and isBuiltinTypeHead(t, ["c_longdouble", "clongdouble"])
 

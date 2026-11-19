@@ -932,6 +932,10 @@ Held: `0016_wa_runtime` (the census's 1). Its `lossyNil` claim
 nil input it returns. INT-86. It is pinned when INT-86 closes (and its SUT
 then needs a kept read, or its claim inverts).
 
+INT-86 closed (`wip/int86`, walker 447 provisional): `lossyNil` keeps its
+read (`result = p.n`) and is pinned with `pinCrashSelf`; the census ceiling
+is 0. INT-89 (a `var` result through nil) was filed from its native probe.
+
 Rows filed (each with a red reproducer, unregistered while red, and an
 `ids.txt` entry):
 - INT-86, soundness: a discarded read through a nil `ref` or `ptr` (`discard

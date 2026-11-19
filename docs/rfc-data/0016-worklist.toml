@@ -2487,15 +2487,16 @@ id = "INT-86"
 table = "5.8c"
 title = "K9d-12: a discarded read through a nil reference (`discard p.n`, `discard p[]` of a nil `ref` or `ptr`) is a `sxRaised(NilAccessDefect)` claim, and a label behind it is refuted, but natively it does not fault: Nim lowers it to `(void)((*p).n);`, which the C compiler does not load, so the call returns and the label is reached. A kept read (`result = p.n`) faults natively, as the walker says. Found converting `tsymex_0016_wa_runtime`: its `lossyNil` claim, run in a child on its only nil input (`pinCrashSelf`), exited 0"
 class = "soundness"
-state = "open"
-note = ": open. The bar: a discarded read the build does not load is not a dereference, so the label behind it is `sxSat` (pinned) and no nil access is claimed there; a kept read stays a nil-access claim. Native evidence (pinned toolchain, c and cpp): `discard p.n` and `discard p[]` of nil return; `let v = p.n` faults with SIGSEGV. A related native observation, not this row: in a `try` at module level, a raise from a called routine was not caught on c (the run printed past it). `tsymex_0016_wa_runtime` stays on the K9d census (ceiling 1) until this closes; its `lossyNil` SUT then needs a kept read, or its claim inverts"
+state = "closed"
+note = "fixed in the walker (447, provisional; e0294880). Native truth (pinned toolchain, gcc and g++, c and cpp; default, `-d:release`, `-d:danger`, `--opt:none`, `--mm:refc`, `--panics:on`, `--overflowChecks:off`, `--fieldChecks:off`, `--rangeChecks:off`; `--nilChecks` is a deprecated no-op in 2.2.10): Nim never elides a read itself, it emits `discard E` as `(void)(E);`. Three classes follow. Elided under every build and every `-O` (no load, returns): `discard p.n`, `p[]`, `p.q.n`, a `var ref` parameter's `p.n`, `p.arr[1]`, `p.arr[i]` (the index check reads `i` only), `p.s`, `p.str`, `p.k`, `p.n == 0`, `p.n.float`, `p.n div 2`, a float `+`; and, only where the check is off, `p.n + 1` / `-p.n` (`overflowChecks`), `p.v` of a variant (`fieldChecks`), `p.n.int8` (`rangeChecks`), `p.s[0]` (`boundChecks`). Kept (faults under every build): a check that reads the value (`p.n + 1` checked, `p.s[0]`'s index check, a variant's field check, a range conversion), a call taking it (`discard side(p.n)`), a used value (`result = p.n`). Optimiser-dependent (faults at `-O0`, returns at `-O2`): `let _ = p.n`, an unused `let x = p.n`, `discard (p.n, 1)`, `discard p.s.len`. The fix: `deadReadOf` (dsl_parser.nim) classifies a discard's operand and a dead local's initialiser (`ParseCtx.deadLocals`, marked in `parseDeferList`: no later statement of its list names it) by `cPure`, which reads the routine's own check options (`checkedHere`, `overflowChecked`, `floatCheckedHere`). `drElided` walks nothing; `drOptimiser` tests each dereferenced pointer in order and declines on a nil one (`feUnsupportedOp`, the path goes on tainted), since `OptLevel` is only `optUnknown`; anything else is the ordinary lowering. Left: `discard p.arr[i]` through a nil `ref` with a variable index is still claimed a crash (natively only the index check runs); a regime-dependent discard (`push overflowChecks: off`) is reached only where the walker models the push (in a checked build it declines `feOverflowCheckOption`); the MSVC leg's `/Od` is not probed (the symex legs are gcc). The INT-86 note's side observation does not reproduce: a module-level `try` catches a `ValueError` and an `IndexDefect` raised by a called routine on c and cpp (default and `-d:release`; a Defect is uncatchable under `--panics:on`, as designed); the run that printed past the call was this row's own discarded nil read, which does not fault. A `var` result through nil (`discard varN(nil)`: an address, natively no fault) is still claimed a crash: INT-89"
+sha = "e0294880"
 slice = "K9d"
 home = "K9d-12 (`wip/k9d12`)"
 source = "K9d-12 pinCrashSelf conversion"
-evidence = "red reproducer `tests/tsymex_0016_int86_discardnil.nim`: natively both discarded reads return and reach the label and the kept read crashes (`pinCrashSelf`, ceSegv); the walker says `sxRaised` for the label behind each discarded read and for `tNilAccess()`; the kept read's `sxRaised` control agrees"
+evidence = "red at e4c0ae7a: the discarded reads were `sxRaised` for the label and `tNilAccess`. Green after e0294880: `tsymex_0016_int86_discardnil` c and cpp, 8 OK: nine elided forms reach the label natively and are pinned `sxSat` (label) and `sxUnsat` (`tNilAccess`) by `pinFind`; four kept forms crash natively (`pinCrashSelf`, ceSegv) and stay `sxRaised`; four optimiser-dependent forms crash in the unoptimised test build (`pinCrashSelf`) and are `sxUnknown` (`feUnsupportedOp`) for both targets. `tsymex_0016_wa_runtime`'s `lossyNil` keeps its read and is pinned (`pinCrashSelf`), K9d census ceiling 1 -> 0; `rfc0005_w2_settle`'s `lossyNil` keeps its read; `rfc0005_s3_monotonicity`/`s4_alloc` fixtures keep their `p.s` read (an elided discard no longer fires `heUnsupportedPointeeRead`). Green on c: `wa_runtime`, `wa_runtime_panics`, `k9d_census`, `k9d_pinfind`, `phase15_r5_nil`, `rfc0005_s8cu_nil`, `s8cu_nil_native`, `s8cu_nil_setjmp`, `s8bo_nil`, `0016_p12_nilpos`, `0016_p6_nillit`, `rfc0005_s8j_exits`, `s8l_exits_b`, `163rev_assign_sites`, `w2_settle`, `s3_monotonicity`, `s4_alloc`, CR2, `0016_universe`"
 aliases = []
 cells = []
-pins = []
+pins = ["tsymex_0016_int86_discardnil", "tsymex_0016_wa_runtime"]
 
 [[row]]
 id = "INT-87"
@@ -2523,6 +2524,21 @@ slice = "K9d"
 home = "K9d-12 (`wip/k9d12`)"
 source = "K9d-12 triage (the plan's walker-decline list)"
 evidence = "red reproducer `tests/tsymex_0016_int88_crossptralias.nim`: the walker's witness for `crossPtr` holds two distinct addresses (16 bytes apart) and replays with no hit; natively one address passed as both hits; the ref control is `sxUnsat`, pinned"
+aliases = []
+cells = []
+pins = []
+
+[[row]]
+id = "INT-89"
+table = "5.8c"
+title = "K9d-12 (INT-86 probe): a `var T` result naming a field of a nil `ref` (`proc varN(p: ref B): var int = p.n`) is an address, not a read: natively `varN(nil)` computes `&(*p).n` and `discard varN(nil)` drops the `(void)(*T)` read, so the call returns and the label after it is reached (pinned toolchain, c and cpp, `-O0` through `-d:danger`). The walker walks the callee's `result = p.n` as a dereference: `sxRaised(NilAccessDefect)`, the label behind it refuted. A copy of the result (`result = varN(p)`) loads it and faults natively, as the walker says. A `lent` result of the same shape declines (`feUnsupportedOp`, a by-value argument sharing a `lent` result): sound"
+class = "soundness"
+state = "open"
+note = ": open. The bar: a `var`/`lent` result through nil is a dereference only where its value is loaded (copied, compared, passed by value), not where it is returned or discarded; the label behind a discarded call is `sxSat` (pinned) and no nil access is claimed there"
+slice = "K9d"
+home = "INT-86 (`wip/int86`)"
+source = "INT-86 native probe of the discard class"
+evidence = "red reproducer `tests/tsymex_0016_int89_varretnil.nim` (at e0294880): natively the discarded call returns and reaches the label and the copied result crashes (`pinCrashSelf`, ceSegv); the walker says `sxRaised` for the label and for `tNilAccess`; the copied result's `sxRaised` control agrees"
 aliases = []
 cells = []
 pins = []

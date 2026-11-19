@@ -209,7 +209,8 @@ suite "S8bt: (*ANY) in UTF mode":
           let sol = newSolver(ctx)
           let prm = newParams(ctx)
           # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
-          # the host's load. Worst check measured 5,799 units (Z3 5.1; part c), budget 60k.
+          # the host's load. Worst check measured 5,799 units (Z3 5.1; part c) and
+          # 5,837 (Z3 4.13.4; part c), budget 60k.
           prm.set("rlimit", 60_000'u)
           prm.set("random_seed", 0'u)
           sol.setParams(prm)

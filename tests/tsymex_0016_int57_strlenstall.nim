@@ -343,7 +343,8 @@ proc proveUnsat(ctx: Z3Context; fs: openArray[Z3Bool]): Z3Status =
   let s = newSolver(ctx)
   let p = newParams(ctx)
   # rlimit, not a wall `timeout`: a wall limit made the verdict depend on the
-  # host's load. Worst check measured 1,399,921 units (Z3 5.1), budget 15M.
+  # host's load. Worst check measured 1,399,921 units (Z3 5.1) and 1,225,115
+  # (Z3 4.13.4, the Windows legs' pin), budget 15M.
   p.set("rlimit", 15_000_000'u)
   p.set("random_seed", 0'u)
   s.setParams(p)

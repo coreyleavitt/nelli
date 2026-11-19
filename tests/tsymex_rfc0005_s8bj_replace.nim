@@ -87,7 +87,8 @@ suite "S8bj: replace by the agenda's step table, against std/re":
         let sol = newSolver(ctx)
         let prm = newParams(ctx)
         # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
-        # the host's load. Worst check measured 3,431 units (Z3 5.1), budget 35k.
+        # the host's load. Worst check measured 3,431 units (Z3 5.1 and 4.13.4),
+        # budget 35k.
         prm.set("rlimit", 35_000'u)
         prm.set("random_seed", 0'u)
         sol.setParams(prm)

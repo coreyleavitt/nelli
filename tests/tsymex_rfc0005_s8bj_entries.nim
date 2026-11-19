@@ -65,8 +65,9 @@ proc checkPattern(p, alpha: string; maxLen: int; t: var Tally) =
       let sol = newSolver(ctx)
       let prm = newParams(ctx)
       # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
-      # the host's load. Worst check measured 221,871 units (Z3 5.1), budget 2.5M.
-      prm.set("rlimit", 2_500_000'u)
+      # the host's load. Worst check measured 221,871 units (Z3 5.1) and 568,039
+      # (Z3 4.13.4, the Windows legs' pin), budget 6M.
+      prm.set("rlimit", 6_000_000'u)
       prm.set("random_seed", 0'u)
       sol.setParams(prm)
       for d in r.defs: sol.add d

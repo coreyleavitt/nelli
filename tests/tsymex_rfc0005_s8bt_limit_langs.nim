@@ -160,7 +160,8 @@ suite "S8bt: a limit between, symbolically":
         let sol = newSolver(ctx)
         let prm = newParams(ctx)
         # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
-        # the host's load. Worst check measured 1,759 units (Z3 5.1), budget 20k.
+        # the host's load. Worst check measured 1,759 units (Z3 5.1 and 4.13.4),
+        # budget 20k.
         prm.set("rlimit", 20_000'u)
         prm.set("random_seed", 0'u)
         sol.setParams(prm)

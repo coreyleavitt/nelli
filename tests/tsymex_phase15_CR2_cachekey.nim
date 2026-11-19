@@ -1301,6 +1301,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 W4 rv0005-lows part 3 (the key carries the toolchain's
     ## `lib/` and binary digest, `|tc=`; a concolic flip solves with the
     ## walker's run-wide facts): 406->407.
+    ## RFC-0016 W4 rv0005-lows part 3 (INT-32: a replay killed at its bound
+    ## is stored, one ended from outside is not, a refused lossy winner is
+    ## `rsRefused`, malformed gaps miss, the strongest raise per type is
+    ## kept; 407 reserved): 406->408.
     check symexWalkerVersion == "412"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

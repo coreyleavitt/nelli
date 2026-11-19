@@ -421,14 +421,18 @@ type
       ## PRIVATE: the solver's model of the input (the `witness` of an
       ## `sxSat` claim, the `raisedWitness` of an `sxRaised` one).
 
-  CandidateReplay* = proc (i: int; c: SatCandidate): bool {.closure.}
-    ## RFC-0016 W4 perf. The settle's replay of one candidate, handed to
-    ## `runSymex` by the entry macros' replayed body (`emitRunSymexReplayed`):
-    ## replays `c` (the run's `RawResult.candidates[i]`), records the outcome
-    ## for the settle that follows the run, and answers whether the replay
-    ## confirmed it. The run calls it in the settle's order and stops at the
-    ## first confirmation, while its context is live, so it walks the tail of
-    ## the candidate a replay confirmed (W3-z R2) and of no other.
+  CandidateReplay* = proc (order: seq[int]; cands: seq[SatCandidate]): int
+                         {.closure.}
+    ## RFC-0016 W4 perf. The settle's replays, handed to `runSymex` by the
+    ## entry macros' replayed body (`emitRunSymexReplayed`): replays the
+    ## candidates in the settle's order, `cands[k]` being the run's
+    ## `RawResult.candidates[order[k]]`, up to the first confirmation, records
+    ## their outcomes for the settle that follows the run, and answers the
+    ## confirmed one's position in `order` (`-1`: none). The run calls it while its
+    ## context is live, so it walks the tail of the candidate a replay
+    ## confirmed (W3-z R2) and of no other. RFC-0016 INT-32 (item 8): the
+    ## replays run at once (`replayInOrder`), and the answer is still the
+    ## first in order.
 
   RawResult* = object
     abstractions*: AbstractionLog
@@ -465,6 +469,12 @@ type
       ## nil dereference edge (`Path.nilDeref`), recorded at target-hit time
       ## beside `pathTaint`. Read only when the finding becomes a replay
       ## candidate (`SatCandidate.nilDerefOnPath`).
+    witnessExtraction*: seq[SymexErrorInfo]
+      ## RFC-0016 INT-32 (R1-33). On a clean `sxSat` / `sxRaised` winner: the
+      ## `feExtractionFailed` records of ITS OWN witness extraction (a value
+      ## the render substituted), which `winnerLossy` reads. `errors` holds
+      ## the run's, a sibling hit's among them, which said nothing about this
+      ## witness. Empty on every other result.
     soundness*:    Soundness
       ## RFC-0005 S11 (§8.1) -- the one carrier (was S1's bare `pathTaint`
       ## field). `soundness.pathTaint` is the taint of the path that produced
@@ -12956,6 +12966,11 @@ type
     budgetOutDepths: seq[seq[tuple[loop: int, iters: int]]]
       ## RFC-0005 S8y. The loop depths (`Path.loopIters`) of each tainted
       ## target hit whose solve ran out of budget (`solveTargetHit`).
+    hitExtraction: seq[SymexErrorInfo]
+      ## RFC-0016 INT-32 (R1-33). The `feExtractionFailed` records the last
+      ## CLEAN target hit's own witness extraction made (`solveTargetHit`),
+      ## read by `admitSolvedHit` into that hit's
+      ## `RawResult.witnessExtraction`. The shared sink holds every hit's.
     callCache: Table[string, seq[CallCacheEntry]]
                        ## RFC-0005 S8ax: a bucket per `argShapeKey`; each
                        ## entry carries its exact arguments and the facts its
@@ -14084,11 +14099,19 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
         w.budgetOutDepths.add p.loopIters
   of tscCheap: discard
   var errs: seq[SymexErrorInfo]
+  w.hitExtraction.setLen(0)
   if isCandidate:
     for i in exLiveStart ..< w.sinks.extractionErrors.len:
       errs.add w.sinks.extractionErrors[i]
     extractionErrors.setLen(exStart)
     w.sinks.extractionErrors.setLen(exLiveStart)
+  else:
+    # RFC-0016 INT-32 (R1-33): a clean hit's own extraction failures stay on
+    # the sink (the run reports them) and are ALSO this hit's, so a winner is
+    # lossy by its own witness only, never by a sibling hit's.
+    for i in exLiveStart ..< w.sinks.extractionErrors.len:
+      if w.sinks.extractionErrors[i].kind == feExtractionFailed:
+        w.hitExtraction.add w.sinks.extractionErrors[i]
   (status: st, witness: wit, candidateErrs: errs, undefWhy: why)
 
 proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
@@ -14102,6 +14125,8 @@ proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
   if scSpurious in r.soundness.pathTaint:
     w.candidates.add r
   else:
+    var r = r
+    r.witnessExtraction = w.hitExtraction   # RFC-0016 INT-32
     w.found.add r
 
 func toCandidate(r: RawResult): SatCandidate =
@@ -27312,19 +27337,23 @@ proc runSymexImpl(prog: SymexProgram,
         scope: DeclineScope(kind: dskUnplaced))
     # RFC-0016 W4 perf: the settle's replays run here, in its order (`sxSat`
     # claims, then `sxRaised` claims, each in discovery order) up to the
-    # first confirmation, while the run's context and the candidates' model
+    # first confirmation (RFC-0016 INT-32 item 8: at once, `replayInOrder`), while the run's context and the candidates' model
     # pins are live (`dropWitnessPins` clears them at the boundary). The
     # entry macro settles on what they recorded once the run returns. A run
     # whose Z3 API errors `runSymex` will turn into a bare `sxUnknown`
     # (RFC-0005 S8m) hands out no candidate to settle, so replays none.
     var confirmed = -1
     if replay != nil and z3ApiErrorCount == 0:
-      block replayPass:
-        for claim in [sxSat, sxRaised]:
-          for i, c in w.candidates:
-            if c.status == claim and replay(i, toCandidate(c)):
-              confirmed = i
-              break replayPass
+      var order: seq[int]
+      var cands: seq[SatCandidate]
+      for claim in [sxSat, sxRaised]:
+        for i, c in w.candidates:
+          if c.status == claim:
+            order.add i
+            cands.add toCandidate(c)
+      if order.len > 0:
+        let k = replay(order, cands)
+        if k >= 0: confirmed = order[k]
     # RFC-0016 W3-z R2 (section 9: replay is no evidence for undefined
     # behaviour). A label candidate a replay confirms is held to the
     # whole-run gate the winner is: its tail is walked under its model pins,

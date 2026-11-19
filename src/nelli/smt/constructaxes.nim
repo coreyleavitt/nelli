@@ -167,6 +167,11 @@ func constructRows(): seq[ConstructKey] =
     "does (`globalRoots`) under the walker's caps (`checkCapped`), so a " &
     "closure call's result is not free there (INT-33)", iNever, nrByDesign)
   result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["cache/record/gaps"], none(SymexErrorKind),
+    "a cached record whose gaps metadata is present but malformed is a miss " &
+    "of the whole record, never served with the gaps up to the break " &
+    "(INT-32)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
     ["db/secondary/guard"], none(SymexErrorKind),
     "a failing secondary-corpus write is reported in `dbErrors` (and ends a " &
     "`strictDb` run with a report), never raised out of `forAll` (INT-33)",
@@ -189,6 +194,12 @@ func constructRows(): seq[ConstructKey] =
     "a replay child's start-up: a child that never took its witness is no " &
     "run, the private directory admits its owner alone, no descriptor leaks " &
     "into the re-executed child (INT-29)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/settle/policy"], none(SymexErrorKind),
+    "how a replay's ending settles and stores a claim: a kill at the bound " &
+    "is stored, an ending from outside the SUT is not, a lossy winner no " &
+    "child ran is `rsRefused` and never run in the host, the strongest raise " &
+    "per type is stored (INT-32)", iNever, nrByDesign)
   result.add refusedEach[ConstructSite, ConstructModel]("",
     ["replay/wire/codec"], none(SymexErrorKind),
     "the replay wire codec reads a zero-size element, allocates and nests " &

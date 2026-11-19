@@ -112,6 +112,101 @@ func replayResultOf*(c: ReplayChild; lossy: bool): ReplayResult =
       of reRefused: roDeclined   # unreachable: handled above
   ReplayResult(fOutcome: outcome, fChild: c)
 
+# ---- replays started, and settled in order ----------------------------------
+
+type
+  PendingReplay* = ref object
+    ## RFC-0016 INT-32 (item 8). A replay started (`startedReplay`) or decided
+    ## without a child (`decidedReplay`), whose `ReplayResult` is known once
+    ## its child is done.
+    child: PendingChild   # nil: decided without one
+    lossy: bool
+    fReplayed: ReplayResult
+    fCounted: bool
+
+proc startedReplay*(c: PendingChild; lossy: bool): PendingReplay =
+  ## A replay whose child `c` was started (or refused); `lossy` as
+  ## `replayResultOf`'s.
+  PendingReplay(child: c, lossy: lossy)
+
+proc decidedReplay*(r: ReplayResult): PendingReplay =
+  ## A replay decided without a child (`replayNotRun`).
+  PendingReplay(fReplayed: r, fCounted: true)
+
+proc settle(p: PendingReplay) =
+  if p.child != nil and not p.fCounted and childDone(p.child):
+    p.fReplayed = replayResultOf(childEnding(p.child), p.lossy)
+    p.fCounted = true
+
+proc counted*(p: PendingReplay): bool =
+  ## Its outcome is known and is one a settle reads. False for a replay
+  ## `replayInOrder` stopped, or one it ran past the winner.
+  p.fCounted
+
+proc replayed*(p: PendingReplay): ReplayResult =
+  ## The outcome. Only when `counted`.
+  doAssert p.fCounted, "the outcome of a replay not counted"
+  p.fReplayed
+
+proc awaitReplay*(p: PendingReplay): ReplayResult =
+  ## `p` waited out.
+  if p.child != nil and not p.fCounted:
+    discard awaitChild(p.child)
+    p.settle()
+  p.fReplayed
+
+const replayWatchSlice = 50
+  ## The longest one wait on the children `replayInOrder` watches, in ms,
+  ## shared between them.
+
+proc replayInOrder*(n, cap: int;
+                    start: proc (k: int): PendingReplay {.closure.}): int =
+  ## RFC-0016 INT-32 (item 8). Replays `n` candidates, `start(k)` starting
+  ## the `k`th, and returns the first in order that confirmed (`-1`: none).
+  ## Up to `cap` (at least one) children run at once, so a candidate that
+  ## hangs no longer holds back the ones after it. The answer does not depend
+  ## on which finished first: candidate `k` wins once it confirmed and every
+  ## earlier one finished without confirming, and no earlier one still
+  ## running is given up on (the cache stores the winner). Once a winner is
+  ## decided every later child is stopped. The replays a settle reads are
+  ## the ones `counted`: every candidate up to the winner (all of them when
+  ## none confirmed), in order; one finished past the winner is not.
+  let cap = max(cap, 1)
+  var reps = newSeq[PendingReplay](n)
+  var next = 0      # the next candidate to start
+  var first = 0     # the first not yet known to have missed
+  result = -1
+  while true:
+    # The winner, or how far the misses reach.
+    while first < next and reps[first].counted:
+      if reps[first].replayed.outcome == roConfirmed:
+        result = first
+        break
+      inc first
+    if result >= 0 or first >= n: break
+    # Start what the cap allows, in order.
+    var running = 0
+    for k in first ..< next:
+      if not reps[k].counted: inc running
+    while next < n and running < cap:
+      reps[next] = start(next)
+      reps[next].settle()
+      if not reps[next].counted: inc running
+      inc next
+    if reps[first].counted: continue   # decided without a child
+    # Wait on the running ones, the slice shared between them.
+    let slice = max(1, replayWatchSlice div max(running, 1))
+    for k in first ..< next:
+      if not reps[k].counted:
+        stepChild(reps[k].child, slice)
+        reps[k].settle()
+  # Past the winner nothing is read: what runs is stopped, and what
+  # finished is not counted, as it would not have run one after another.
+  for k in result + 1 ..< next:
+    if result < 0: break
+    if reps[k].child != nil: stopChild(reps[k].child)
+    reps[k].fCounted = false
+
 func endsChild*(r: ReplayResult): bool =
   ## Review R2 (DD1). The replay's child did not finish: it exited, was ended
   ## by a signal or a system exception, was killed, or ended with its status
@@ -131,16 +226,29 @@ func detail*(r: ReplayResult): string =
 func runDependence*(r: ReplayResult): set[RunDependence] =
   ## RFC-0005 0.9.1 (WA-7). What this replay adds to its verdict's
   ## `Soundness.runDependence`. Review R5 (D4b): a pure function of the child:
-  ## a `reTimedOut` or `reLost` ending is run-dependent by construction, so no
-  ## producer can forget it; `ReplayChild.runDependent` adds the causes an
-  ## ending cannot express (see its doc, the one place both are described).
-  if r.child.ending in {reTimedOut, reLost} or r.child.runDependent: {rdReplay}
+  ## a `reLost` ending, a `reTimedOut` one not killed at the bound, and
+  ## (RFC-0016 INT-32) a `reSignalled` one ended from outside the SUT are
+  ## run-dependent by construction, so no producer can forget them;
+  ## `ReplayChild.runDependent` adds the causes an ending cannot express (see
+  ## its doc, the one place both are described). RFC-0016 INT-32 (R4-07): a
+  ## child killed at `replayTimeoutMs` is not, since the bound is in the key,
+  ## so an always-hanging witness does not pay the bound on every run.
+  let c = r.child
+  if c.ending == reLost or c.runDependent or
+     (c.ending == reTimedOut and not killedAtBound(c)) or
+     signalledFromOutside(c):
+    {rdReplay}
   else: {}
 
 func replayStatus*(r: ReplayResult): ReplayStatus =
   ## The `ReplayStatus` a claim this replay settled carries: only a
-  ## confirmation is `rsConfirmed`.
-  if r.outcome == roConfirmed: rsConfirmed else: rsUnconfirmed
+  ## confirmation is `rsConfirmed`. RFC-0016 INT-32 (R4-10): a replay no
+  ## child could run (`roDeclined`) is `rsRefused`, which no consumer runs in
+  ## its own process.
+  case r.outcome
+  of roConfirmed: rsConfirmed
+  of roDeclined: rsRefused
+  else: rsUnconfirmed
 
 func hintKind*(o: ReplayOutcome): SymexErrorKind =
   ## The `feReplay*` kind a hint about an unconfirmed replay carries. A
@@ -252,7 +360,10 @@ func winnerHint*(r: ReplayResult; claim: string;
   result.add tagged(hintKind(r.outcome),
     "the clean winner, " & claim & ", reaches the target, but " & lossyWhy &
     ", and its replay did not confirm it: " & why &
-    ". Not trusted (rsUnconfirmed)")
+    ". Not trusted (" & $r.replayStatus & ")" &
+    (if r.outcome == roDeclined:
+       "; nothing has run it, so it is not run in the host"
+     else: ""))
 
 func winnerUnreplayedHint*(claim: string): SymexErrorInfo =
   ## RFC-0005 0.9.1 (WA-9). `SymexSettings.replay = false`: a lossy clean

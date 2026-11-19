@@ -106,7 +106,7 @@ static:
            high(SoundnessChannel) == scIncomplete
   doAssert ord(rsUnsettled) == 0 and ord(rsNotNeeded) == 1 and
            ord(rsConfirmed) == 2 and ord(rsUnconfirmed) == 3 and
-           high(ReplayStatus) == rsUnconfirmed
+           ord(rsRefused) == 4 and high(ReplayStatus) == rsRefused
   doAssert ord(rdQueryTimeout) == 0 and ord(rdNativeStack) == 1 and
            ord(rdReplay) == 2 and high(RunDependence) == rdReplay
   doAssert allBits <= 9 and allRunBits <= 9 and ord(high(ReplayStatus)) <= 9
@@ -193,9 +193,8 @@ proc soundnessMeta(s: Soundness): Table[string, string] =
 # single delimited value the way `encodeSoundness` can for its
 # always-one-digit fields. A `gapsnMetaKey`/`gapsVersionMetaKey` pair marks
 # how many entries to read back and which encoding wrote them, mirroring
-# `soundnessMetaVersion`. Missing/malformed metadata degrades to `@[]`
-# rather than a miss — `gaps` is best-effort detail on top of the
-# load-bearing `Soundness` (symexWalkerVersion's S8av/S8az bullets).
+# `soundnessMetaVersion`. Missing metadata degrades to `@[]`; RFC-0016 INT-32:
+# malformed metadata is a miss of the whole record, never a prefix of it.
 
 const gapsVersionMetaKey = "gapsv"
 const gapsVersion = "1"
@@ -210,26 +209,35 @@ proc gapsMeta(gaps: seq[FindingGap]): Table[string, string] =
     result["gapsk" & $i] = g.kind
     result["gapsm" & $i] = g.msg
 
-proc storedGaps(meta: Table[string, string]): seq[FindingGap] =
-  ## The inverse of `gapsMeta`; `@[]` for anything it did not write
-  ## (absent, wrong version, or malformed — never raises).
-  if meta.getOrDefault(gapsVersionMetaKey, "") != gapsVersion: return @[]
+proc storedGaps(meta: Table[string, string]): Option[seq[FindingGap]] =
+  ## The inverse of `gapsMeta`. `some(@[])` for a record with no gaps metadata
+  ## at all (written before S8av/S8az, or by a writer that records none).
+  ## RFC-0016 INT-32 (R1-33): `none` for gaps metadata that is present but not
+  ## this encoding or not whole (another version, a count that is not a
+  ## number, an entry missing or out of range), and every caller reads that as
+  ## a miss of the WHOLE record. It served the gaps up to the break, so a hit
+  ## could report fewer gaps than the cold run had. Never raises.
+  if gapsVersionMetaKey notin meta: return some(newSeq[FindingGap]())
+  if meta[gapsVersionMetaKey] != gapsVersion: return none(seq[FindingGap])
   var n: int
   try: n = parseInt(meta.getOrDefault(gapsCountMetaKey, ""))
-  except ValueError: return @[]
-  if n < 0: return @[]
+  except ValueError: return none(seq[FindingGap])
+  if n < 0: return none(seq[FindingGap])
+  var gaps: seq[FindingGap]
   for i in 0 ..< n:
     let cKey = "gapsc" & $i
     let kKey = "gapsk" & $i
     let mKey = "gapsm" & $i
-    if cKey notin meta or kKey notin meta: return result   ## stop at the break
+    if cKey notin meta or kKey notin meta or mKey notin meta:
+      return none(seq[FindingGap])
     var classOrd: int
     try: classOrd = parseInt(meta[cKey])
-    except ValueError: return result
+    except ValueError: return none(seq[FindingGap])
     if classOrd < ord(low(DegradeClass)) or classOrd > ord(high(DegradeClass)):
-      return result
-    result.add FindingGap(class: DegradeClass(classOrd), kind: meta[kKey],
-                          msg: meta.getOrDefault(mKey, ""))
+      return none(seq[FindingGap])
+    gaps.add FindingGap(class: DegradeClass(classOrd), kind: meta[kKey],
+                        msg: meta[mKey])
+  some(gaps)
 
 proc storedSoundness(meta: Table[string, string]): Option[Soundness] =
   if soundnessMetaKey notin meta: return none(Soundness)
@@ -466,9 +474,12 @@ proc loadSymexWitnessesImpl*(db: ExampleDatabase, prog: SymexProgram,
   try:
     for e in db.loadPrimaryWithMeta(key):
       let s = storedSoundness(e.meta)
-      if s.isSome:
-        result.add (choices: e.choices, soundness: s.get,
-                    gaps: storedGaps(e.meta))   ## RFC-0005 S8az
+      let g = storedGaps(e.meta)   ## RFC-0005 S8az; INT-32: malformed is a miss
+      if s.isSome and g.isSome:
+        result.add (choices: e.choices, soundness: s.get, gaps: g.get)
+      elif s.isSome:
+        errors.add "loadSymexWitnessesImpl: an entry with malformed gaps " &
+          "metadata is treated as a miss"
       else:
         errors.add "loadSymexWitnessesImpl: an entry without soundness " &
           "metadata (pre-RFC-0005-S11 format) is treated as a miss"
@@ -520,9 +531,11 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   # RFC-0005 S8ca: likewise one a call declined for want of native stack
   # (`rdNativeStack`): a thread with a larger stack goes deeper.
   # RFC-0005 0.9.1 (WA-7): likewise one a replay left undecided for a reason
-  # of the run (`rdReplay`): a child killed at `replayTimeoutMs`, one ended at
-  # the replay's memory limit, or one that could not be started or handed its
-  # state at that moment. The next run tries the replay again.
+  # of the run (`rdReplay`): a child stopped at a resource limit, ended at the
+  # replay's memory limit or by a signal from outside it, or one that could
+  # not be started or handed its state at that moment. The next run tries the
+  # replay again. RFC-0016 INT-32: a child killed at `replayTimeoutMs` is not
+  # among them (the bound is keyed), so its verdict is stored.
   # Review R1-07: read off the `soundness` the verdict was decided under, so a
   # save after other work on this thread still reads its own run's.
   if status == sfUnknown and soundness.runDependence != {}:
@@ -577,9 +590,13 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
       let entries = db.loadPrimaryWithMeta(baseKey & suffix)
       if entries.len == 1 and entries[0].choices.len == 0:
         let s = storedSoundness(entries[0].meta)
+        let g = storedGaps(entries[0].meta)   # RFC-0016 INT-32
+        if s.isSome and g.isSome:
+          return some((status: verdict, soundness: s.get, gaps: g.get))
         if s.isSome:
-          return some((status: verdict, soundness: s.get,
-                       gaps: storedGaps(entries[0].meta)))
+          errors.add "loadSymexVerdictImpl: a sentinel with malformed gaps " &
+            "metadata is treated as a miss"
+          return none(CachedVerdict)
         errors.add "loadSymexVerdictImpl: a sentinel without soundness " &
           "metadata (pre-RFC-0005-S11 format) is treated as a miss"
     except CatchableError as e:
@@ -668,18 +685,29 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   # Distinct type ids in first-seen order (duplicate raise paths of the same
   # type collapse to a single DB slot — the per-type key is the unit of record).
   var typeIds: seq[string] = @[]
-  var sounds: seq[Soundness] = @[]   ## RFC-0005 S11: the first finding's, per type
-  var gapsByType: seq[seq[FindingGap]] = @[]   ## RFC-0005 S8az: ditto
-  var witsByType: seq[seq[ChoiceNode]] = @[]   ## RFC-0005 W1: ditto
-  var defectByType: seq[bool] = @[]            ## RFC-0005 W1: ditto
+  # RFC-0016 INT-32 (R1-33): per type, the STRONGEST finding (`claimRank`;
+  # a tie keeps the earlier), with its own gaps, witness and defect-ness. It
+  # kept the first, so a weaker earlier finding hid a trusted later one.
+  var sounds: seq[Soundness] = @[]             ## RFC-0005 S11
+  var gapsByType: seq[seq[FindingGap]] = @[]   ## RFC-0005 S8az
+  var witsByType: seq[seq[ChoiceNode]] = @[]   ## RFC-0005 W1
+  var defectByType: seq[bool] = @[]            ## RFC-0005 W1
   for i, raw in found:
     if raw.status != sxRaised: continue
-    if raw.raisedTypeId notin typeIds:
+    let g = (if i < gaps.len: gaps[i] else: @[])
+    let w = (if i < witnesses.len: witnesses[i] else: @[])
+    let j = typeIds.find(raw.raisedTypeId)
+    if j < 0:
       typeIds.add raw.raisedTypeId
       sounds.add raw.soundness
-      gapsByType.add (if i < gaps.len: gaps[i] else: @[])
-      witsByType.add (if i < witnesses.len: witnesses[i] else: @[])
+      gapsByType.add g
+      witsByType.add w
       defectByType.add raw.isDefect
+    elif claimRank(raw.soundness) > claimRank(sounds[j]):
+      sounds[j] = raw.soundness
+      gapsByType[j] = g
+      witsByType[j] = w
+      defectByType[j] = raw.isDefect
   if typeIds.len == 0: return false
   try:
     # Invalidate first: the old index (if any) must not outlive the first
@@ -757,6 +785,14 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
       let s =
         if sentinel.len == 1: storedSoundness(sentinel[0].meta)
         else: none(Soundness)
+      let g =
+        if sentinel.len == 1: storedGaps(sentinel[0].meta)
+        else: none(seq[FindingGap])
+      if s.isSome and g.isNone:
+        # RFC-0016 INT-32: a sentinel whose gaps are malformed is no record.
+        errors.add "loadSymexRaisedImpl: raised(" & tid & ") has malformed " &
+          "gaps metadata; a miss"
+        return
       if s.isNone:
         # A hit needs the complete set the index describes.
         errors.add "loadSymexRaisedImpl: raised(" & tid & ") has no " &
@@ -767,7 +803,7 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
                                  isDefect: sentinel[0].meta.getOrDefault(
                                    raisedDefectMetaKey, "") == "1",
                                  soundness: s.get),
-                  gaps: storedGaps(sentinel[0].meta),
+                  gaps: g.get,
                   choices: sentinel[0].choices)
     result = loaded
   except CatchableError as e:

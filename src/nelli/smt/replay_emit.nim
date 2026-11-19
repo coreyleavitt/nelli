@@ -71,7 +71,7 @@ proc paramsFidelity*(params: seq[IRParam]): WitnessFidelity =
   result = wfFaithful
   for p in params: result = max(result, witnessFidelity(p.ty, noms))
 
-proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
+proc emitStartReplay*(fn: NimNode; params: seq[IRParam];
                         witness, target, pathTaint: NimNode;
                         extraLossy: NimNode = newLit(false);
                         nilDeref: NimNode = newLit(false);
@@ -81,7 +81,8 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         hoist: NimNode = nil): NimNode =
   ## RFC-0005 S2: the macro-time half of `replayWitness`, spliced by S10 into
   ## the entry macros' shared replay emitter (`emitRunSymexReplayed`). Emits
-  ## an expression of type `ReplayResult`. `witness` is the typed witness
+  ## an expression of type `PendingReplay`: the replay started, not waited
+  ## for (RFC-0016 INT-32 item 8; `emitReplayWitness` waits). `witness` is the typed witness
   ## tuple (the output of `emitTyAndReader`), `target` a `SymexTarget`
   ## expression, `pathTaint` a `Taint` expression (the candidate's).
   ## `extraLossy` (RFC-0005 S10) is a runtime `bool`: true when the model
@@ -110,10 +111,11 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   if fidelity == wfUnexecutable:
     # Decided at macro time: the splat is not even emitted, so a placeholder
     # (a nil proc, a nil ptr) can never be called.
-    return newCall(bindSym"replayNotRun")
+    return newCall(bindSym"decidedReplay", newCall(bindSym"replayNotRun"))
   let paramTys = formalParamTypes(fn)
   if paramTys.len != params.len:
-    return newCall(bindSym"replayNotRun")   # not a plain proc type: never run it
+    # not a plain proc type: never run it
+    return newCall(bindSym"decidedReplay", newCall(bindSym"replayNotRun"))
   let witId = genSym(nskLet, "replayWit")
   let tgtId = genSym(nskLet, "replayTarget")
   let escId = genSym(nskVar, "replayEscaped")
@@ -168,7 +170,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   when replayForks:
     let body = runBody(witId, tgtId)
     runChild = quote do:
-      runReplayForked(proc (): ReplayReport {.closure, gcsafe.} =
+      startReplayForked(proc (): ReplayReport {.closure, gcsafe.} =
         {.cast(gcsafe).}:
           result = (block:
             `body`), `timeoutMs`)
@@ -193,7 +195,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
     if refuse.len > 0:
       let msg = newLit(refuse)
       runChild = quote do:
-        refusedNotMarshallable(`msg`)
+        readyChild(refusedNotMarshallable(`msg`))
     else:
       inc replaySiteCounter
       let info = lineInfoObj(fn)
@@ -317,7 +319,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
             `putGlobals`
           except WireError as e:
             refused = e.msg
-          if refused.len > 0: refusedNotMarshallable(refused)
+          if refused.len > 0: readyChild(refusedNotMarshallable(refused))
           else:
             # RFC-0005 batch 11: what the host installed at run time, which the
             # child would start without (`putHostHooks`: RFC-0016 INT-13 hands
@@ -325,13 +327,13 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
             # only, so the decline is not cached.
             let hook = putHostHooks(`wr`)
             let dispatch = `dispatchCheck`
-            if hook.len > 0: refusedHostHook(hook)
-            elif dispatch.len > 0: refusedNotMarshallable(dispatch)
-            else: runReplayReexec(`site`, `wr`.data, `timeoutMs`)
+            if hook.len > 0: readyChild(refusedHostHook(hook))
+            elif dispatch.len > 0: readyChild(refusedNotMarshallable(dispatch))
+            else: startReplayReexec(`site`, `wr`.data, `timeoutMs`)
   else:
     runChild = quote do:
-      refusedStatically("this platform has no way to run a replay outside " &
-                        "the host process")
+      readyChild(refusedStatically("this platform has no way to run a " &
+                                   "replay outside the host process"))
   if hoist != nil:
     hoist.add preamble
     preamble = newStmtList()
@@ -341,15 +343,28 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
       let `tgtId`: SymexTarget = `target`
       if not replayEligible(`pathTaint`) or not replayInScope(`tgtId`) or
          `nilDeref`:
-        replayNotRun()
+        decidedReplay(replayNotRun())
       else:
         let `witId` {.used.} = `witness`
         when not (`convertible`):
-          replayNotRun()
+          decidedReplay(replayNotRun())
         else:
           # RFC-0005 S8ct: the run is in a child: the host learns how it ended.
           let `childRes` = `runChild`
-          replayResultOf(`childRes`, `lossy` or `extraLossy` or `converted`)
+          startedReplay(`childRes`, `lossy` or `extraLossy` or `converted`)
+
+proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
+                        witness, target, pathTaint: NimNode;
+                        extraLossy: NimNode = newLit(false);
+                        nilDeref: NimNode = newLit(false);
+                        timeoutMs: NimNode = newLit(
+                          SymexSettings().replayTimeoutMs);
+                        child: ChildWitness = ChildWitness();
+                        hoist: NimNode = nil): NimNode =
+  ## `emitStartReplay`, waited out: an expression of type `ReplayResult`.
+  newCall(bindSym"awaitReplay",
+          emitStartReplay(fn, params, witness, target, pathTaint, extraLossy,
+                          nilDeref, timeoutMs, child, hoist))
 
 proc methodPrelude*(fn: NimNode): NimNode =
   ## RFC-0005 S8bn (item 6). nil when every method `fn` calls (transitively)

@@ -101,10 +101,20 @@ type
     rsUnconfirmed  ## RFC-0005 0.9.1 (WA-9). A clean winner whose witness is
                    ## lossy (`feExtractionFailed`, `wfLossy`: the rendered value
                    ## is not the model's), which no replay confirmed: it was
-                   ## refuted, timed out, crashed, declined or did not run. The
-                   ## clean path still reaches the target, so the status stands,
-                   ## but nothing has run the reported witness: not `trusted()`.
-                   ## A `feReplay*` hint says why
+                   ## refuted, timed out or crashed, or replay is off
+                   ## (`SymexSettings.replay = false`). The clean path still
+                   ## reaches the target, so the status stands, but the reported
+                   ## witness is not shown to reach it: not `trusted()`. A
+                   ## `feReplay*` hint says why
+    rsRefused      ## RFC-0016 INT-32 (review R4-10). As `rsUnconfirmed`, but no
+                   ## child could run the replay (`roDeclined`: refused at
+                   ## compile time, not marshallable, or not started). The
+                   ## lossy witness is a value the solver never vetted against
+                   ## any path, and nothing isolated has run it, so it is not
+                   ## `trusted()` and not `hostRunnable`: no consumer runs it
+                   ## in its own process, cold or from the cache. Stored when
+                   ## the refusal is the build's (the replay mode is keyed);
+                   ## not when it was the moment's (`rdReplay`, `cacheable`)
 
   RunDependence* = enum
     ## RFC-0005 0.9.1 (WA-7; review R1-07). Why a verdict is this run's and not
@@ -118,8 +128,9 @@ type
     rdNativeStack   ## RFC-0005 S8ca. A call declined for want of native stack
                     ## (or of Nim's call depth): a thread with more goes deeper
     rdReplay        ## RFC-0005 0.9.1 (WA-7). A replay's child ended in a way
-                    ## another run may not: killed at `replayTimeoutMs`, ended
-                    ## at the replay's memory limit, or not started or not
+                    ## another run may not: stopped at a resource limit, ended
+                    ## at the replay's memory limit or by a signal from outside
+                    ## it (RFC-0016 INT-32), its status lost, or not started or not
                     ## handed its state for a reason of the moment
                     ## (`ReplayChild.runDependent`)
 
@@ -191,7 +202,7 @@ func trustedSat*(s: Soundness): bool =
   if s.witnessUndefined != {}: return false   # RFC-0016 W1-d3: replay cannot lift it
   case s.replay
   of rsConfirmed: true
-  of rsUnconfirmed, rsUnsettled: false
+  of rsUnconfirmed, rsRefused, rsUnsettled: false
   of rsNotNeeded: scSpurious notin s.pathTaint
 
 func hostRunnable*(s: Soundness): bool =
@@ -199,8 +210,9 @@ func hostRunnable*(s: Soundness): bool =
   ## in its own process, from typed data only: never one a replay saw end or
   ## hang its child (`witnessUnsafe`), and never an unsettled record (R1-16).
   ## Untrusted claims (`rsUnconfirmed`) are runnable otherwise: running one
-  ## is how a consumer learns whether it reaches the target.
-  s.replay != rsUnsettled and not s.witnessUnsafe and
+  ## is how a consumer learns whether it reaches the target. RFC-0016 INT-32:
+  ## never a lossy witness no replay child could run (`rsRefused`).
+  s.replay notin {rsUnsettled, rsRefused} and not s.witnessUnsafe and
     s.witnessUndefined == {}   # RFC-0016 W1-d3: undefined behaviour is never run in the host
 
 func hostRunnable*(witnessUndefined: set[UbOrdinal], witnessUnsafe: bool): bool =
@@ -209,6 +221,15 @@ func hostRunnable*(witnessUndefined: set[UbOrdinal], witnessUnsafe: bool): bool 
   ## never `rsUnsettled`-refused, but never runnable past either flag).
   not witnessUnsafe and witnessUndefined == {}
 
+func claimRank*(s: Soundness): int =
+  ## RFC-0016 INT-32 (R1-33). How strong a claim (`sxSat` / `sxRaised`) settled
+  ## under `s` is, as the lattice above orders it: a `trustedSat` claim first
+  ## (2), then one whose witness a consumer may run in its own process
+  ## (`hostRunnable`, 1), then the rest (0). Used where one record must stand
+  ## for several claims of one kind (`saveSymexRaisedImpl`, one sentinel per
+  ## raised type), so the record kept is the strongest, never merely the first.
+  (if trustedSat(s): 2 else: 0) + (if hostRunnable(s): 1 else: 0)
+
 func cacheable*(s: Soundness): bool =
   ## Review R2 (DD7). Whether a claim (`sxSat` / `sxRaised`) settled under
   ## `s` may be stored for good. Not a lossy winner the replay left
@@ -216,8 +237,11 @@ func cacheable*(s: Soundness): bool =
   ## run replays it again.
   ##
   ## Review R3 (SC1): nor a claim whose `witnessUnsafe` may be the run's (a
-  ## child killed at `replayTimeoutMs`, one ended at the memory limit, one
-  ## whose status was lost), confirmed or not. Stored, one slow or odd host
+  ## child ended at the memory limit, one whose status was lost, one ended by
+  ## a signal from outside it), confirmed or not. RFC-0016 INT-32 (R4-07): a
+  ## child killed at `replayTimeoutMs` is no longer among them: the bound and
+  ## the host are in the cache key, so the kill is the key's fact, and the
+  ## claim is stored with the bit (which fails closed). Stored, one slow or odd host
   ## would mark the witness unrunnable for good. Not stored rather than
   ## stored without the bit: a hit would then run in the host a witness
   ## whose replay hung or lost its child, which fails open; a miss costs one
@@ -226,7 +250,7 @@ func cacheable*(s: Soundness): bool =
   ## candidate's replay also keeps an unsafe claim out: conservative, never
   ## wrong. An unsafe bit no replay of the run's could have set (`quit`, a
   ## signal, on every run) is the program's and is stored.
-  not ((s.replay == rsUnconfirmed or s.witnessUnsafe) and
+  not ((s.replay in {rsUnconfirmed, rsRefused} or s.witnessUnsafe) and
        rdReplay in s.runDependence)
 
 func trustedUnsat*(s: Soundness): bool =

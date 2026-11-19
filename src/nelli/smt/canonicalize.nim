@@ -902,6 +902,15 @@ const renderAsChoicesVersion* = "12"
   ##   the verdicts its old `lib/` made. A concolic flip's solve asserts the
   ##   walker's run-wide facts under its caps (INT-33), which moves the flips
   ##   a closure condition's result decides. Every key moves.
+  ## - RFC-0016 W4 rv0005-lows part 3 (406->408; 407 is reserved; INT-32): a
+  ##   replay killed at `replayTimeoutMs` is no longer run-dependent (the bound
+  ##   is keyed), so its verdict is stored; one ended by a signal from outside
+  ##   the SUT is run-dependent and not stored; a lossy winner whose replay no
+  ##   child could run is `rsRefused` (a new `ReplayStatus`, never run in the
+  ##   host); a record with malformed gaps metadata is a miss; the strongest
+  ##   raise per type is stored, not the first; a winner is lossy by its own
+  ##   extraction only. Entries an earlier walker stored are stale. No key
+  ##   bytes change.
 
 const symexWalkerVersion* = "412"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
@@ -7364,15 +7373,19 @@ const symexSettingsNeutral* = [
   "acceptUnknownAsCovered",
     # Governs `assertCoveredBy`'s raise/pass decision AFTER the walker
     # returns; it has no influence on what symex returns or what is persisted.
-  "budget.maxInstantiationsPerProc"
+  "budget.maxInstantiationsPerProc",
     # Self-protected: the cap changes which procs are registered in
     # `prog.procs`, which is already part of the program's canonical key
     # (`canonicalize(prog)`).
+  "replayConcurrency"
+    # RFC-0016 INT-32 (item 8). How many replay children run at once: the
+    # winner is the first in order that confirms whatever it is
+    # (`replayInOrder`), so the verdict is the same at every value.
   ]
   ## RFC-0016 K5a (section 8.3). The `SymexSettings` fields (dotted for the
   ## ones inside `budget`) that are verdict-neutral and so NOT in the cache
-  ## key. Exactly the two the hand-written list left out. Every other field,
-  ## and any field added later, is keyed by `canonicalize(SymexSettings)`
+  ## key: the two the hand-written list left out, and `replayConcurrency`
+  ## (RFC-0016 INT-32). Every other field, and any field added later, is keyed by `canonicalize(SymexSettings)`
   ## iterating `fieldPairs`: a new setting cannot be silently unkeyed, and
   ## keeping one out of the key means naming it here with a reason.
 

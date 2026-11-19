@@ -25,7 +25,7 @@
 ## the algorithmic core ships first so the Wing-Gong definition is
 ## in place and tested independent of the thread-orchestration layer.
 
-import std/[options, hashes, sets, locks, monotimes, times, macros]
+import std/[options, hashes, sets, locks, monotimes, times, macros, atomics]
 import ./strategy, ./datasource, ./int128, ./choice
 
 when defined(windows):
@@ -244,32 +244,50 @@ type
     barrierCount: ptr int
     barrierTarget: int
 
+var schedulerYieldCount: Atomic[int]
+  ## RFC-0016 INT-32. How many scheduler-yield system calls this process has
+  ## made (`schedulerYield`), so the cost of jitter is observable.
+
+proc schedulerYields*(): int =
+  ## RFC-0016 INT-32. How many scheduler-yield system calls (`sched_yield` /
+  ## `SwitchToThread`) the harness has made in this process: jitter and
+  ## `parallelJitterPoint` alike.
+  schedulerYieldCount.load(moRelaxed)
+
 proc schedulerYield() {.inline.} =
   ## Ask the OS scheduler to run a different ready thread right now, if
   ## one exists. A real syscall (`sched_yield` / `SwitchToThread`) that
   ## can produce an actual context switch — unlike a busy no-op spin,
   ## which never leaves this thread's own timeslice and so can never
   ## influence which thread the kernel schedules next.
+  discard schedulerYieldCount.fetchAdd(1, moRelaxed)
   when defined(windows):
     discard winSwitchToThread()
   else:
     discard posix.sched_yield()
 
+const jitterPausesPerUnit = 8
+  ## RFC-0016 INT-32. CPU pause instructions (`cpuRelax`) per jitter unit.
+
 proc spinJitter(n: int) {.inline.} =
-  ## `n` scheduler-yield calls (see `schedulerYield`), spent before an
-  ## op is invoked. `n = 0` costs nothing — the loop body never runs —
-  ## so `maxJitter = 0` remains a true no-op fast path.
+  ## `n` jitter units, spent before an op is invoked: ONE scheduler-yield
+  ## system call (see `schedulerYield`), which lets the OS run another ready
+  ## thread, then `n * jitterPausesPerUnit` CPU pause instructions, which
+  ## stagger this thread against siblings running on other cores at a
+  ## resolution far below a scheduling quantum. `n = 0` costs nothing, so
+  ## `maxJitter = 0` remains a true no-op fast path.
   ##
-  ## This used to be a counted busy spin (`var k = 0; while k < n: inc
-  ## k`): a pure no-op loop that never asked the OS for anything and so
-  ## ran in nanoseconds — several orders of magnitude below a real
-  ## scheduling quantum (~1-15ms on Linux) and therefore structurally
-  ## incapable of influencing which thread actually runs next. `n`'s
-  ## UNIT is unchanged (still "how many jitter units", same integer
-  ## range every existing caller already passes); only the mechanism
-  ## each unit spends its time on changed, from spinning to yielding.
-  for _ in 0 ..< n:
-    schedulerYield()
+  ## History. A counted busy spin (`while k < n: inc k`) never asked the OS
+  ## for anything and compiled to nothing measurable. Its replacement spent
+  ## one yield per unit, up to `maxJitter` (100) system calls per op
+  ## (RFC-0016 INT-32, review R1-34). A second yield in a row adds nothing a
+  ## first did not: the scheduler has already been asked. `n`'s unit and
+  ## range are unchanged, and a larger `n` is still a longer delay, so the
+  ## shrinker still pulls it toward 0.
+  if n <= 0: return
+  schedulerYield()
+  for _ in 0 ..< n * jitterPausesPerUnit:
+    cpuRelax()
 
 proc parallelJitterPoint*(n = 1) =
   ## The low-level primitive: call this from INSIDE an `applySUT` op

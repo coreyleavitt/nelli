@@ -5327,7 +5327,9 @@ proc deadResultExpr(ctx: ParseCtx; call: NimNode;
   ## RFC-0016 INT-92. `call`, of whose value nothing (or only the fields
   ## `live`) is read, its callee registered under `#resultdead`.
   let saved = ctx.deadResultCallNode
-  let savedLive = ctx.deadResultLive
+  # A `var`, not a `let`: in the compile-time VM a `let` of a seq field
+  # aliases it (RFC-0005 S8x); the restore below must see the old value.
+  var savedLive = ctx.deadResultLive
   ctx.deadResultCallNode = call
   ctx.deadResultLive = live
   result = parseExpr(call, preamble, ctx)
@@ -13181,7 +13183,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   if n.kind == nnkDotExpr and n.len == 2 and n[1].kind == nnkSym and
      n[0] != ctx.deadResultCallNode and deadResultCall(n[0], @[n[1].strVal]):
     let saved = ctx.deadResultCallNode
-    let savedLive = ctx.deadResultLive
+    # A `var`, not a `let`: in the compile-time VM a `let` of a seq field
+    # aliases it (RFC-0005 S8x); the restore below must see the old value.
+    var savedLive = ctx.deadResultLive
     ctx.deadResultCallNode = n[0]
     ctx.deadResultLive = @[n[1].strVal]
     result = parseExpr(n, preamble, ctx)
@@ -26134,8 +26138,10 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   ctx.resultDead = viewDead
   let savedDeadResNode = ctx.deadResultCallNode
   let savedValueDead = ctx.resultValueDead
-  let savedDeadLive = ctx.deadResultLive
-  let savedLiveFields = ctx.resultLiveFields
+  # A `var`, not a `let`: in the compile-time VM a `let` of a seq field
+  # aliases it (RFC-0005 S8x); the restore below must see the old value.
+  var savedDeadLive = ctx.deadResultLive
+  var savedLiveFields = ctx.resultLiveFields
   ctx.deadResultCallNode = nil
   ctx.resultValueDead = deadRes
   ctx.deadResultLive = @[]

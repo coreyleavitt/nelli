@@ -39,7 +39,7 @@ const within = mkUnwind4(120_000_000)
 
 suite "int6 D1d: a pruning check a kept model satisfies is not searched":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 466
+    check parseInt(symexWalkerVersion) >= 472
 
   test "unroll 4 of a forking loop is decided within the budget":
     let r = symexFind(filterNested, tLabel("hit"), within)

@@ -53,7 +53,7 @@ const whole = mkUnwind3(defaultSymexSettings().budget.walkRLimit)
 
 suite "int6 D1b: the walk budget charges each query's fixed cost":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 464
+    check parseInt(symexWalkerVersion) >= 471
 
   test "a clean exploding loop ends on the budget, classified":
     let r = symexFind(filterNested, tLabel("hit"), cut)

@@ -1403,7 +1403,7 @@ const renderAsChoicesVersion* = "12"
   ##   binary never raises. A user routine whose text on disk ends before
   ##   its position, or defines its name but not starting there
   ##   (`textDisagrees`), now declines `feCheckOption`. No key bytes change.
-  ## - RFC-0016 int6 D1 (458->460; 459 is reserved on another branch): a
+  ## - RFC-0016 int6 D1 (468->470; 469 is reserved on another branch): a
   ##   command (`f x`) is a call in expression position too (`parseExpr`),
   ##   as it always was in statement position, and the call-shape
   ##   recognisers (`isMarkerCall`, the `addr` and `low`/`high` shapes, the
@@ -1413,7 +1413,7 @@ const renderAsChoicesVersion* = "12"
   ##   `feUnsupportedExprKind`, so no hit was clean and a `seq[seq[int]]`
   ##   parameter's walk enumerated every unwound path (past 900 s). No key
   ##   bytes change.
-  ## - RFC-0016 int6 D1b (460->464; 461-463 are reserved on other branches):
+  ## - RFC-0016 int6 D1b (470->471):
   ##   `walkRLimit` charges each own-context solver a fixed
   ##   `walkerContextUnits` (25,000) beside its Z3 units and term visits: the
   ##   context, solver, check overhead and teardown no count saw, measured at
@@ -1422,7 +1422,7 @@ const renderAsChoicesVersion* = "12"
   ##   it and the walk ran to the stall backstop; it now ends on the budget
   ##   (`ckWalkWork`, `beBudgetExhaustedPrune`). A walk the budget cut
   ##   before is cut sooner, so verdicts move. No key bytes change.
-  ## - RFC-0016 int6 D1d (464->466; 465 is reserved on another branch): a
+  ## - RFC-0016 int6 D1d (471->472): a
   ##   pruning check that a model kept from an earlier SAT search satisfies
   ##   is SAT without a search (`refuteStatus`), `mergeMemberships` returns a
   ##   query with no membership literal at once, and `walkerContextUnits` is
@@ -1430,7 +1430,7 @@ const renderAsChoicesVersion* = "12"
   ##   may now decide (the k9cg FilterIt shape's unroll 4: 141.4M units to
   ##   86.0M), so verdicts move. No key bytes change.
 
-const symexWalkerVersion* = "468"
+const symexWalkerVersion* = "472"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

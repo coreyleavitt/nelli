@@ -67,7 +67,7 @@ proc noCommandDecline[T](r: SymexResult[T]): bool =
 
 suite "int6 D1: a command-syntax call is a call":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 460
+    check parseInt(symexWalkerVersion) >= 470
 
   test "`move s` in command syntax is the moved value":
     let r = pinFind(moveCommand, tLabel("hit"), pinSettingsConst)

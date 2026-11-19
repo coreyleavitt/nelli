@@ -1232,7 +1232,6 @@ proc isConcolicFollowWalk(): bool
 
 proc programGlobal(name: string): Option[IRGlobal]  ## RFC-0005 S8as fwd decl
 proc globalHiddenRoute(name: string): string  ## RFC-0005 S8cs fwd decl
-proc entryValueOf(name: string): SymVal  ## RFC-0005 S8as fwd decl
 
 proc pendingEnvWriteIx(name: string): int =
   ## RFC-0005 S8as. The index of the latest pending closure write of `name`
@@ -1456,25 +1455,6 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C2b fwd-decl. Defined AFTER `walk` (it descends the lambda body
   ## via `walk`), called from `lower(iekClosureCall)` (defined before `walk`).
 
-proc lowerSeqLit(env: Env, e: IRExpr): SymVal
-  ## Phase 15 C4 fwd-decl. Concrete seq-literal `@[..]` → concrete-length svSeq.
-
-proc lowerSeqNew(env: Env, e: IRExpr): SymVal
-  ## RFC-0005 S8bc / S8bi fwd-decl. `newSeq[T](n)` and kin (`iekSeqNew`).
-
-proc seqNewZeroArrs(elemTy: IRType): seq[Z3AnyAst]
-  ## RFC-0005 batch 6 fwd-decl. The data arrays of a zeroed `newSeq` of
-  ## `elemTy` (`lowerSeqNew`), which S8bl's `setLen` grows into.
-
-proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
-                  val: SymVal): Z3AnyAst
-  ## N14 fwd-decl (RFC-chapulin-hardening bucket-2). Defined AFTER `walk`
-  ## (mirrors `lowerSeqLit`'s own construction-time use); the `isIndexAssign`
-  ## walker arm (defined BEFORE it, inside `walk`) needs it for element
-  ## ASSIGNMENT `xs[i] = v`, the same store this proc already backs for
-  ## `lowerSeqLit`'s per-element construction and the HOF `.map`/`.filter`
-  ## rebuild.
-
 proc seqElemFits(val: SymVal, elemTy: IRType): bool =
   ## RFC-0005 S8ar. True iff `storeSeqElem` can store `val` into a seq of
   ## `elemTy` as it is: the element's own kind, or (for an integer element)
@@ -1502,20 +1482,6 @@ proc seqElemFits(val: SymVal, elemTy: IRType): bool =
     # RFC-0005 S8bc: a tree element's store checks the value itself
     # (`seqStoreArrs`, which declines a value that does not fit).
     isTreeSeqElemTy(elemTy)
-
-proc lowerTupleLit(env: Env, e: IRExpr): SymVal
-  ## RFC-chapulin-hardening P1 fwd-decl. General N-ary tuple constructor
-  ## `(a, b, c)` → svTuple, one lowered SymVal per field.
-
-proc lowerVariantLit(env: Env, e: IRExpr): SymVal
-  ## Round-6 A1 fwd-decl (ADR-0029). Literal-discriminant variant
-  ## constructor → svVariant, disc pinned to the literal tag.
-
-proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal
-  ## RFC-0005 S8p fwd-decl. `lowerVariantLit`, once per axis.
-
-proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal
-  ## RFC-0005 S8s fwd-decl. A variant value with one field replaced.
 
 proc lowerHofCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Defined AFTER `walk` (the inline path applies the
@@ -2058,6 +2024,121 @@ proc seqStoreDeclineKind(elemTy: IRType): SymexErrorKind =
   if not isBackedSeqElemTy(elemTy): seNestedSeqUnsupported
   elif hasDepthBound(elemTy): seRecursiveValueDepth
   else: feUnsupportedOp
+
+proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
+                  val: SymVal): Z3AnyAst =
+  ## Store `val` at index `idx` in the (erased) seq data array, returning the
+  ## new erased array. RFC-0005 S8ba: `iekSeqAdd` stores through here too
+  ## (it had its own int64/bool-only dispatch), and a distinct element is
+  ## stored as its base (`seqCellTy`, `ejectBase`).
+  let elemTy = seqCellTy(elemTy)
+  let val = ejectBase(val)
+  case elemTy.kind
+  of itInt:
+    # #163 review R22 site 3 prerequisite: reconcile an `svInt`-shaped RHS
+    # (a `range[lo..hi]` top-level param promotes to `svInt` under the
+    # engine's default `isOptimised` integer semantics, `runSymexImpl`'s
+    # `promoteSound`) to the array's BV sort BEFORE storing -- mirroring the
+    # EXACT coercion `isDerefWrite`'s plain-field and arm-field write sites
+    # already apply (`runtime_heap.nim`). Every seq[T] backing array is
+    # BV-sorted by width regardless of whether `T` carries a declared range
+    # (`allocateSeqDataRaw`'s itInt arm), so an un-reconciled `svInt` crashes
+    # here on ANY int-family element, ranged or not.
+    var v = val
+    if v.kind == svInt:
+      case elemTy.width
+      of 8:  v = liftBV(intToBv[8](v.zi, Z3BitVec[8]),   elemTy.signed)
+      of 16: v = liftBV(intToBv[16](v.zi, Z3BitVec[16]), elemTy.signed)
+      of 32: v = liftBV(intToBv[32](v.zi, Z3BitVec[32]), elemTy.signed)
+      of 64: v = liftBV(intToBv[64](v.zi, Z3BitVec[64]), elemTy.signed)
+      else: discard
+    case elemTy.width
+    of 8:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[8]]](dataRaw.ctx, dataRaw.raw)
+      toAnyAst(store(t, idx, v.bv8))
+    of 16:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[16]]](dataRaw.ctx, dataRaw.raw)
+      toAnyAst(store(t, idx, v.bv16))
+    of 32:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[32]]](dataRaw.ctx, dataRaw.raw)
+      toAnyAst(store(t, idx, v.bv32))
+    of 64:
+      let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](dataRaw.ctx, dataRaw.raw)
+      toAnyAst(store(t, idx, v.bv64))
+    else:
+      raise newException(ValueError, "storeSeqElem: unsupported int width " & $elemTy.width)  # [raise-audited: category-c: width-exhaustive (see seqElemAt above)]
+  of itBool:
+    let t = wrap[Z3Array[Z3Int, Z3Bool]](dataRaw.ctx, dataRaw.raw)
+    toAnyAst(store(t, idx, val.bo))
+  of itFloat32:
+    let t = wrap[Z3Array[Z3Int, Z3Float32]](dataRaw.ctx, dataRaw.raw)
+    toAnyAst(store(t, idx, val.fp32))
+  of itFloat64:
+    let t = wrap[Z3Array[Z3Int, Z3Float64]](dataRaw.ctx, dataRaw.raw)
+    toAnyAst(store(t, idx, val.fp64))
+  of itString:
+    let t = wrap[Z3Array[Z3Int, Z3String]](dataRaw.ctx, dataRaw.raw)
+    toAnyAst(store(t, idx, val.str))
+  of itRef, itPtr:   ## Cluster H H_containers (ADR-0022): seq[Node] LITERAL
+    # construction (`@[a, b]`) for a named `ref object` element. The backing
+    # array is the raw `Z3Array[Z3Int, Ref_T]` `allocateSeqDataRaw` already
+    # allocates for itRef/itPtr elements (built for Phase 15 R3's inline-ref
+    # seqs) — this was the missing STORE half. `Ref_T` is a RUNTIME
+    # uninterpreted sort the typed `store` helper can't express, so this
+    # stores via raw `Z3_mk_store` (mirrors the `isIndex/seq` read-path's raw
+    # `Z3_mk_select`, runtime.nim's itRef/itPtr arm above ~5410). GROUND
+    # store; no quantifier.
+    let ctx = dataRaw.ctx
+    let valAst = case val.kind
+      of svRef: val.refAst
+      of svPtr: val.ptrAst
+      else:
+        # N47 (round-6 raise-class-audit category-d closure): CONVERTED. The
+        # ONE identified path into this mismatch — a `.map(fn)` HOF closure
+        # returning `ref T`/`ptr T` — was already closed by N46's own
+        # `applyClosureGround` hardening: `symValFromRawAst` raises for any
+        # non-{int,bool,float32,float64} return type, but that raise is
+        # caught in the SAME frame and the fallback now goes through
+        # `allocateSym(cb.retTy, ...)` (total since N40), which for
+        # itRef/itPtr always produces a correctly-kinded svRef/svPtr — traced
+        # end to end above (`applyClosureGround`, ~9608-9650). The OTHER two
+        # callers (`lowerSeqLit`'s literal-element store, `filter`'s
+        # unchanged-element store via `seqElemAt`) were also traced: both
+        # ultimately source the value from an env lookup or `allocateSym`'s
+        # itRef/itPtr arm, both of which are kind-consistent by construction.
+        # What was NOT fully closed (matching this file's own `lower(iekField)`
+        # precedent, just above): whether an `iteSV` merge can still land a
+        # degraded/opaque SymVal kind on a nominally ref/ptr-typed element
+        # slot via some OTHER, not-yet-traced degrade path — the SAME
+        # mechanism `tsymex_r6_heap_raise_totality.nim`'s four
+        # `refSV.kind`-not-svRef/svPtr sites were converted under without an
+        # independent repro (heap-raise totality slice, walker v113). Same
+        # defense-in-depth call: in-band degrade, never worse than the raw
+        # raise it replaces, and the array must stay well-sorted regardless —
+        # a FRESH symbolic ref/ptr of the declared element type (never the
+        # mismatched `val`) keeps `Z3_mk_store`'s value operand sort-correct.
+        # Fix-slice item 3: was a bare fixed name — missed the 2385f84
+        # uniquification sweep. A repeat store-mismatch within the same run
+        # (two DIFFERENT itRef/itPtr seq-literal elements, or a `.filter`/
+        # `.map` HOF revisiting this arm) collided on `(name, sort)`. Item 9:
+        # routed through the shared `degradeAlloc` pairing helper.
+        let placeholder = degradeAlloc(elemTy, weInternalWalkerFault,
+          "storeSeqElem(itRef/itPtr): val is not svRef/svPtr, kind=" &
+          plainEnglishSymValKind(val.kind) & " (weInternalWalkerFault)",
+          "__storeSeqElemKindMismatch")
+        if elemTy.kind == itPtr: placeholder.ptrAst else: placeholder.refAst
+    let storedRaw = checkedStore(ctx, dataRaw.raw, idx.raw, valAst.raw)
+    wrap[Z3AnyAst](ctx, storedRaw)
+  else:
+    # RFC-0016 K9c-g. An element type the model does not back has no array
+    # to store into: a known modelling gap, not a walker fault. `seqStoreArrs`
+    # routes it to a clean decline before it gets here; this is the backstop
+    # for a direct caller, in-band as the arms above (the data is returned
+    # unchanged, the path tainted `seNestedSeqUnsupported`).
+    allocDegrade(seNestedSeqUnsupported, "storeSeqElem: a store into a seq " &
+      "of " & $elemTy & ", an element type the model does not back " &
+      "(seNestedSeqUnsupported)")
+    dataRaw
 
 proc seqStoreArrs(seqSV: SymVal; idx: Z3Int; val: SymVal): Option[seq[Z3AnyAst]] =
   ## RFC-0005 S8bc. The data arrays of `seqSV` with `val` stored at `idx`:
@@ -5896,6 +5977,462 @@ var callGuardedNames {.threadvar.}: seq[string]
   ## anything it calls) is not bound, and `lower`'s `iekVar` arm declines it
   ## as aliasing instead of as an unmodelled global. Pushed and popped
   ## around each callee walk.
+
+# ---- Phase 15 C4: literal lowering (seq, tuple and variant constructors) --
+
+proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
+  ## Phase 15 C4. `@[a, b, c]` → a CONCRETE-length svSeq: a fresh data array
+  ## with each lowered element stored at its index, and `seqLen` pinned to the
+  ## literal count (a numeral). Empty `@[]` → length-0 svSeq.
+  ##
+  ## Round-6 B6 rider (AMENDED by N29, walker v120 — see `dataRaw`'s own
+  ## comment below for the full writeup): the EMPTY literal
+  ## (`e.seqLitElems.len == 0`) skips `allocateSeqDataRaw` and uses an inert
+  ## Bool-sorted placeholder array ONLY when `elemTy` is genuinely UNBACKED
+  ## (a kind `allocateSeqDataRaw` does not support at all, e.g. `itTuple` —
+  ## the `seq[(string,string)]` gap the rider was written to unblock:
+  ## `var pairs: seq[(string,string)] = @[]`, chapulin's own `readOptions`
+  ## accumulator declaration). For a BACKED `elemTy` (the common case, e.g.
+  ## `seq[int]`), the empty literal now allocates a REAL, correctly-sorted
+  ## empty backing array instead — the placeholder's original soundness
+  ## argument ("a length-0 seq's data is never read on any live path")
+  ## holds for READS but not for a later `.add`/`.insert` MUTATION, which
+  ## reinterprets `seqDataRaw` at the DECLARED element sort with no
+  ## validation (N29's actual mechanism). This does NOT touch
+  ## `allocateSym`'s itSeq arm (fresh/symbolic-length seqs, where a
+  ## genuinely-reachable index needs REAL element content) — declining
+  ## classified there is unchanged; only the ALREADY-KNOWN-EMPTY literal
+  ## case is affected, and only its BACKED-elemTy half changed behaviour.
+  let elemTy = seqCellTy(e.seqLitElemTy)   # RFC-0005 S8ba: a distinct elem's base
+  if e.seqLitElems.len > 0 and not isBackedSeqElemTy(elemTy):
+    # Round-6 N37: a NON-EMPTY literal (the B6 rider above only widened the
+    # EMPTY case) whose element type `allocateSeqDataRaw` cannot back --
+    # e.g. `@[("a","b")]` : seq[(string,string)]` -- was a THIRD unguarded
+    # caller of the same raw-raise site N36 marked `known-open` (alongside
+    # `lowerHofCall`'s inline map/filter, converted just above). Guard
+    # BEFORE touching `dataRaw`/the element loop at all, mirroring the
+    # empty-literal rider's own reasoning and `allocateSym`'s itSeq
+    # placeholder discipline -- never call the unsafe function, never
+    # attempt to `storeSeqElem` real (unbacked-typed) content into a
+    # placeholder array.
+    queueDegrade(seNestedSeqUnsupported,
+      "seq[seq[T]] / seq[complex] not modeled — element kind " &
+           plainEnglishTypeKind(elemTy.kind) &
+           " (nested seq element type is not supported)")
+    var fresh: seq[Z3Bool]
+    return allocateSym(tSeq(elemTy), freshDegradeName("__seqLitUnsupportedDegrade"), fresh)
+  # N29 fix (round-6 bucket-2, walker v120): the B6 rider's empty-literal
+  # placeholder below is sound ONLY for a seq whose element type
+  # `allocateSeqDataRaw` cannot back (its own doc argument: a length-0 seq's
+  # data is never READ on any live path, since `isIndex`'s bound is
+  # unsatisfiable for every index). That argument does not extend to
+  # MUTATION: `.add`/`.insert` (`iekSeqAdd` et al.) unconditionally `wrap()`
+  # `seqDataRaw` as `Z3Array[Z3Int, <elemTy's own backed sort>]` with no
+  # sort check, so `var xs: seq[int] = @[]; xs.add(a)` -- the ordinary
+  # build-a-seq-by-appending idiom, exercised by this file's own C4-1/C4-1b
+  # SUTs -- reinterpreted the rider's inert `Array[Int, Bool]` placeholder
+  # as `Array[Int, BitVec 64]` and Z3 (correctly) rejected the resulting
+  # `store()` with "domain sort ... and parameter sort ... do not match".
+  # This was the actual mechanism behind the long-ledgered "N29 HOF lambda
+  # domain-sort mismatch" finding: the crash fires on the FIRST post-`@[]`
+  # mutation, before `buildClosure`/`lowerHofCall` are ever reached --
+  # confirmed by direct stack instrumentation (reverted before landing; the
+  # closure/HOF machinery was never entered in any repro). The fix: for a
+  # BACKED element type (the overwhelming common case), allocate the REAL
+  # typed empty array instead of the generic Bool placeholder -- costs
+  # nothing extra (`allocateSeqDataRaw` only ever declares a fresh Z3 array
+  # CONSTANT; it never touches element count, exactly like the non-empty
+  # branch below), and every subsequent mutation site's unchecked `wrap()`
+  # is now sound because the underlying sort genuinely matches. The
+  # placeholder survives UNCHANGED for a genuinely UNBACKED element type
+  # (e.g. `seq[(string,string)]`), preserving the rider's original purpose
+  # (`allocateSeqDataRaw` would raise for those) -- `.add` on such a seq
+  # already declines classified via `iekSeqAdd`'s own unbacked-elem `else`
+  # arm rather than reaching the unchecked-wrap fast path, so this widening
+  # introduces no new unsoundness there.
+  # RFC-0005 S8bc: one array per leaf of a tree element.
+  var arrs =
+    if e.seqLitElems.len == 0:
+      if isBackedSeqElemTy(elemTy):
+        allocateSeqArrs(elemTy, "__seqlit.data")
+      else:
+        @[toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))]
+    else:
+      allocateSeqArrs(elemTy, "__seqlit.data")
+  # RFC-0005 S8s. Each element lowers against the element type's prototype,
+  # as `lowerTupleLit`'s fields do: an int literal with no prototype lowers
+  # to a signed 64-bit value, and `storeSeqElem` then read the `bv8` of that
+  # `svBV64` element of a `seq[uint8]` (`@[x, 1'u8]`, a
+  # `weInternalWalkerFault` on every such literal, with or without an input).
+  let elemProto =
+    if elemTy.kind == itInt: some(bvConst(elemTy, 0))
+    elif elemTy.kind == itBool: some(ofBool(mkBool(false)))
+    else: none(SymVal)
+  for i, ce in e.seqLitElems:
+    let elemSV = lower(env, ce, elemProto)
+    let cur = mkSeqSV(mkInt(i), arrs, elemTy)
+    let stored = seqStoreArrs(cur, mkInt(i), elemSV)
+    if stored.isNone: return seqStoreDecline("seq literal", elemTy, elemSV)
+    arrs = stored.get
+  mkSeqSV(mkInt(e.seqLitElems.len), arrs, elemTy)
+
+proc seqNewZeroArrs(elemTy: IRType): seq[Z3AnyAst] =
+  ## RFC-0005 batch 6. The data arrays of a zeroed `newSeq` of `elemTy`:
+  ## one constant array per leaf of the element's zero (S8bc's leaf split),
+  ## so the element at any index reads the zero. `lowerSeqNew` builds a
+  ## `newSeq` from them and S8bl's `setLen` (`isSetLen`) reads a grown
+  ## slot from them: one notion of a fresh element. The caller has checked
+  ## `isBackedSeqElemTy` and `defaultZeroTotal`.
+  constSeqArrs(elemTy, defaultZero(elemTy, "__newSeqZero"))
+
+proc lowerSeqNew(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8bc (item 5) and S8bi, one lowering since batch 5.
+  ## `newSeq[T](n)` / `newSeq(s, n)` (`snZeroed`): a seq of length `n` whose
+  ## every element is `T`'s zero -- each data array is the constant array
+  ## of that zero's leaf (`constSeqArrs`, S8bc's leaf split), as an empty
+  ## table's container values are (`tabTreeDataZero`), so the element at
+  ## any index below `n` reads the zero. `newSeqOfCap[T](n)` (`snOfCap`):
+  ## length 0, `n` only reserves. `newSeqUninit[T](n)`: length `n`, elements
+  ## Nim leaves unset -- free arrays (`allocateSeqArrs`), and the path is
+  ## tainted (`feUnsupportedOpHavoc`): a witness may depend on an element a
+  ## run does not reproduce, and whether one is read is not tracked.
+  ##
+  ## The parser has already forked a negative `n` (`RangeDefect`, the
+  ## `Natural` conversion) and declined one above `maxModelledInitialSize`
+  ## (`parseNewSeqLen`), so neither is checked again here. An element type
+  ## the seq does not back declines as a seq literal of it does, and so
+  ## does a zeroed one with no modelled zero.
+  let elemTy = e.snElemTy
+  let lenSV = lower(env, e.snArg)
+  let op = if e.snOfCap: "newSeqOfCap" elif e.snZeroed: "newSeq"
+           else: "newSeqUninit"
+  let needZero = e.snZeroed and not e.snOfCap
+  if not isBackedSeqElemTy(elemTy) or
+     (needZero and not defaultZeroTotal(elemTy)) or
+     lenSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
+    queueDegrade(seNestedSeqUnsupported,
+      op & " of a " & plainEnglishTypeKind(elemTy.kind) &
+        " element (or a non-integer length) not modelled")
+    var fresh: seq[Z3Bool]
+    return allocateSym(tSeq(elemTy), freshDegradeName("__newSeqDegrade"), fresh)
+  if e.snOfCap:
+    # Length 0: no element is ever read below the length, so the arrays
+    # are any arrays of the element's leaf sorts.
+    return mkSeqSV(mkInt(0), allocateSeqArrs(elemTy,
+                     freshDegradeName("__newSeqOfCap.data")), elemTy)
+  if not e.snZeroed:
+    let arrs = allocateSeqArrs(elemTy, freshDegradeName("__newSeqUninit.data"))
+    if arrs.len == 1:
+      # RFC-0005 S8bq: registered as a `newSeqUninit` base, so only a READ
+      # of an element no write has reached is tainted (`uninitReadCond`).
+      noteUninitSeqBase(arrs[0])
+    else:
+      # Batch 6: S8bq tracks one data array (`seqDataRaw`). A tree element
+      # (S8bc's leaf split) has one array per leaf, and a write of one
+      # leaf would read as a write of the element, so the whole path stays
+      # tainted, as before S8bq.
+      queueDegrade(feUnsupportedOpHavoc,
+        "newSeqUninit element values are unspecified — degraded to sxUnknown")
+    return mkSeqSV(toZ3Int(lenSV), arrs, elemTy)
+  mkSeqSV(toZ3Int(lenSV), seqNewZeroArrs(elemTy), elemTy)
+
+proc lowerTupleLit(env: Env, e: IRExpr): SymVal =
+  ## RFC-chapulin-hardening P1. `(a, b, c)` → svTuple. Unlike `lowerSeqLit`
+  ## (one uniform `elemTy` for every element — Nim requires seq homogeneity),
+  ## tuple fields may be HETEROGENEOUS, so each element is lowered with its
+  ## OWN per-field prototype derived from `e.ttupleTy.fields[i]` (mirrors
+  ## `iekArrayLit`'s protoSV construction, just per-field instead of once) —
+  ## this matters so a bare int-literal field (e.g. `(x, 5'u8)`) lowers at
+  ## its DECLARED width/signedness rather than defaulting to signed BV64
+  ## (`lower`'s `iekIntLit` arm with no proto).
+  var fields: seq[SymVal]
+  for i, ce in e.telems:
+    var protoSV: Option[SymVal] = none(SymVal)
+    if i < e.ttupleTy.fields.len:
+      let fty = e.ttupleTy.fields[i]
+      if fty.kind == itInt:
+        protoSV = some(bvConst(fty, 0))
+      elif fty.kind == itBool:
+        protoSV = some(ofBool(mkBool(false)))
+    fields.add lower(env, ce, protoSV)
+  SymVal(kind: svTuple, fields: fields, fieldNames: e.ttupleTy.fieldNames)
+
+proc variantLitArms(env: Env, arms: seq[VariantArm], tagOrd: int,
+                     activeExprs: seq[IRExpr], objName: string):
+    tuple[fields: OrderedTable[int, seq[SymVal]],
+          names: OrderedTable[int, seq[string]]] =
+  ## The per-arm fields of a literal-discriminant variant (one axis of a
+  ## multi-variant): the active arm's are the lowered constructor exprs,
+  ## every other arm's are fresh (see `lowerVariantLit`'s soundness note).
+  ## Extracted from `lowerVariantLit` by RFC-0005 S8p, which reuses it per
+  ## axis in `lowerMultiVariantLit`.
+  ## RFC-0005 S8u: `tagOrd` is the discriminator's value. When no explicit
+  ## arm names it, the active arm is the `else` arm (key -1), which the
+  ## parser only admits for an ordinal that arm covers.
+  var activeKey = -1
+  for arm in arms:
+    if not arm.isElse and arm.tagOrdinal == tagOrd: activeKey = tagOrd
+  var armFields = initOrderedTable[int, seq[SymVal]]()
+  var armNames  = initOrderedTable[int, seq[string]]()
+  for arm in arms:
+    armNames[arm.tagOrdinal] = arm.fieldNames
+    if arm.tagOrdinal == activeKey:
+      var fields: seq[SymVal]
+      for fe in activeExprs:
+        fields.add lower(env, fe)
+      armFields[arm.tagOrdinal] = fields
+    else:
+      var fields: seq[SymVal]
+      for j, ft in arm.fieldTypes:
+        inc variantLitFreshCounter
+        let path = "__variantLit." & objName & ".@" & arm.tagName &
+                   "." & arm.fieldNames[j] & "." & $variantLitFreshCounter
+        # N39 (round-6 fix round 5). GUARD-BEFORE-CALL: `classifyFieldType`
+        # (dsl_typebridge.nim) legitimately classifies an INACTIVE arm's
+        # field as an `itUninterp` `__ownership:`/`__unsupported:`/
+        # `__unsupported_witness:` placeholder or an unsupported
+        # `itTable`/`itSet` shape (`scopedDeclineFieldTy`'s Bug #2 scoped
+        # decline only special-cases `itSeq`) — allocating one raw-raises a
+        # classified `Symex*Error` from INSIDE `lower()` (no `WalkCtx`/
+        # `Path` in scope here, called via `lowerInExpr` while a loop's live
+        # `seq[Path]` may be on the caller's stack), the exact C-backend
+        # goto-exception hazard ADR-0023/SND-3 exists to ban. Degrade
+        # IN-BAND via the SAME `loweringDegradeErrors`/`loweringDidDegrade`
+        # sink ADR-0023 established for exactly this "lower()-reachable,
+        # no Path in scope" shape, instead of calling `allocateSym` at all.
+        # The substitute value is a bare fresh unconstrained `svBool` —
+        # deliberately NOT an attempt to reconstruct `ft`'s own kind: this
+        # doc comment's own soundness note (above) already establishes an
+        # INACTIVE arm's field is reachable ONLY through `isVariantField`'s
+        # out-of-arm `FieldDefect` fork, so no live SAT path ever reads this
+        # value regardless of its kind (mirrors `tyOf`'s own "diagnostics
+        # only" tolerance for a `SymVal.kind` that doesn't match the
+        # original declared field type). `drainPendingLowerEffects` taints
+        # the whole STATEMENT once `loweringDidDegrade` is observed — an
+        # honest over-approximation (a variant literal with SOME unsupported
+        # inactive-arm field type always degrades, even on paths that never
+        # touch that field), the safe direction per Invariant 3.
+        let ftIssue = unallocatableFieldIssue(ft)
+        if ftIssue.isSome:
+          queueDegrade(ftIssue.get.kind,
+            "variant literal inactive-arm field `" & objName &
+                 "." & arm.fieldNames[j] & "` allocation unmodeled — " &
+                 ftIssue.get.msg & " (arm-field allocation, not param-entry)")
+          fields.add SymVal(kind: svBool, bo: mkBoolVar(path & ".unalloc"))
+        else:
+          var scratchPC: seq[Z3Bool]
+          fields.add allocateSym(ft, path, scratchPC)
+      armFields[arm.tagOrdinal] = fields
+  (armFields, armNames)
+
+proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
+  ## Round-6 A1 (ADR-0029). `T(kind: tagLit, f1: e1, ...)` → svVariant.
+  ## Mirrors `allocateSym(itVariant)`'s shape (disc + per-arm fields +
+  ## plain fields) with two deliberate divergences: the discriminator is a
+  ## Z3 CONST pinned to the literal tag (`bvConst`, not a fresh symbol with
+  ## a disjunction constraint — `vDiscTy` is always `itInt`, per its own
+  ## doc comment, so `bvConst` covers every legal disc shape), and the
+  ## ACTIVE arm's fields are the LOWERED constructor exprs rather than
+  ## fresh allocations.
+  ##
+  ## Every OTHER arm allocates FRESH-UNCONSTRAINED fields (never zero) —
+  ## the ADR's soundness note: real Nim raises `FieldDefect` on an
+  ## out-of-arm read before any value is observable, so a zero-filled
+  ## inactive field would let a buggy twin "read" a value real Nim never
+  ## yields. The fresh allocation's own `pcOut` is intentionally a LOCAL,
+  ## discarded scratch — mirrors the existing `__refVariantWitness`
+  ## proto-allocation precedent (`extractFromSymVal`'s `itVariant` arm,
+  ## above) for the identical reason: an inactive arm's fields are only
+  ## ever reachable through `isVariantField`'s fork, whose out-of-arm side
+  ## is exactly the `FieldDefect` raise — no live SAT path ever reads a
+  ## fresh inactive field's value, so no pc constraint on it could ever
+  ## affect a reachable verdict.
+  let ty = e.vlVariantTy
+  let discBoxed = new(SymVal)
+  discBoxed[] = discConst(ty.vDiscTy, int64(e.vlTagOrd))
+  var plainFields: seq[SymVal]
+  for fe in e.vlPlainFields:
+    plainFields.add lower(env, fe)
+  let (armFields, armNames) = variantLitArms(env, ty.vArms, e.vlTagOrd,
+                                             e.vlArmFields, ty.vObjectName)
+  var sv = SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
+                  vObjectName: ty.vObjectName, vArmFields: armFields,
+                  vArmFieldNames: armNames, vPlainFields: plainFields,
+                  vPlainFieldNames: ty.vPlainFieldNames)
+  # RFC-0016 PRC-07 slice B: the union's bytes are the arm's fields over what
+  # the constructor started from: zero when it omits a field (Nim zeroes the
+  # object first), else nothing (the bytes are indeterminate until written).
+  let gate = unionImageGate(ty)
+  if gate.isSome and armFields.hasKey(e.vlTagOrd):
+    sv.vImage = armImage(gate.get, e.vlTagOrd, armFields[e.vlTagOrd],
+                         (if e.vlZeroFilled: zeroImage(gate.get)
+                          else: unwrittenImage(gate.get))).get(@[])
+  if activeMemberTracked(ty): sv.vActive = activeOf(discBoxed[])
+  sv
+
+
+proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8p. `T(k: tagLit, ..., j: tagLit2, ...)` over an
+  ## `itMultiVariant` -> svMultiVariant: `lowerVariantLit` once per axis
+  ## (the discriminator a const pinned to its literal tag, the active arm's
+  ## fields the lowered constructor exprs, the other arms' fields fresh),
+  ## plus the shared plain fields.
+  let ty = e.mvlTy
+  var plainFields: seq[SymVal]
+  for fe in e.mvlPlainFields:
+    plainFields.add lower(env, fe)
+  var axes: seq[VariantAxisSym]
+  for ai, ax in ty.mvAxes:
+    let discBoxed = new(SymVal)
+    discBoxed[] = discConst(ax.discTy, int64(e.mvlAxisTags[ai]))
+    let (armFields, armNames) = variantLitArms(env, ax.arms, e.mvlAxisTags[ai],
+                                               e.mvlAxisFields[ai],
+                                               ty.mvObjectName & "." & ax.discName)
+    axes.add VariantAxisSym(discName: ax.discName, disc: discBoxed,
+                            armFields: armFields, armFieldNames: armNames)
+  SymVal(kind: svMultiVariant, mvObjectName: ty.mvObjectName, mvAxes: axes,
+         mvPlainFields: plainFields, mvPlainFieldNames: ty.mvPlainFieldNames)
+
+proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8s. `v.f = x` on a value variant or multi-variant: `v`'s new
+  ## value is its old one with field `f` replaced by `x`. A plain field has
+  ## one slot. An arm field has a slot in every arm that declares it
+  ## (`of a, b: f` is two arms), and all of them are replaced: the parser's
+  ## preceding `isVariantField` read of `v.f` has already forked the
+  ## out-of-arm `FieldDefect` (Nim checks the field before it writes, and
+  ## leaves `v` unchanged when it raises), so on this path the
+  ## discriminator selects one of those arms. The other arms' slots are
+  ## unreachable while it does. The new value lowers against the old one's
+  ## prototype, so a literal takes the field's width.
+  let recv = lower(env, e.vfsRecv)
+  proc replaced(old: SymVal): SymVal =
+    let proto =
+      if old.kind in {svBool, svInt, svBV8, svBV16, svBV32, svBV64}: some(old)
+      else: none(SymVal)
+    lower(env, e.vfsVal, proto)
+  case recv.kind
+  of svVariant:
+    result = recv
+    let pix = recv.vPlainFieldNames.find(e.vfsFieldName)
+    if pix >= 0:
+      result.vPlainFields[pix] = replaced(recv.vPlainFields[pix])
+      return
+    var newVal: Option[SymVal]
+    for tag in e.vfsTags:
+      if not recv.vArmFieldNames.hasKey(tag): continue
+      let ix = recv.vArmFieldNames[tag].find(e.vfsFieldName)
+      if ix < 0: continue
+      if newVal.isNone: newVal = some(replaced(recv.vArmFields[tag][ix]))
+      result.vArmFields[tag][ix] = newVal.get
+    if newVal.isSome:
+      if e.vfsVariantTy != nil:
+        # RFC-0016 PRC-07 slice B (c): the write is into the union's bytes;
+        # every field of the active arm those bytes cover takes its value
+        # from the image (an arm the write leaves without a value in some
+        # field was declined upstream, `isVariantField`'s write side).
+        if result.vImage.len > 0:
+          let lay = vl.variantLayout(e.vfsVariantTy)
+          let tp = vl.accessPlace(lay, e.vfsTags, e.vfsFieldName)
+          let bits = if lay.ok and tp.isSome: placeBits(newVal.get, tp.get)
+                     else: none(Z3BitVec[64])
+          if bits.isNone:
+            result.vImage = @[]   # no image: a later out-of-arm read declines
+          else:
+            result.vImage = imgWrite(result.vImage, tp.get.off - lay.unionOff,
+                                     tp.get.size, bits.get)
+            for tag, slots in recv.vArmFields:
+              if tag < 0 or tag in e.vfsTags or not lay.arms.hasKey(tag) or
+                 slots.len != lay.arms[tag].len:
+                continue
+              let isActive = variantDiscEq(recv.vDisc[], int64(tag))
+              for j, f in lay.arms[tag]:
+                if not overlaps(f, tp.get): continue
+                let nv = bitsPlace(imgReadDef(result.vImage,
+                                              f.off - lay.unionOff, f.size),
+                                   f, some((tp.get, newVal.get)))
+                if nv.isNone: continue
+                result.vArmFields[tag][j] =
+                  iteSV(isActive, nv.get, normSlot(slots[j], f.ty))
+        # slice B (cpp): the member written is now the active one.
+        if result.vActive != nil and e.vfsTags.len > 0:
+          var act = discConst(e.vfsVariantTy.vDiscTy, int64(e.vfsTags[0]))
+          for k in 1 ..< e.vfsTags.len:
+            let t = int64(e.vfsTags[k])
+            act = iteSV(variantDiscEq(recv.vDisc[], t),
+                        discConst(e.vfsVariantTy.vDiscTy, t), act)
+          result.vActive = activeOf(act)
+      return
+  of svMultiVariant:
+    result = recv
+    let pix = recv.mvPlainFieldNames.find(e.vfsFieldName)
+    if pix >= 0:
+      result.mvPlainFields[pix] = replaced(recv.mvPlainFields[pix])
+      return
+    var newVal: Option[SymVal]
+    for ai, ax in recv.mvAxes:
+      for tag in e.vfsTags:
+        if not ax.armFieldNames.hasKey(tag): continue
+        let ix = ax.armFieldNames[tag].find(e.vfsFieldName)
+        if ix < 0: continue
+        if newVal.isNone: newVal = some(replaced(ax.armFields[tag][ix]))
+        result.mvAxes[ai].armFields[tag][ix] = newVal.get
+      if newVal.isSome: return
+  else:
+    discard
+  # The receiver is not a variant (its construction already declined and
+  # bound a stand-in: `seVariantFieldOnDeclinedCtor`, as `isVariantField`
+  # reports it), or no slot holds the field. Taint the path and keep the
+  # old value: no verdict on this path is trusted. RFC-0005 review R1-13:
+  # the path goes on without the write, a dropped write, so the kind is
+  # `feUnsupportedOp` (`dcSubstituted`, which taints the path). It was
+  # `seVariantFieldOnDeclinedCtor`, the READ arm's halt kind (`dcOmitted`,
+  # no path taint), right only where the path ends.
+  queueDegrade(feUnsupportedOp,
+    "variant field '" & e.vfsFieldName & "' written on a receiver with no " &
+    "such field slot (SymVal kind=" & $recv.kind & "): the write is " &
+    "dropped (feUnsupportedOp)")
+  recv
+
+# ---- RFC-0005 S8as: a module-level variable's entry value -----------------
+
+proc entryValueOf(name: string): SymVal =
+  ## RFC-0005 S8as. The entry value of the module-level variable `name`
+  ## (`programGlobal(name)` is some): what it holds when the property runs.
+  ## An immutable `let` initialised by a literal holds that literal, always:
+  ## read exactly. Anything else may hold any value of its type by then (a
+  ## `var` that other code, or an earlier test, assigned): one fresh value
+  ## per run (`globalEntryVals`), shared by every read, so two reads before
+  ## any write agree. A hit through it may need a value the property never
+  ## meets, so the reading path carries `feGlobalHavoc` (`dcFreshSymbol`):
+  ## a SAT is replayed, and an UNSAT holds for every entry value, so it
+  ## stands.
+  ##
+  ## RFC-0005 batch 6 (S8bw on S8as): the taint is the OBSERVATION's, not
+  ## the read's. Each leaf of the value is an unwritten part
+  ## (`registerUnwritten`); a rebuild's copy (`g.a = v` carries `g.b`) or a
+  ## receiver observes nothing, and every read that does observe one
+  ## (`observeGlobalRead`, an element read, a pointer's dereference, a
+  ## discriminator's reassignment) taints the path `feGlobalHavoc`
+  ## (`unwrittenKind`). `g.a = v` then `g.a` is exact, as S8bw made it.
+  let g = programGlobal(name).get
+  if g.init != nil:
+    return lower(initOrderedTable[string, SymVal](), g.init,
+                 (if g.ty.kind == itInt: some(bvConst(g.ty, 0))
+                  else: none(SymVal)))
+  let ctx = requireCurrentContext()
+  glUnwrittenFresh(ctx)
+  if not globalEntryVals.hasKey(name):
+    var facts: seq[Z3Bool]
+    globalEntryVals[name] =
+      allocateSym(g.ty, "__glEntry_" & displayName(name), facts)
+    for f in facts: globalEntryFacts.add f
+    block:   # RFC-0016 INT-82: a global's entry value is entry state
+      var acc: seq[RawZ3Ast]
+      svAsts(globalEntryVals[name], acc)
+      notePreExistingTerms(ctx, acc)
+    registerUnwritten(ctx, globalEntryVals[name], displayName(name),
+                      havoc = true)
+  globalEntryVals[name]
 
 proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
   ## `lower`'s body: `lower` itself observes a global read's value
@@ -15993,8 +16530,6 @@ proc argShapeKey(callee: string, args: seq[SymVal]): string =
     h = (h shl 1) xor symValHash(a)
   callee & "#" & $h
 
-proc sameSymVal(a, b: SymVal): bool   ## RFC-0005 S8ax fwd decl (RFC-0005 S9)
-
 const callCacheBucketMax = 8
   ## RFC-0005 S8ax. The summaries kept per `argShapeKey`: one per distinct
   ## actual list or pruned context a call was walked in. A bound on the
@@ -25314,96 +25849,6 @@ proc symValFromRawAst(raw: RawZ3Ast, ty: IRType): SymVal =
     raise newException(ValueError,  # [raise-audited: category-c: caught immediately at its sole call site (see above)]
       "symValFromRawAst: unsupported closure return type kind " & $ty.kind)
 
-proc sameSymVal(a, b: SymVal): bool =
-  ## RFC-0005 S9. Representation IDENTITY of two SymVals: the same kind and,
-  ## leaf by leaf, the same Z3 AST handle (Z3 hash-conses, so structurally
-  ## identical terms share one handle). Used to ask whether a closure body
-  ## left a by-reference capture as it found it; `false` is the conservative
-  ## answer (a spurious "written" costs a decline, never soundness), so a
-  ## kind without an arm here, or any shape mismatch, is `false`.
-  if a.kind != b.kind: return false
-  template same(x, y: untyped): bool =
-    cast[pointer](x.raw) == cast[pointer](y.raw)
-  template allSame(xs, ys: seq[SymVal]): bool =
-    block:
-      var ok = xs.len == ys.len
-      if ok:
-        for i in 0 ..< xs.len:
-          if not sameSymVal(xs[i], ys[i]):
-            ok = false
-            break
-      ok
-  case a.kind
-  of svInt:     same(a.zi, b.zi) and a.ziWidth == b.ziWidth
-  of svBool:    same(a.bo, b.bo)
-  of svBV8:     same(a.bv8, b.bv8) and a.signed == b.signed
-  of svBV16:    same(a.bv16, b.bv16) and a.signed == b.signed
-  of svBV32:    same(a.bv32, b.bv32) and a.signed == b.signed
-  of svBV64:    same(a.bv64, b.bv64) and a.signed == b.signed
-  of svFloat32: same(a.fp32, b.fp32)
-  of svFloat64: same(a.fp64, b.fp64)
-  of svString:  same(a.str, b.str)
-  of svTuple:   allSame(a.fields, b.fields)
-  of svArray:   allSame(a.arrElems, b.arrElems)
-  of svSeq:
-    # Handle identity only: nothing is lowered or read as a value, and the
-    # placeholder flag is itself compared, so a placeholder never matches a
-    # backed seq (N27 audit, RFC-0005 S9).
-    same(a.seqLen, b.seqLen) and same(a.seqDataRaw, b.seqDataRaw) and  # [placeholder-audited]
-      a.seqDataMore.len == b.seqDataMore.len and   ## RFC-0005 S8bc
-      (block:
-        var r = true
-        for i in 0 ..< a.seqDataMore.len:
-          if not same(a.seqDataMore[i], b.seqDataMore[i]): r = false
-        r) and
-      a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder  # [placeholder-audited]
-  of svTable:
-    same(a.tabDataRaw, b.tabDataRaw) and
-      a.tabDataMore.len == b.tabDataMore.len and
-      (block:
-        var r = true
-        for i in 0 ..< a.tabDataMore.len:
-          if not same(a.tabDataMore[i], b.tabDataMore[i]): r = false
-        r) and
-      same(a.tabPresentRaw, b.tabPresentRaw) and same(a.tabSize, b.tabSize)
-  of svSet:
-    same(a.setMembersRaw, b.setMembersRaw) and same(a.setSize, b.setSize)
-  of svDistinct:
-    same(a.distinctAst, b.distinctAst) and a.distinctBaseSym != nil and
-      b.distinctBaseSym != nil and
-      sameSymVal(a.distinctBaseSym[], b.distinctBaseSym[])
-  of svRef:         same(a.refAst, b.refAst)
-  of svPtr:         same(a.ptrAst, b.ptrAst) and a.ptrFamily == b.ptrFamily
-  of svBitSet:      same(a.bsRaw, b.bsRaw)   ## RFC-0005 S8bq
-  of svUninterpRef: same(a.uninterpAst, b.uninterpAst)
-  of svClosure:
-    a.closureSite == b.closureSite and a.closureEnv != nil and
-      b.closureEnv != nil and sameSymVal(a.closureEnv[], b.closureEnv[])
-  of svVariant:
-    if a.vDisc == nil or b.vDisc == nil or
-       not sameSymVal(a.vDisc[], b.vDisc[]) or
-       not allSame(a.vPlainFields, b.vPlainFields) or
-       a.vArmFields.len != b.vArmFields.len:
-      return false
-    for tag, fs in a.vArmFields.pairs:
-      if not b.vArmFields.hasKey(tag) or not allSame(fs, b.vArmFields[tag]):
-        return false
-    true
-  of svMultiVariant:   ## RFC-0005 S8cb
-    if not allSame(a.mvPlainFields, b.mvPlainFields) or
-       a.mvAxes.len != b.mvAxes.len:
-      return false
-    for xi in 0 ..< a.mvAxes.len:
-      if a.mvAxes[xi].disc == nil or b.mvAxes[xi].disc == nil or
-         not sameSymVal(a.mvAxes[xi].disc[], b.mvAxes[xi].disc[]) or
-         a.mvAxes[xi].armFields.len != b.mvAxes[xi].armFields.len:
-        return false
-      for tag, fs in a.mvAxes[xi].armFields.pairs:
-        if not b.mvAxes[xi].armFields.hasKey(tag) or
-           not allSame(fs, b.mvAxes[xi].armFields[tag]):
-          return false
-    true
-
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         label: string; callerEnv: Env;
                         bodyOverride: IRStmt = nil;
@@ -25412,45 +25857,6 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         locs: seq[VarLoc] = @[];
                         argNames: seq[string] = @[]):
                         SymVal   ## Phase 15 C4 fwd-decl.
-
-proc entryValueOf(name: string): SymVal =
-  ## RFC-0005 S8as. The entry value of the module-level variable `name`
-  ## (`programGlobal(name)` is some): what it holds when the property runs.
-  ## An immutable `let` initialised by a literal holds that literal, always:
-  ## read exactly. Anything else may hold any value of its type by then (a
-  ## `var` that other code, or an earlier test, assigned): one fresh value
-  ## per run (`globalEntryVals`), shared by every read, so two reads before
-  ## any write agree. A hit through it may need a value the property never
-  ## meets, so the reading path carries `feGlobalHavoc` (`dcFreshSymbol`):
-  ## a SAT is replayed, and an UNSAT holds for every entry value, so it
-  ## stands.
-  ##
-  ## RFC-0005 batch 6 (S8bw on S8as): the taint is the OBSERVATION's, not
-  ## the read's. Each leaf of the value is an unwritten part
-  ## (`registerUnwritten`); a rebuild's copy (`g.a = v` carries `g.b`) or a
-  ## receiver observes nothing, and every read that does observe one
-  ## (`observeGlobalRead`, an element read, a pointer's dereference, a
-  ## discriminator's reassignment) taints the path `feGlobalHavoc`
-  ## (`unwrittenKind`). `g.a = v` then `g.a` is exact, as S8bw made it.
-  let g = programGlobal(name).get
-  if g.init != nil:
-    return lower(initOrderedTable[string, SymVal](), g.init,
-                 (if g.ty.kind == itInt: some(bvConst(g.ty, 0))
-                  else: none(SymVal)))
-  let ctx = requireCurrentContext()
-  glUnwrittenFresh(ctx)
-  if not globalEntryVals.hasKey(name):
-    var facts: seq[Z3Bool]
-    globalEntryVals[name] =
-      allocateSym(g.ty, "__glEntry_" & displayName(name), facts)
-    for f in facts: globalEntryFacts.add f
-    block:   # RFC-0016 INT-82: a global's entry value is entry state
-      var acc: seq[RawZ3Ast]
-      svAsts(globalEntryVals[name], acc)
-      notePreExistingTerms(ctx, acc)
-    registerUnwritten(ctx, globalEntryVals[name], displayName(name),
-                      havoc = true)
-  globalEntryVals[name]
 
 proc havocUnknownClosureEffects(e: IRExpr; env: Env) =
   ## RFC-0005 S8bh. A call through a proc value the walk cannot resolve
@@ -26471,534 +26877,6 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   funcApp
 
 # ---- Phase 15 C4: DSL higher-order functions over seq[T] --------------------
-
-proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
-                  val: SymVal): Z3AnyAst =
-  ## Store `val` at index `idx` in the (erased) seq data array, returning the
-  ## new erased array. RFC-0005 S8ba: `iekSeqAdd` stores through here too
-  ## (it had its own int64/bool-only dispatch), and a distinct element is
-  ## stored as its base (`seqCellTy`, `ejectBase`).
-  let elemTy = seqCellTy(elemTy)
-  let val = ejectBase(val)
-  case elemTy.kind
-  of itInt:
-    # #163 review R22 site 3 prerequisite: reconcile an `svInt`-shaped RHS
-    # (a `range[lo..hi]` top-level param promotes to `svInt` under the
-    # engine's default `isOptimised` integer semantics, `runSymexImpl`'s
-    # `promoteSound`) to the array's BV sort BEFORE storing -- mirroring the
-    # EXACT coercion `isDerefWrite`'s plain-field and arm-field write sites
-    # already apply (`runtime_heap.nim`). Every seq[T] backing array is
-    # BV-sorted by width regardless of whether `T` carries a declared range
-    # (`allocateSeqDataRaw`'s itInt arm), so an un-reconciled `svInt` crashes
-    # here on ANY int-family element, ranged or not.
-    var v = val
-    if v.kind == svInt:
-      case elemTy.width
-      of 8:  v = liftBV(intToBv[8](v.zi, Z3BitVec[8]),   elemTy.signed)
-      of 16: v = liftBV(intToBv[16](v.zi, Z3BitVec[16]), elemTy.signed)
-      of 32: v = liftBV(intToBv[32](v.zi, Z3BitVec[32]), elemTy.signed)
-      of 64: v = liftBV(intToBv[64](v.zi, Z3BitVec[64]), elemTy.signed)
-      else: discard
-    case elemTy.width
-    of 8:
-      let t = wrap[Z3Array[Z3Int, Z3BitVec[8]]](dataRaw.ctx, dataRaw.raw)
-      toAnyAst(store(t, idx, v.bv8))
-    of 16:
-      let t = wrap[Z3Array[Z3Int, Z3BitVec[16]]](dataRaw.ctx, dataRaw.raw)
-      toAnyAst(store(t, idx, v.bv16))
-    of 32:
-      let t = wrap[Z3Array[Z3Int, Z3BitVec[32]]](dataRaw.ctx, dataRaw.raw)
-      toAnyAst(store(t, idx, v.bv32))
-    of 64:
-      let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](dataRaw.ctx, dataRaw.raw)
-      toAnyAst(store(t, idx, v.bv64))
-    else:
-      raise newException(ValueError, "storeSeqElem: unsupported int width " & $elemTy.width)  # [raise-audited: category-c: width-exhaustive (see seqElemAt above)]
-  of itBool:
-    let t = wrap[Z3Array[Z3Int, Z3Bool]](dataRaw.ctx, dataRaw.raw)
-    toAnyAst(store(t, idx, val.bo))
-  of itFloat32:
-    let t = wrap[Z3Array[Z3Int, Z3Float32]](dataRaw.ctx, dataRaw.raw)
-    toAnyAst(store(t, idx, val.fp32))
-  of itFloat64:
-    let t = wrap[Z3Array[Z3Int, Z3Float64]](dataRaw.ctx, dataRaw.raw)
-    toAnyAst(store(t, idx, val.fp64))
-  of itString:
-    let t = wrap[Z3Array[Z3Int, Z3String]](dataRaw.ctx, dataRaw.raw)
-    toAnyAst(store(t, idx, val.str))
-  of itRef, itPtr:   ## Cluster H H_containers (ADR-0022): seq[Node] LITERAL
-    # construction (`@[a, b]`) for a named `ref object` element. The backing
-    # array is the raw `Z3Array[Z3Int, Ref_T]` `allocateSeqDataRaw` already
-    # allocates for itRef/itPtr elements (built for Phase 15 R3's inline-ref
-    # seqs) — this was the missing STORE half. `Ref_T` is a RUNTIME
-    # uninterpreted sort the typed `store` helper can't express, so this
-    # stores via raw `Z3_mk_store` (mirrors the `isIndex/seq` read-path's raw
-    # `Z3_mk_select`, runtime.nim's itRef/itPtr arm above ~5410). GROUND
-    # store; no quantifier.
-    let ctx = dataRaw.ctx
-    let valAst = case val.kind
-      of svRef: val.refAst
-      of svPtr: val.ptrAst
-      else:
-        # N47 (round-6 raise-class-audit category-d closure): CONVERTED. The
-        # ONE identified path into this mismatch — a `.map(fn)` HOF closure
-        # returning `ref T`/`ptr T` — was already closed by N46's own
-        # `applyClosureGround` hardening: `symValFromRawAst` raises for any
-        # non-{int,bool,float32,float64} return type, but that raise is
-        # caught in the SAME frame and the fallback now goes through
-        # `allocateSym(cb.retTy, ...)` (total since N40), which for
-        # itRef/itPtr always produces a correctly-kinded svRef/svPtr — traced
-        # end to end above (`applyClosureGround`, ~9608-9650). The OTHER two
-        # callers (`lowerSeqLit`'s literal-element store, `filter`'s
-        # unchanged-element store via `seqElemAt`) were also traced: both
-        # ultimately source the value from an env lookup or `allocateSym`'s
-        # itRef/itPtr arm, both of which are kind-consistent by construction.
-        # What was NOT fully closed (matching this file's own `lower(iekField)`
-        # precedent, just above): whether an `iteSV` merge can still land a
-        # degraded/opaque SymVal kind on a nominally ref/ptr-typed element
-        # slot via some OTHER, not-yet-traced degrade path — the SAME
-        # mechanism `tsymex_r6_heap_raise_totality.nim`'s four
-        # `refSV.kind`-not-svRef/svPtr sites were converted under without an
-        # independent repro (heap-raise totality slice, walker v113). Same
-        # defense-in-depth call: in-band degrade, never worse than the raw
-        # raise it replaces, and the array must stay well-sorted regardless —
-        # a FRESH symbolic ref/ptr of the declared element type (never the
-        # mismatched `val`) keeps `Z3_mk_store`'s value operand sort-correct.
-        # Fix-slice item 3: was a bare fixed name — missed the 2385f84
-        # uniquification sweep. A repeat store-mismatch within the same run
-        # (two DIFFERENT itRef/itPtr seq-literal elements, or a `.filter`/
-        # `.map` HOF revisiting this arm) collided on `(name, sort)`. Item 9:
-        # routed through the shared `degradeAlloc` pairing helper.
-        let placeholder = degradeAlloc(elemTy, weInternalWalkerFault,
-          "storeSeqElem(itRef/itPtr): val is not svRef/svPtr, kind=" &
-          plainEnglishSymValKind(val.kind) & " (weInternalWalkerFault)",
-          "__storeSeqElemKindMismatch")
-        if elemTy.kind == itPtr: placeholder.ptrAst else: placeholder.refAst
-    let storedRaw = checkedStore(ctx, dataRaw.raw, idx.raw, valAst.raw)
-    wrap[Z3AnyAst](ctx, storedRaw)
-  else:
-    # RFC-0016 K9c-g. An element type the model does not back has no array
-    # to store into: a known modelling gap, not a walker fault. `seqStoreArrs`
-    # routes it to a clean decline before it gets here; this is the backstop
-    # for a direct caller, in-band as the arms above (the data is returned
-    # unchanged, the path tainted `seNestedSeqUnsupported`).
-    allocDegrade(seNestedSeqUnsupported, "storeSeqElem: a store into a seq " &
-      "of " & $elemTy & ", an element type the model does not back " &
-      "(seNestedSeqUnsupported)")
-    dataRaw
-
-proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
-  ## Phase 15 C4. `@[a, b, c]` → a CONCRETE-length svSeq: a fresh data array
-  ## with each lowered element stored at its index, and `seqLen` pinned to the
-  ## literal count (a numeral). Empty `@[]` → length-0 svSeq.
-  ##
-  ## Round-6 B6 rider (AMENDED by N29, walker v120 — see `dataRaw`'s own
-  ## comment below for the full writeup): the EMPTY literal
-  ## (`e.seqLitElems.len == 0`) skips `allocateSeqDataRaw` and uses an inert
-  ## Bool-sorted placeholder array ONLY when `elemTy` is genuinely UNBACKED
-  ## (a kind `allocateSeqDataRaw` does not support at all, e.g. `itTuple` —
-  ## the `seq[(string,string)]` gap the rider was written to unblock:
-  ## `var pairs: seq[(string,string)] = @[]`, chapulin's own `readOptions`
-  ## accumulator declaration). For a BACKED `elemTy` (the common case, e.g.
-  ## `seq[int]`), the empty literal now allocates a REAL, correctly-sorted
-  ## empty backing array instead — the placeholder's original soundness
-  ## argument ("a length-0 seq's data is never read on any live path")
-  ## holds for READS but not for a later `.add`/`.insert` MUTATION, which
-  ## reinterprets `seqDataRaw` at the DECLARED element sort with no
-  ## validation (N29's actual mechanism). This does NOT touch
-  ## `allocateSym`'s itSeq arm (fresh/symbolic-length seqs, where a
-  ## genuinely-reachable index needs REAL element content) — declining
-  ## classified there is unchanged; only the ALREADY-KNOWN-EMPTY literal
-  ## case is affected, and only its BACKED-elemTy half changed behaviour.
-  let elemTy = seqCellTy(e.seqLitElemTy)   # RFC-0005 S8ba: a distinct elem's base
-  if e.seqLitElems.len > 0 and not isBackedSeqElemTy(elemTy):
-    # Round-6 N37: a NON-EMPTY literal (the B6 rider above only widened the
-    # EMPTY case) whose element type `allocateSeqDataRaw` cannot back --
-    # e.g. `@[("a","b")]` : seq[(string,string)]` -- was a THIRD unguarded
-    # caller of the same raw-raise site N36 marked `known-open` (alongside
-    # `lowerHofCall`'s inline map/filter, converted just above). Guard
-    # BEFORE touching `dataRaw`/the element loop at all, mirroring the
-    # empty-literal rider's own reasoning and `allocateSym`'s itSeq
-    # placeholder discipline -- never call the unsafe function, never
-    # attempt to `storeSeqElem` real (unbacked-typed) content into a
-    # placeholder array.
-    queueDegrade(seNestedSeqUnsupported,
-      "seq[seq[T]] / seq[complex] not modeled — element kind " &
-           plainEnglishTypeKind(elemTy.kind) &
-           " (nested seq element type is not supported)")
-    var fresh: seq[Z3Bool]
-    return allocateSym(tSeq(elemTy), freshDegradeName("__seqLitUnsupportedDegrade"), fresh)
-  # N29 fix (round-6 bucket-2, walker v120): the B6 rider's empty-literal
-  # placeholder below is sound ONLY for a seq whose element type
-  # `allocateSeqDataRaw` cannot back (its own doc argument: a length-0 seq's
-  # data is never READ on any live path, since `isIndex`'s bound is
-  # unsatisfiable for every index). That argument does not extend to
-  # MUTATION: `.add`/`.insert` (`iekSeqAdd` et al.) unconditionally `wrap()`
-  # `seqDataRaw` as `Z3Array[Z3Int, <elemTy's own backed sort>]` with no
-  # sort check, so `var xs: seq[int] = @[]; xs.add(a)` -- the ordinary
-  # build-a-seq-by-appending idiom, exercised by this file's own C4-1/C4-1b
-  # SUTs -- reinterpreted the rider's inert `Array[Int, Bool]` placeholder
-  # as `Array[Int, BitVec 64]` and Z3 (correctly) rejected the resulting
-  # `store()` with "domain sort ... and parameter sort ... do not match".
-  # This was the actual mechanism behind the long-ledgered "N29 HOF lambda
-  # domain-sort mismatch" finding: the crash fires on the FIRST post-`@[]`
-  # mutation, before `buildClosure`/`lowerHofCall` are ever reached --
-  # confirmed by direct stack instrumentation (reverted before landing; the
-  # closure/HOF machinery was never entered in any repro). The fix: for a
-  # BACKED element type (the overwhelming common case), allocate the REAL
-  # typed empty array instead of the generic Bool placeholder -- costs
-  # nothing extra (`allocateSeqDataRaw` only ever declares a fresh Z3 array
-  # CONSTANT; it never touches element count, exactly like the non-empty
-  # branch below), and every subsequent mutation site's unchecked `wrap()`
-  # is now sound because the underlying sort genuinely matches. The
-  # placeholder survives UNCHANGED for a genuinely UNBACKED element type
-  # (e.g. `seq[(string,string)]`), preserving the rider's original purpose
-  # (`allocateSeqDataRaw` would raise for those) -- `.add` on such a seq
-  # already declines classified via `iekSeqAdd`'s own unbacked-elem `else`
-  # arm rather than reaching the unchecked-wrap fast path, so this widening
-  # introduces no new unsoundness there.
-  # RFC-0005 S8bc: one array per leaf of a tree element.
-  var arrs =
-    if e.seqLitElems.len == 0:
-      if isBackedSeqElemTy(elemTy):
-        allocateSeqArrs(elemTy, "__seqlit.data")
-      else:
-        @[toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))]
-    else:
-      allocateSeqArrs(elemTy, "__seqlit.data")
-  # RFC-0005 S8s. Each element lowers against the element type's prototype,
-  # as `lowerTupleLit`'s fields do: an int literal with no prototype lowers
-  # to a signed 64-bit value, and `storeSeqElem` then read the `bv8` of that
-  # `svBV64` element of a `seq[uint8]` (`@[x, 1'u8]`, a
-  # `weInternalWalkerFault` on every such literal, with or without an input).
-  let elemProto =
-    if elemTy.kind == itInt: some(bvConst(elemTy, 0))
-    elif elemTy.kind == itBool: some(ofBool(mkBool(false)))
-    else: none(SymVal)
-  for i, ce in e.seqLitElems:
-    let elemSV = lower(env, ce, elemProto)
-    let cur = mkSeqSV(mkInt(i), arrs, elemTy)
-    let stored = seqStoreArrs(cur, mkInt(i), elemSV)
-    if stored.isNone: return seqStoreDecline("seq literal", elemTy, elemSV)
-    arrs = stored.get
-  mkSeqSV(mkInt(e.seqLitElems.len), arrs, elemTy)
-
-proc lowerSeqNew(env: Env, e: IRExpr): SymVal =
-  ## RFC-0005 S8bc (item 5) and S8bi, one lowering since batch 5.
-  ## `newSeq[T](n)` / `newSeq(s, n)` (`snZeroed`): a seq of length `n` whose
-  ## every element is `T`'s zero -- each data array is the constant array
-  ## of that zero's leaf (`constSeqArrs`, S8bc's leaf split), as an empty
-  ## table's container values are (`tabTreeDataZero`), so the element at
-  ## any index below `n` reads the zero. `newSeqOfCap[T](n)` (`snOfCap`):
-  ## length 0, `n` only reserves. `newSeqUninit[T](n)`: length `n`, elements
-  ## Nim leaves unset -- free arrays (`allocateSeqArrs`), and the path is
-  ## tainted (`feUnsupportedOpHavoc`): a witness may depend on an element a
-  ## run does not reproduce, and whether one is read is not tracked.
-  ##
-  ## The parser has already forked a negative `n` (`RangeDefect`, the
-  ## `Natural` conversion) and declined one above `maxModelledInitialSize`
-  ## (`parseNewSeqLen`), so neither is checked again here. An element type
-  ## the seq does not back declines as a seq literal of it does, and so
-  ## does a zeroed one with no modelled zero.
-  let elemTy = e.snElemTy
-  let lenSV = lower(env, e.snArg)
-  let op = if e.snOfCap: "newSeqOfCap" elif e.snZeroed: "newSeq"
-           else: "newSeqUninit"
-  let needZero = e.snZeroed and not e.snOfCap
-  if not isBackedSeqElemTy(elemTy) or
-     (needZero and not defaultZeroTotal(elemTy)) or
-     lenSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
-    queueDegrade(seNestedSeqUnsupported,
-      op & " of a " & plainEnglishTypeKind(elemTy.kind) &
-        " element (or a non-integer length) not modelled")
-    var fresh: seq[Z3Bool]
-    return allocateSym(tSeq(elemTy), freshDegradeName("__newSeqDegrade"), fresh)
-  if e.snOfCap:
-    # Length 0: no element is ever read below the length, so the arrays
-    # are any arrays of the element's leaf sorts.
-    return mkSeqSV(mkInt(0), allocateSeqArrs(elemTy,
-                     freshDegradeName("__newSeqOfCap.data")), elemTy)
-  if not e.snZeroed:
-    let arrs = allocateSeqArrs(elemTy, freshDegradeName("__newSeqUninit.data"))
-    if arrs.len == 1:
-      # RFC-0005 S8bq: registered as a `newSeqUninit` base, so only a READ
-      # of an element no write has reached is tainted (`uninitReadCond`).
-      noteUninitSeqBase(arrs[0])
-    else:
-      # Batch 6: S8bq tracks one data array (`seqDataRaw`). A tree element
-      # (S8bc's leaf split) has one array per leaf, and a write of one
-      # leaf would read as a write of the element, so the whole path stays
-      # tainted, as before S8bq.
-      queueDegrade(feUnsupportedOpHavoc,
-        "newSeqUninit element values are unspecified — degraded to sxUnknown")
-    return mkSeqSV(toZ3Int(lenSV), arrs, elemTy)
-  mkSeqSV(toZ3Int(lenSV), seqNewZeroArrs(elemTy), elemTy)
-
-proc seqNewZeroArrs(elemTy: IRType): seq[Z3AnyAst] =
-  ## RFC-0005 batch 6. The data arrays of a zeroed `newSeq` of `elemTy`:
-  ## one constant array per leaf of the element's zero (S8bc's leaf split),
-  ## so the element at any index reads the zero. `lowerSeqNew` builds a
-  ## `newSeq` from them and S8bl's `setLen` (`isSetLen`) reads a grown
-  ## slot from them: one notion of a fresh element. The caller has checked
-  ## `isBackedSeqElemTy` and `defaultZeroTotal`.
-  constSeqArrs(elemTy, defaultZero(elemTy, "__newSeqZero"))
-
-proc lowerTupleLit(env: Env, e: IRExpr): SymVal =
-  ## RFC-chapulin-hardening P1. `(a, b, c)` → svTuple. Unlike `lowerSeqLit`
-  ## (one uniform `elemTy` for every element — Nim requires seq homogeneity),
-  ## tuple fields may be HETEROGENEOUS, so each element is lowered with its
-  ## OWN per-field prototype derived from `e.ttupleTy.fields[i]` (mirrors
-  ## `iekArrayLit`'s protoSV construction, just per-field instead of once) —
-  ## this matters so a bare int-literal field (e.g. `(x, 5'u8)`) lowers at
-  ## its DECLARED width/signedness rather than defaulting to signed BV64
-  ## (`lower`'s `iekIntLit` arm with no proto).
-  var fields: seq[SymVal]
-  for i, ce in e.telems:
-    var protoSV: Option[SymVal] = none(SymVal)
-    if i < e.ttupleTy.fields.len:
-      let fty = e.ttupleTy.fields[i]
-      if fty.kind == itInt:
-        protoSV = some(bvConst(fty, 0))
-      elif fty.kind == itBool:
-        protoSV = some(ofBool(mkBool(false)))
-    fields.add lower(env, ce, protoSV)
-  SymVal(kind: svTuple, fields: fields, fieldNames: e.ttupleTy.fieldNames)
-
-proc variantLitArms(env: Env, arms: seq[VariantArm], tagOrd: int,
-                     activeExprs: seq[IRExpr], objName: string):
-    tuple[fields: OrderedTable[int, seq[SymVal]],
-          names: OrderedTable[int, seq[string]]] =
-  ## The per-arm fields of a literal-discriminant variant (one axis of a
-  ## multi-variant): the active arm's are the lowered constructor exprs,
-  ## every other arm's are fresh (see `lowerVariantLit`'s soundness note).
-  ## Extracted from `lowerVariantLit` by RFC-0005 S8p, which reuses it per
-  ## axis in `lowerMultiVariantLit`.
-  ## RFC-0005 S8u: `tagOrd` is the discriminator's value. When no explicit
-  ## arm names it, the active arm is the `else` arm (key -1), which the
-  ## parser only admits for an ordinal that arm covers.
-  var activeKey = -1
-  for arm in arms:
-    if not arm.isElse and arm.tagOrdinal == tagOrd: activeKey = tagOrd
-  var armFields = initOrderedTable[int, seq[SymVal]]()
-  var armNames  = initOrderedTable[int, seq[string]]()
-  for arm in arms:
-    armNames[arm.tagOrdinal] = arm.fieldNames
-    if arm.tagOrdinal == activeKey:
-      var fields: seq[SymVal]
-      for fe in activeExprs:
-        fields.add lower(env, fe)
-      armFields[arm.tagOrdinal] = fields
-    else:
-      var fields: seq[SymVal]
-      for j, ft in arm.fieldTypes:
-        inc variantLitFreshCounter
-        let path = "__variantLit." & objName & ".@" & arm.tagName &
-                   "." & arm.fieldNames[j] & "." & $variantLitFreshCounter
-        # N39 (round-6 fix round 5). GUARD-BEFORE-CALL: `classifyFieldType`
-        # (dsl_typebridge.nim) legitimately classifies an INACTIVE arm's
-        # field as an `itUninterp` `__ownership:`/`__unsupported:`/
-        # `__unsupported_witness:` placeholder or an unsupported
-        # `itTable`/`itSet` shape (`scopedDeclineFieldTy`'s Bug #2 scoped
-        # decline only special-cases `itSeq`) — allocating one raw-raises a
-        # classified `Symex*Error` from INSIDE `lower()` (no `WalkCtx`/
-        # `Path` in scope here, called via `lowerInExpr` while a loop's live
-        # `seq[Path]` may be on the caller's stack), the exact C-backend
-        # goto-exception hazard ADR-0023/SND-3 exists to ban. Degrade
-        # IN-BAND via the SAME `loweringDegradeErrors`/`loweringDidDegrade`
-        # sink ADR-0023 established for exactly this "lower()-reachable,
-        # no Path in scope" shape, instead of calling `allocateSym` at all.
-        # The substitute value is a bare fresh unconstrained `svBool` —
-        # deliberately NOT an attempt to reconstruct `ft`'s own kind: this
-        # doc comment's own soundness note (above) already establishes an
-        # INACTIVE arm's field is reachable ONLY through `isVariantField`'s
-        # out-of-arm `FieldDefect` fork, so no live SAT path ever reads this
-        # value regardless of its kind (mirrors `tyOf`'s own "diagnostics
-        # only" tolerance for a `SymVal.kind` that doesn't match the
-        # original declared field type). `drainPendingLowerEffects` taints
-        # the whole STATEMENT once `loweringDidDegrade` is observed — an
-        # honest over-approximation (a variant literal with SOME unsupported
-        # inactive-arm field type always degrades, even on paths that never
-        # touch that field), the safe direction per Invariant 3.
-        let ftIssue = unallocatableFieldIssue(ft)
-        if ftIssue.isSome:
-          queueDegrade(ftIssue.get.kind,
-            "variant literal inactive-arm field `" & objName &
-                 "." & arm.fieldNames[j] & "` allocation unmodeled — " &
-                 ftIssue.get.msg & " (arm-field allocation, not param-entry)")
-          fields.add SymVal(kind: svBool, bo: mkBoolVar(path & ".unalloc"))
-        else:
-          var scratchPC: seq[Z3Bool]
-          fields.add allocateSym(ft, path, scratchPC)
-      armFields[arm.tagOrdinal] = fields
-  (armFields, armNames)
-
-proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
-  ## Round-6 A1 (ADR-0029). `T(kind: tagLit, f1: e1, ...)` → svVariant.
-  ## Mirrors `allocateSym(itVariant)`'s shape (disc + per-arm fields +
-  ## plain fields) with two deliberate divergences: the discriminator is a
-  ## Z3 CONST pinned to the literal tag (`bvConst`, not a fresh symbol with
-  ## a disjunction constraint — `vDiscTy` is always `itInt`, per its own
-  ## doc comment, so `bvConst` covers every legal disc shape), and the
-  ## ACTIVE arm's fields are the LOWERED constructor exprs rather than
-  ## fresh allocations.
-  ##
-  ## Every OTHER arm allocates FRESH-UNCONSTRAINED fields (never zero) —
-  ## the ADR's soundness note: real Nim raises `FieldDefect` on an
-  ## out-of-arm read before any value is observable, so a zero-filled
-  ## inactive field would let a buggy twin "read" a value real Nim never
-  ## yields. The fresh allocation's own `pcOut` is intentionally a LOCAL,
-  ## discarded scratch — mirrors the existing `__refVariantWitness`
-  ## proto-allocation precedent (`extractFromSymVal`'s `itVariant` arm,
-  ## above) for the identical reason: an inactive arm's fields are only
-  ## ever reachable through `isVariantField`'s fork, whose out-of-arm side
-  ## is exactly the `FieldDefect` raise — no live SAT path ever reads a
-  ## fresh inactive field's value, so no pc constraint on it could ever
-  ## affect a reachable verdict.
-  let ty = e.vlVariantTy
-  let discBoxed = new(SymVal)
-  discBoxed[] = discConst(ty.vDiscTy, int64(e.vlTagOrd))
-  var plainFields: seq[SymVal]
-  for fe in e.vlPlainFields:
-    plainFields.add lower(env, fe)
-  let (armFields, armNames) = variantLitArms(env, ty.vArms, e.vlTagOrd,
-                                             e.vlArmFields, ty.vObjectName)
-  var sv = SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
-                  vObjectName: ty.vObjectName, vArmFields: armFields,
-                  vArmFieldNames: armNames, vPlainFields: plainFields,
-                  vPlainFieldNames: ty.vPlainFieldNames)
-  # RFC-0016 PRC-07 slice B: the union's bytes are the arm's fields over what
-  # the constructor started from: zero when it omits a field (Nim zeroes the
-  # object first), else nothing (the bytes are indeterminate until written).
-  let gate = unionImageGate(ty)
-  if gate.isSome and armFields.hasKey(e.vlTagOrd):
-    sv.vImage = armImage(gate.get, e.vlTagOrd, armFields[e.vlTagOrd],
-                         (if e.vlZeroFilled: zeroImage(gate.get)
-                          else: unwrittenImage(gate.get))).get(@[])
-  if activeMemberTracked(ty): sv.vActive = activeOf(discBoxed[])
-  sv
-
-
-proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal =
-  ## RFC-0005 S8p. `T(k: tagLit, ..., j: tagLit2, ...)` over an
-  ## `itMultiVariant` -> svMultiVariant: `lowerVariantLit` once per axis
-  ## (the discriminator a const pinned to its literal tag, the active arm's
-  ## fields the lowered constructor exprs, the other arms' fields fresh),
-  ## plus the shared plain fields.
-  let ty = e.mvlTy
-  var plainFields: seq[SymVal]
-  for fe in e.mvlPlainFields:
-    plainFields.add lower(env, fe)
-  var axes: seq[VariantAxisSym]
-  for ai, ax in ty.mvAxes:
-    let discBoxed = new(SymVal)
-    discBoxed[] = discConst(ax.discTy, int64(e.mvlAxisTags[ai]))
-    let (armFields, armNames) = variantLitArms(env, ax.arms, e.mvlAxisTags[ai],
-                                               e.mvlAxisFields[ai],
-                                               ty.mvObjectName & "." & ax.discName)
-    axes.add VariantAxisSym(discName: ax.discName, disc: discBoxed,
-                            armFields: armFields, armFieldNames: armNames)
-  SymVal(kind: svMultiVariant, mvObjectName: ty.mvObjectName, mvAxes: axes,
-         mvPlainFields: plainFields, mvPlainFieldNames: ty.mvPlainFieldNames)
-
-proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
-  ## RFC-0005 S8s. `v.f = x` on a value variant or multi-variant: `v`'s new
-  ## value is its old one with field `f` replaced by `x`. A plain field has
-  ## one slot. An arm field has a slot in every arm that declares it
-  ## (`of a, b: f` is two arms), and all of them are replaced: the parser's
-  ## preceding `isVariantField` read of `v.f` has already forked the
-  ## out-of-arm `FieldDefect` (Nim checks the field before it writes, and
-  ## leaves `v` unchanged when it raises), so on this path the
-  ## discriminator selects one of those arms. The other arms' slots are
-  ## unreachable while it does. The new value lowers against the old one's
-  ## prototype, so a literal takes the field's width.
-  let recv = lower(env, e.vfsRecv)
-  proc replaced(old: SymVal): SymVal =
-    let proto =
-      if old.kind in {svBool, svInt, svBV8, svBV16, svBV32, svBV64}: some(old)
-      else: none(SymVal)
-    lower(env, e.vfsVal, proto)
-  case recv.kind
-  of svVariant:
-    result = recv
-    let pix = recv.vPlainFieldNames.find(e.vfsFieldName)
-    if pix >= 0:
-      result.vPlainFields[pix] = replaced(recv.vPlainFields[pix])
-      return
-    var newVal: Option[SymVal]
-    for tag in e.vfsTags:
-      if not recv.vArmFieldNames.hasKey(tag): continue
-      let ix = recv.vArmFieldNames[tag].find(e.vfsFieldName)
-      if ix < 0: continue
-      if newVal.isNone: newVal = some(replaced(recv.vArmFields[tag][ix]))
-      result.vArmFields[tag][ix] = newVal.get
-    if newVal.isSome:
-      if e.vfsVariantTy != nil:
-        # RFC-0016 PRC-07 slice B (c): the write is into the union's bytes;
-        # every field of the active arm those bytes cover takes its value
-        # from the image (an arm the write leaves without a value in some
-        # field was declined upstream, `isVariantField`'s write side).
-        if result.vImage.len > 0:
-          let lay = vl.variantLayout(e.vfsVariantTy)
-          let tp = vl.accessPlace(lay, e.vfsTags, e.vfsFieldName)
-          let bits = if lay.ok and tp.isSome: placeBits(newVal.get, tp.get)
-                     else: none(Z3BitVec[64])
-          if bits.isNone:
-            result.vImage = @[]   # no image: a later out-of-arm read declines
-          else:
-            result.vImage = imgWrite(result.vImage, tp.get.off - lay.unionOff,
-                                     tp.get.size, bits.get)
-            for tag, slots in recv.vArmFields:
-              if tag < 0 or tag in e.vfsTags or not lay.arms.hasKey(tag) or
-                 slots.len != lay.arms[tag].len:
-                continue
-              let isActive = variantDiscEq(recv.vDisc[], int64(tag))
-              for j, f in lay.arms[tag]:
-                if not overlaps(f, tp.get): continue
-                let nv = bitsPlace(imgReadDef(result.vImage,
-                                              f.off - lay.unionOff, f.size),
-                                   f, some((tp.get, newVal.get)))
-                if nv.isNone: continue
-                result.vArmFields[tag][j] =
-                  iteSV(isActive, nv.get, normSlot(slots[j], f.ty))
-        # slice B (cpp): the member written is now the active one.
-        if result.vActive != nil and e.vfsTags.len > 0:
-          var act = discConst(e.vfsVariantTy.vDiscTy, int64(e.vfsTags[0]))
-          for k in 1 ..< e.vfsTags.len:
-            let t = int64(e.vfsTags[k])
-            act = iteSV(variantDiscEq(recv.vDisc[], t),
-                        discConst(e.vfsVariantTy.vDiscTy, t), act)
-          result.vActive = activeOf(act)
-      return
-  of svMultiVariant:
-    result = recv
-    let pix = recv.mvPlainFieldNames.find(e.vfsFieldName)
-    if pix >= 0:
-      result.mvPlainFields[pix] = replaced(recv.mvPlainFields[pix])
-      return
-    var newVal: Option[SymVal]
-    for ai, ax in recv.mvAxes:
-      for tag in e.vfsTags:
-        if not ax.armFieldNames.hasKey(tag): continue
-        let ix = ax.armFieldNames[tag].find(e.vfsFieldName)
-        if ix < 0: continue
-        if newVal.isNone: newVal = some(replaced(ax.armFields[tag][ix]))
-        result.mvAxes[ai].armFields[tag][ix] = newVal.get
-      if newVal.isSome: return
-  else:
-    discard
-  # The receiver is not a variant (its construction already declined and
-  # bound a stand-in: `seVariantFieldOnDeclinedCtor`, as `isVariantField`
-  # reports it), or no slot holds the field. Taint the path and keep the
-  # old value: no verdict on this path is trusted. RFC-0005 review R1-13:
-  # the path goes on without the write, a dropped write, so the kind is
-  # `feUnsupportedOp` (`dcSubstituted`, which taints the path). It was
-  # `seVariantFieldOnDeclinedCtor`, the READ arm's halt kind (`dcOmitted`,
-  # no path taint), right only where the path ends.
-  queueDegrade(feUnsupportedOp,
-    "variant field '" & e.vfsFieldName & "' written on a receiver with no " &
-    "such field slot (SymVal kind=" & $recv.kind & "): the write is " &
-    "dropped (feUnsupportedOp)")
-  recv
 
 proc concreteSeqLen(seqSV: SymVal): Option[int] =
   ## Phase 15 C4. If the seq's length folds (via `simplify`) to a Z3 numeral,

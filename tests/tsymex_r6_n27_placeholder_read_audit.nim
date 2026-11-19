@@ -141,8 +141,12 @@ const
   ## those guards and the unbacked-element decline reads the left length
   ## (`lenL`), the left data array's context (`zctx`), and builds the result
   ## from `right.seqLen` (three): a placeholder never reaches them.
-  markerPins = [("runtime.nim", 120), ("runtime_strings.nim", 4),
-                ("heap_model.nim", 23), ("runtime_heap.nim", 11)]
+  ## RFC-0016 INT-34 B0: `sameSymVal` moved into `symval.nim` with its two
+  ## marked svSeq lines: runtime.nim 120 -> 118, symval.nim 0 -> 2. The
+  ## family total is unchanged.
+  markerPins = [("runtime.nim", 118), ("runtime_strings.nim", 4),
+                ("heap_model.nim", 23), ("runtime_heap.nim", 11),
+                ("symval.nim", 2)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"

@@ -78,7 +78,7 @@ const
     "pathInfeasible", "programGlobal", "ptrFamilyHints",
     "ptrFamilyKey", "ptrIdxKey", "ptrKeyKey", "ptrLeafAims",
     "ptrLeafPathStr", "ptrObjKey", "ptrScalarPointee", "ptrSelKey",
-    "ptrTargetCode", "sameBranchSymCond", "sameSymVal",
+    "ptrTargetCode", "sameBranchSymCond",
     "seqStoreArrs", "shouldStop",
     "stampHeapSteps", "storeSeqElem", "symEq", "tabValAt", "tabValTerms",
     "taintInPlace", "unwrittenImage",
@@ -98,7 +98,8 @@ const
   movedNames = [
     "SVKind", "SymVal", "Env", "plainEnglishSymValKind", "liftBV", "ofBool",
     "bvVar", "bvRangeConds", "queueDegrade", "StrBuf", "VariantAxisSym",
-    "truncBV"]
+    "truncBV",
+    "sameSymVal"]   ## INT-34 B0: pure `SymVal` code, returned to the value core
 
 proc leadIdent(s: string): string =
   for c in s:

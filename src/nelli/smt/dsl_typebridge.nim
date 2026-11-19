@@ -197,7 +197,7 @@ proc containerHoldsLongDouble(n: NimNode): bool =
     sig.kind == nnkProcTy and sig.len > 0 and sig[0].kind == nnkFormalParams and
       sig[0].len > 0 and typeTreeNamesLongDouble(sig[0][0])
   else:
-    false
+    false  # k2: n/a: a literal or constructor root holds values the program wrote, never a c_longdouble the declared sites have not declined
 
 proc isLongDoubleTyped*(n: NimNode): bool =
   ## RFC-0016 INT-76. True iff the typed node `n` (an expression, or a

@@ -7,7 +7,9 @@
 #
 # Usage: scripts/dt-bounded.sh [-i IMAGE] <c|cpp> tests/foo.nim [timeout_secs]
 #   -i IMAGE  dev image variant: runs localhost/nelli-dev:IMAGE (default
-#             `latest`; `z3-4.13.4` is the Z3 4.13.4 row). Built on demand by
+#             `latest`; `z3-4.13.4` is the Z3 4.13.4 row; `pcre-8.37-jit` is
+#             the Windows legs' libpcre, 8.37 with the JIT, the native oracle
+#             for the 8.37 JIT regex model). Built on demand by
 #             scripts/build-dev-image.sh if missing. Overrides $NELLI_IMAGE.
 # Env:   NELLI_PIN_DIR  if set (created if missing), forwarded into the
 #        container so files written there land on the host. Relative = relative

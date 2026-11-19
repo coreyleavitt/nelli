@@ -118,8 +118,8 @@ suite "S8bt (7): replace facts against std/re":
     check firstOf("(?i)a") == {'a', 'A'}
     check firstOf("[0-9]|x") == {'0'..'9', 'x'}
     check firstOf("a(*COMMIT)b|c") == {'a', 'c'}
-    # Not computed in UTF mode.
-    check firstOf("(*UTF)a").card == 256
+    # RFC-0016 S8co (PRC-33 item 9b): computed in UTF mode too.
+    check firstOf("(*UTF)a") == {'a'}
 
   test "the match lengths":
     proc lens(p: string): (int, int) =

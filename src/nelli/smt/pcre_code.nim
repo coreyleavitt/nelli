@@ -19,6 +19,7 @@
 ## Brackets link to their next OP_ALT / OP_KET (`link`), as GET(cc, 1)
 ## does. Pure Nim.
 
+import std/tables
 import ./pcre_syntax
 
 type
@@ -41,7 +42,8 @@ type
     op*: COp
     atom*: Rx         ## coAtom / coRep / coCrRep: the item
     rep*: RepOp       ## coRep / coCrRep
-    count*: int       ## rpExact / rpUpto: the count; coCrRep: the minimum
+    count*: int       ## rpExact / rpUpto: the count; coCrRep: the minimum;
+                      ## coAccept: the capturing groups it closes (OP_CLOSE)
     count2*: int      ## coCrRep: the maximum (-1 unlimited)
     link*: int        ## coBra .. coAlt: the next OP_ALT / OP_KET
     cap*: int         ## coCbra / coScbra: the group
@@ -51,7 +53,9 @@ type
     address*: int
       ## RFC-0005 S8bt: coRep / coCrRep and a repeated class's coAtom: the
       ## repeat's code address in `codeSize`'s layout (`pcre_select`'s
-      ## automaton reads the same address for that repeat)
+      ## automaton reads the same address for that repeat). RFC-0016 S8co:
+      ## coBraZero / coBraMinZero: the repeat's address on the outermost
+      ## copy of a group repeat, -1 on a nested one
 
   AtomFam* = enum
     afChar, afNot, afType, afClass
@@ -178,7 +182,7 @@ proc emitGroupRep(e: var Emitter; x: Rx; base: int) =
       return
     if hi == 1 or hi < 0:
       discard e.emit Code(op: (if x.lazy: coBraMinZero else: coBraZero),
-                          lazy: x.lazy)
+                          lazy: x.lazy, address: base)
       e.emitGroup(sub, hi < 0 and couldBeEmpty(sub), b0)
       if hi < 0:
         e.code[^1].op = (if x.lazy: coKetRmin else: coKetRmax)
@@ -188,7 +192,7 @@ proc emitGroupRep(e: var Emitter; x: Rx; base: int) =
     var opens: seq[int]
     for i in 0 ..< hi:
       discard e.emit Code(op: (if x.lazy: coBraMinZero else: coBraZero),
-                          lazy: x.lazy)
+                          lazy: x.lazy, address: (if i == 0: base else: -1))
       if i != hi - 1:
         opens.add e.emit Code(op: coBra)
       e.emitGroup(sub, false, b0 + i * sz)
@@ -208,7 +212,7 @@ proc emitGroupRep(e: var Emitter; x: Rx; base: int) =
   var opens: seq[int]
   for i in 0 ..< extra:
     discard e.emit Code(op: (if x.lazy: coBraMinZero else: coBraZero),
-                        lazy: x.lazy)
+                        lazy: x.lazy, address: (if i == 0: base else: -1))
     if i != extra - 1:
       opens.add e.emit Code(op: coBra)
     e.emitGroup(sub, false, b0 + (lo + i) * sz)
@@ -229,7 +233,7 @@ proc emitItem(e: var Emitter; x: Rx; base: int) =
   of rxEol:
     discard e.emit Code(op: (if x.multi: coDollm else: coDoll))
   of rxEolAbs: discard e.emit Code(op: coEod)
-  of rxAccept: discard e.emit Code(op: coAccept)
+  of rxAccept: discard e.emit Code(op: coAccept, count: x.open.len)
   of rxVerb: discard e.emit Code(op: coVerb, verb: x.verb, name: x.name)
 
 proc emitGroup(e: var Emitter; x: Rx; s: bool; base: int) =
@@ -265,3 +269,105 @@ proc compileCode*(pr: PcreParse): seq[Code] =
   e.emitGroup(Rx(kind: rxAlt, kids: groupAlts(pr.root)), false, 0)
   discard e.emit Code(op: coEnd)
   e.code
+
+const opAssertbackNot = 128
+  ## 8.37's OP_ASSERTBACK_NOT (pcre_internal.h's opcode table)
+
+proc unitBound(c: Code; utf: bool): int =
+  ## RFC-0016 S8co. An upper bound on the code units pcre_compile.c emits for
+  ## `c` (8-bit library, LINK_SIZE 2); -1 when no bound is read (OP_XCLASS).
+  let chLen = (if utf: 6 else: 1)
+  case c.op
+  of coAtom:
+    case c.atom.op
+    of aoChar, aoNot: 1 + chLen
+    of aoProp: 3
+    of aoClass, aoNClass: 33
+    of aoXClass: -1
+    else: 1
+  of coRep:
+    if c.atom.op == aoXClass: -1 else: 3 + max(chLen, 3)
+  of coCrRep: 5
+  of coBra, coSbra, coAlt, coKet, coKetRmax, coKetRmin: 3
+  of coCbra, coScbra: 5
+  of coAccept: 1 + 3 * c.count
+  of coVerb:
+    if c.verb in {vbMark, vbSkipName}: 3 + c.name.len else: 1
+  else: 1
+
+proc spanBound(code: seq[Code]; a, b: int; utf: bool): int =
+  ## The code units of `code[a ..< b]`, bounded; -1 when unbounded.
+  for i in a ..< b:
+    let u = unitBound(code[i], utf)
+    if u < 0: return -1
+    result += u
+
+proc highOpcode(c: Code): bool =
+  ## Whether the opcode `c` starts with is past OP_ASSERTBACK_NOT: a bracket,
+  ## a zero bracket, OP_ACCEPT / OP_CLOSE, OP_FAIL or a verb.
+  case c.op
+  of coBra, coCbra, coSbra, coScbra, coBraZero, coBraMinZero, coSkipZero,
+     coAccept, coFail, coVerb: true
+  of coAtom: c.atom.op == aoFail
+  else: false
+
+proc unitPast(code: seq[Code]; x: int; utf: bool): int =
+  ## RFC-0016 S8co. Whether the code unit after the opcode at `x` (`cc[1]`)
+  ## is past OP_ASSERTBACK_NOT: 1 yes, 0 no, -1 not read.
+  proc chUnit(ch: int32): int =
+    if utf and ch >= 0x80: 1   # a UTF-8 lead unit, 0xC2 or more
+    elif ch > opAssertbackNot: 1
+    else: 0
+  proc linkHigh(span: int): int =
+    # GET(cc, 1)'s high unit: past OP_ASSERTBACK_NOT from 129 * 256 on.
+    if span < 0 or span >= (opAssertbackNot + 1) * 256: -1 else: 0
+  proc opAfter(): int =
+    if x + 1 < code.len and highOpcode(code[x + 1]): 1 else: 0
+  let c = code[x]
+  case c.op
+  of coEnd: -1
+  of coAtom:
+    case c.atom.op
+    of aoChar, aoNot: chUnit(c.atom.ch)
+    of aoProp: 0                        # the property's type
+    of aoClass, aoNClass, aoXClass: -1  # a bitmap's or the data's first unit
+    of aoFail: opAfter()
+    else: opAfter()                     # an operand-less type
+  of coRep:
+    if c.rep in {rpExact, rpUpto, rpMinUpto, rpPosUpto}:
+      (if c.count >= (opAssertbackNot + 1) * 256: 1 else: 0)
+    elif fam(c.atom) in {afChar, afNot}: chUnit(c.atom.ch)
+    else: 0                             # the type's opcode, or OP_PROP / OP_NOTPROP
+  of coCrRep:
+    if c.rep in {rpUpto, rpMinUpto}:
+      (if c.count >= (opAssertbackNot + 1) * 256: 1 else: 0)
+    else: opAfter()
+  of coSod, coCirc, coCircm, coDoll, coDollm, coEod, coEodn, coBraZero,
+     coBraMinZero, coSkipZero, coFail:
+    opAfter()
+  of coAccept:
+    if c.count > 0: 0 else: opAfter()   # OP_CLOSE's group number
+  of coVerb:
+    if c.verb in {vbMark, vbSkipName}:
+      (if c.name.len > opAssertbackNot: 1 else: 0)
+    else: opAfter()
+  of coBra, coCbra, coSbra, coScbra, coAlt:
+    linkHigh(spanBound(code, x, c.link, utf))
+  of coKet, coKetRmax, coKetRmin:
+    linkHigh(spanBound(code, c.link, x, utf))
+
+proc braMinZeroCounts*(code: seq[Code]; utf: bool): Table[int, int] =
+  ## RFC-0016 S8co (PRC-33 item 4a). 8.37's JIT's OP_BRAMINZERO runs a
+  ## `count_match` at the label where the rest after its group is tried
+  ## (first, and after each iteration of the group) only when `cc[1]` is
+  ## past OP_ASSERTBACK_NOT, and `cc` has by then moved past the group
+  ## (pcre_jit_compile.c's compile_matchingpath, `bracketend`): the unit
+  ## read is the one after the opcode that follows the group. Per group
+  ## repeat (its address, on its outermost OP_BRAMINZERO): 1 it counts, 0 it
+  ## does not, -1 the unit is not read. A nested copy's group is followed by
+  ## its wrapper's OP_KET (a link's high unit).
+  for i, c in code:
+    if c.op != coBraMinZero or c.address < 0: continue
+    var k = code[i + 1].link
+    while code[k].op == coAlt: k = code[k].link
+    result[c.address] = unitPast(code, k + 1, utf)

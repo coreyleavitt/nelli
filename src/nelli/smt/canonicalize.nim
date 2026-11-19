@@ -1104,6 +1104,70 @@ const renderAsChoicesVersion* = "12"
   ##   seq, was a compile-time parse error.
   ##   Self-append (`s.add(s)`, `s &= s`) is pinned as doubling. No existing
   ##   key bytes change.
+  ## - RFC-0016 S8co (PRC-33; 412->419, 413-418 are reserved for other
+  ##   branches): item 3:
+  ##   auto-possessification next to a character property or an extended
+  ##   class is ported (`pcre_possess.compareOpcodes`), so a regex call
+  ##   under a match limit whose repeat meets a `\p` or an OP_XCLASS is
+  ##   decided where it declined (`match()'s call accounting is not
+  ##   modelled for auto-possessification next to ...`).
+  ##   Item 6: a concrete call keeps pcre_exec.c's SKIP:NAME
+  ##   count and `ignore_skip_arg` as PCRE's own `int`s (no saturation at
+  ##   100), and a re-run marks its whole chain ignored, so the automata
+  ##   decide a count past `argCap` within an attempt.
+  ## - RFC-0016 S8co item 9:
+  ##   `strutils.count` of a literal `set[char]` and the overlapping
+  ##   `count(s, sub, true)` lower (`iekStrCount`'s `count:set:` and
+  ##   `count:over`) where they declined.
+  ## - RFC-0016 S8co item 9b: `replace`'s `first` bytes are
+  ##   computed in UTF mode (`pcre_select.replaceFacts`), each byte read
+  ##   from the UTF-8 validator's boundary state and the verifier after it
+  ##   from the state it leaves, so a `replace` that cannot match a subject
+  ##   without one of them is decided where its `first` was every byte.
+  ## - RFC-0016 S8co item 9c:
+  ##   `replace`'s facts (`first`, `sure`, `pairs`) are computed for a
+  ##   pattern with a `(*SKIP:NAME)` some path reaches without its MARK,
+  ##   over every `ignore_skip_arg` an attempt can start with
+  ##   (`attemptIgns`) and both CRLF start states, so a `replace` over such
+  ##   a pattern is decided where its facts declined; an uncounted one is
+  ##   resolved where it stands in the agenda (`pcre_select.normalize`), and
+  ##   `first` in UTF mode no longer holds the continuation bytes under
+  ##   `(*ANY)` on the JIT (no match starts at one).
+  ## - RFC-0016 S8co item 4c:
+  ##   8.37's JIT's `detect_repeat` folds are read off a token per opcode of
+  ##   the code's layout (`pcre_jitrepeat.nim`), so a literal group with a
+  ##   repeat's bytes (a literal OP_BRAZERO'd `(?:(?:ab)(?:ab)?)` after
+  ##   `(?:ab)`, a `(?:(?:ab){2})` beside `(?:(?:ab)(?:ab))`) joins the fold
+  ##   the JIT makes of it, and a limited call over it counts where the JIT
+  ##   counts; a fold starting at a repeat's own wrapper is declined.
+  ## - RFC-0016 S8co item 6b: the
+  ##   search languages decline when a verifier declines while their last
+  ##   state is expanded (an empty `skNoOcc` language stood for a pattern
+  ##   whose attempt keeps a SKIP:NAME count past `argCap`: a false
+  ##   `sxUnsat` for `find(...) == -1`); within an attempt a SKIP:NAME's run
+  ##   is covered against the count the attempt started with (`Item.cov`),
+  ##   never a re-run's saturated one; adjacent saturated SKIP:NAME
+  ##   terminals alike but for their ids fold (`foldsSat`), so an attempt
+  ##   that runs one per repeat iteration reaches a decision instead of
+  ##   growing its agenda with the subject.
+  ## - RFC-0016 S8co item 4, the automata: a search language of an attempt that starts with
+  ##   `ignore_skip_arg` set under a limit builds (a DFA state holds one
+  ##   world per assignment of the open SKIP:NAME guesses, `World`) where
+  ##   it declined (`costStaleWhy`), or declines past `maxGuessStates`; a
+  ##   `(*SKIP:NAME)` landing at the attempt's start under an event is a
+  ##   bump (tag 3), not a flight past the start; the concolic scratch
+  ##   solves fold a regex call on a pinned subject to its value
+  ##   (`foldPinnedPoints`). A re-run's calls and depths are modelled
+  ##   wherever the call counts: `capCosts` keeps an item the re-run brings
+  ##   back under the match limit (`argCap` of slack), and a SKIP:NAME
+  ##   terminal a decided item cut stays in the agenda (`keepsCut`), so
+  ##   `rerunCosts` lifts its continuation's depth. The SND-16 decline (a
+  ##   SKIP:NAME without its MARK under `(*LIMIT_RECURSION=n)`, walker 412)
+  ##   is lifted: such a call is decided, concrete and in the automata.
+  ##   Under `(*ANY)` in UTF mode a CR read as a final CRLF's (`symR2`) no
+  ##   longer takes a non-final U+0085 / U+2028 / U+2029 lead after it: the
+  ##   marked languages (`lkMark`, `skFirst`) had `$` hold before
+  ##   `\r\xC2\x85\n`.
 
 const symexWalkerVersion* = "441"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

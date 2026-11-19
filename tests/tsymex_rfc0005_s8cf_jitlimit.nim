@@ -28,8 +28,9 @@ suite "S8cf: the JIT's LIMIT_MATCH":
     check pcreExec(n, "aaaaa", 0, false)[0] == pcreErrMatchLimit
     let m = buildNfa(parsePcre("(*LIMIT_MATCH=9)(a|b)*[cd]"), peJit837, limitRoom = 0)
     check pcreExec(m, "aaaaa", 0, false)[0] == -1
+    # RFC-0016 S8co: detect_repeat's OP_EXACT is counted (one per copy).
     let u = buildNfa(parsePcre("(*LIMIT_MATCH=3)(?:a){3}"), peJit837, limitRoom = 0)
-    check limitEffect(u)[0] == leUnknown
+    check limitEffect(u)[0] == leCounted
 
   test "the walker decides it":
     overridePcreLib("8.37 2015-04-28", true)

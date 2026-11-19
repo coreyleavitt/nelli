@@ -1,24 +1,29 @@
-## RFC-0016 PRC-33 hotfix (SND-16): a regex call on a literal or pinned
-## subject, with a SKIP:NAME pattern under an in-pattern limit, against
-## native PCRE 8.37. Each call's value is stated natively first.
+## RFC-0016 SND-16: a regex call on a literal or pinned subject, with a
+## SKIP:NAME pattern under an in-pattern limit, against native PCRE 8.37.
+## Each call's value is stated natively first.
 ## Red on main at 3ed885e2 (walker 401) for every case but p10m8: the walker
 ## read `find` as -21 where native returns -1 or 0, and as -1 or 0 where
 ## native stops at LIMIT_RECURSION (-21) -- both literal and pinned queries
-## answered the wrong `sxSat` / `sxUnsat`.
+## answered the wrong `sxSat` / `sxUnsat`. The hotfix (walker 412) declined a
+## SKIP:NAME that can run without its MARK under `(*LIMIT_RECURSION=n)`.
 ##
-## The fix is a decline, not a model: a SKIP:NAME that can run without its
-## MARK under `(*LIMIT_RECURSION=n)` is unmodelled (`buildNfa` is not `ok`,
-## the concrete call too), so for those cases the expectation is "not a
-## wrong verdict": the native value is never refuted (`!= sxUnsat`) and the
-## value main computed is never reached (`!= sxSat`); the walker answers
-## unknown. Under `(*LIMIT_MATCH=n)` (p10m8) the call stays modelled and
-## must still agree exactly; so must every case on the 8.37 JIT, which
-## ignores LIMIT_RECURSION.
+## S8co (walker 419) models the re-run's depths and lifts the decline: a
+## SKIP:NAME terminal a decided item cut stays in the agenda wherever the
+## call counts (`keepsCut`), so `rerunCosts` lifts its continuation's depth,
+## and `capCosts` keeps an item the re-run brings back under the match limit
+## (`argCap` of slack). Every case is now exact: each verdict is pinned
+## (`pinExact`, the `construct:regex/skipName/*` cells) and must be the one
+## native gives. An unanchored `find` runs on std/re's library engine: on
+## the 8.37 JIT (`pcre-8.37-jit` image) LIMIT_RECURSION has no effect, so
+## there the expected verdict is read from the native value at run time.
 import std/[unittest, re, strutils]
 import nelli/symex
+import nelli/smt/canonicalize
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
+import nelli/smt/admission
+import ./s8cu_helpers
 
 proc lit_p6r6_nat() =
   let s = "acab"
@@ -119,16 +124,23 @@ proc pin_p6r5_bad(s: string) =
   if s == "aca" and s.find(re"(*LIMIT_RECURSION=5)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+") == 0:
     symexTarget("pin_p6r5_bad")
 
-template verdict(f: untyped; l: string): untyped =
-  let res = symexFind(f, tLabel(l))
-  echo "  ", l, ": ", res.status
-  res.status
+const
+  matchCell = cellKey(axConstruct, "regex/skipName/limitMatch")
+  recCell = cellKey(axConstruct, "regex/skipName/limitRecursion")
 
-suite "hotfix: SKIP:NAME under a limit on a concrete subject":
-  test "the walker's version floor (SND-16)":
-    check parseInt(symexWalkerVersion) >= 412
+template pinCase(fn: untyped; cell: CellKey; want: bool;
+               dom: untyped): untyped =
+  ## The pinned verdict (its record judged against the native run) is the
+  ## one the native value gives.
+  let r = pinExact(fn, cell, target = tLabel(astToStr(fn)), domain = dom)
+  echo "  ", astToStr(fn), ": ", r.status
+  check r.status == (if want: sxSat else: sxUnsat)
 
-  test "a SKIP:NAME without its MARK under LIMIT_RECURSION declines":
+suite "SND-16: SKIP:NAME under a limit on a concrete subject":
+  test "the walker's version floor (S8co lifts the SND-16 decline)":
+    check parseInt(symexWalkerVersion) >= 419
+
+  test "a SKIP:NAME without its MARK under LIMIT_RECURSION is modelled":
     for q in ["(*LIMIT_RECURSION=6)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+",
               "(*LIMIT_RECURSION=7)(?:a(*SKIP:N)c|a(*SKIP:N)(?:ab(*SKIP)q|b(*SKIP:N)x)|b)+|d",
               "(*LIMIT_RECURSION=2)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?",
@@ -136,9 +148,8 @@ suite "hotfix: SKIP:NAME under a limit on a concrete subject":
               "(*LIMIT_RECURSION=5)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+"]:
       let pr = parsePcre(q)
       check pr.status == psOk
-      check not buildNfa(pr, limitRoom = 0).ok
-      check not buildNfa(pr, limitRoom = 0, concrete = true).ok
-    # LIMIT_MATCH stays modelled, and the concrete call agrees with native.
+      check buildNfa(pr, limitRoom = 0).ok
+      check buildNfa(pr, limitRoom = 0, concrete = true).ok
     let pr = parsePcre("(*LIMIT_MATCH=8)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?")
     let nc = buildNfa(pr, limitRoom = 0, concrete = true)
     check nc.ok
@@ -146,55 +157,44 @@ suite "hotfix: SKIP:NAME under a limit on a concrete subject":
     check pcreExec(nc, "aca", 0, false)[1] == 0
 
   # The cases: subject, pattern, the interpreter's native value, the value
-  # main computed. An unanchored `find` runs on std/re's library engine: on
-  # the 8.37 JIT (`pcre-8.37-jit` image) LIMIT_RECURSION has no effect, the
-  # call stays modelled, and the walker must agree with that native value
-  # exactly.
+  # main computed at 3ed885e2. On the interpreter the native value is
+  # checked first; on the JIT the expected verdicts follow its own value.
   let jit = pcreSearchEngine() == peJit837
 
-  template rcase(nat, bad, pnat, pbad: untyped; subj, pat: string;
-                 vNat, vBad: int) =
+  template rcase(nat, bad, pnat, pbad: untyped; cell: CellKey;
+                 subj, pat: string; vNat, vBad: int) =
     let v = subj.find(re(pat))
-    if jit:
-      check verdict(nat, astToStr(nat)) ==
-        (if v == vNat: sxSat else: sxUnsat)
-      check verdict(bad, astToStr(bad)) ==
-        (if v == vBad: sxSat else: sxUnsat)
-      check verdict(pnat, astToStr(pnat)) ==
-        (if v == vNat: sxSat else: sxUnsat)
-      check verdict(pbad, astToStr(pbad)) ==
-        (if v == vBad: sxSat else: sxUnsat)
-    else:
-      check v == vNat
-      # Declined: never a wrong verdict.
-      check verdict(nat, astToStr(nat)) != sxUnsat
-      check verdict(bad, astToStr(bad)) != sxSat
-      check verdict(pnat, astToStr(pnat)) != sxUnsat
-      check verdict(pbad, astToStr(pbad)) != sxSat
+    if not jit: check v == vNat
+    let dom = sampled([subj, "", "b" & subj])
+    pinCase(nat, cell, v == vNat, sampled([0]))
+    pinCase(bad, cell, v == vBad, sampled([0]))
+    pinCase(pnat, cell, v == vNat, dom)
+    pinCase(pbad, cell, v == vBad, dom)
 
-  test "LIMIT_MATCH stays exact (p10m8)":
-    check "aca".find(re"(*LIMIT_MATCH=8)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?") == 0
-    check verdict(lit_p10m8_nat, "lit_p10m8_nat") == sxSat
-    check verdict(lit_p10m8_bad, "lit_p10m8_bad") == sxUnsat
-    check verdict(pin_p10m8_nat, "pin_p10m8_nat") == sxSat
-    check verdict(pin_p10m8_bad, "pin_p10m8_bad") == sxUnsat
+  test "LIMIT_MATCH: the re-run's calls (p10m8)":
+    rcase(lit_p10m8_nat, lit_p10m8_bad, pin_p10m8_nat, pin_p10m8_bad,
+          matchCell, "aca", "(*LIMIT_MATCH=8)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?",
+          0, -1)
 
-  test "LIMIT_RECURSION: native first, then no wrong verdict":
-    rcase(lit_p6r6_nat, lit_p6r6_bad, pin_p6r6_nat, pin_p6r6_bad, "acab",
+  test "LIMIT_RECURSION: the re-run's depths":
+    rcase(lit_p6r6_nat, lit_p6r6_bad, pin_p6r6_nat, pin_p6r6_bad, recCell,
+          "acab",
           "(*LIMIT_RECURSION=6)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+",
           -1, -21)
     rcase(lit_p11r7a_nat, lit_p11r7a_bad, pin_p11r7a_nat, pin_p11r7a_bad,
-          "acaa",
+          recCell, "acaa",
           "(*LIMIT_RECURSION=7)(?:a(*SKIP:N)c|a(*SKIP:N)(?:ab(*SKIP)q|b(*SKIP:N)x)|b)+|d",
           0, -21)
     rcase(lit_p11r7b_nat, lit_p11r7b_bad, pin_p11r7b_nat, pin_p11r7b_bad,
-          "abxa",
+          recCell, "abxa",
           "(*LIMIT_RECURSION=7)(?:a(*SKIP:N)c|a(*SKIP:N)(?:ab(*SKIP)q|b(*SKIP:N)x)|b)+|d",
           -21, 0)
-    rcase(lit_p10r2_nat, lit_p10r2_bad, pin_p10r2_nat, pin_p10r2_bad, "a",
-          "(*LIMIT_RECURSION=2)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?", -21, -1)
-    rcase(lit_p5r2_nat, lit_p5r2_bad, pin_p5r2_nat, pin_p5r2_bad, "a",
-          "(*LIMIT_RECURSION=2)a(*SKIP:N)(*SKIP:M)c|ab(*SKIP)d|.", -21, 0)
-    rcase(lit_p6r5_nat, lit_p6r5_bad, pin_p6r5_nat, pin_p6r5_bad, "aca",
-          "(*LIMIT_RECURSION=5)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+",
+    rcase(lit_p10r2_nat, lit_p10r2_bad, pin_p10r2_nat, pin_p10r2_bad,
+          recCell, "a", "(*LIMIT_RECURSION=2)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?",
+          -21, -1)
+    rcase(lit_p5r2_nat, lit_p5r2_bad, pin_p5r2_nat, pin_p5r2_bad, recCell,
+          "a", "(*LIMIT_RECURSION=2)a(*SKIP:N)(*SKIP:M)c|ab(*SKIP)d|.",
+          -21, 0)
+    rcase(lit_p6r5_nat, lit_p6r5_bad, pin_p6r5_nat, pin_p6r5_bad, recCell,
+          "aca", "(*LIMIT_RECURSION=5)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+",
           -21, 0)

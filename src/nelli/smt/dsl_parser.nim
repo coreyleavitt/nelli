@@ -12089,6 +12089,45 @@ proc parseNilCompare(op: IRBinop; refNode0: NimNode; nilIsLhs: bool;
             else:        mkBinop(op, pIR, nilIR))
   nil
 
+proc literalBool(b: NimNode; into: var bool): bool =
+  ## A literal `bool` argument of the typed AST (`true` / `false`, or the
+  ## int a default materializes as): its value in `into`. Shared by
+  ## `strip`'s flags and `count`'s `overlapping`.
+  case b.kind
+  of nnkIntLit:
+    into = b.intVal != 0
+    true
+  of nnkSym, nnkIdent:
+    if b.strVal == "true": into = true; true
+    elif b.strVal == "false": into = false; true
+    else: false
+  else: false  # k2: fail-closed: false: the caller declines the call
+
+proc literalCharSet(n: NimNode; chars: var string): bool =
+  ## A literal `set[char]` argument (`{'a', 'x' .. 'z'}`, through the typed
+  ## AST's conversions): its members, in order, in `chars`. Shared by
+  ## `strip`'s char set and `count`'s.
+  var curly = n
+  while curly.kind in {nnkHiddenStdConv, nnkStmtListExpr} and curly.len >= 1:
+    curly = curly[curly.len - 1]
+  if curly.kind != nnkCurly: return false
+  chars = ""
+  for el in curly:
+    if el.kind == nnkCharLit:
+      chars.add char(el.intVal and 0xFF)
+    elif (el.kind == nnkRange and el.len == 2 and
+          el[0].kind == nnkCharLit and el[1].kind == nnkCharLit):
+      for code in el[0].intVal .. el[1].intVal:
+        chars.add char(code and 0xFF)
+    elif (el.kind == nnkInfix and el.len == 3 and
+          el[0].kind in {nnkSym, nnkIdent} and el[0].strVal == ".." and
+          el[1].kind == nnkCharLit and el[2].kind == nnkCharLit):
+      for code in el[1].intVal .. el[2].intVal:
+        chars.add char(code and 0xFF)
+    else:
+      return false
+  true
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   # RFC-0005 S8bd: a by-reference base marked from an element or a call
   # result (`markByRef`) is its parameter, as a marked symbol is.
@@ -14595,14 +14634,22 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           else:              return mkStrOp(iekStrUnsupported, calleeSym.strVal, caseArgs)
         # RFC-0005 S8cf (item 11): `strutils.count(s, c)` and `count(s, sub)`
         # with `overlapping` false and a literal, non-empty `sub` (an empty
-        # one raises). `set[char]` and `overlapping` stay unregistered.
-        if isBuiltinNamed(calleeSym, ["count"]) and n.len in 3 .. 4 and
-           (n.len == 3 or (n[3].kind == nnkSym and n[3].strVal == "false") or
-            (n[3].kind == nnkIntLit and n[3].intVal == 0)) and
-           (n[2].typeKind == ntyChar or
-            (n[2].kind == nnkStrLit and n[2].strVal.len > 0)):
-          return mkStrOp(iekStrCount, "count", @[parseExpr(n[1], preamble, ctx),
-                                                 parseExpr(n[2], preamble, ctx)])
+        # one raises). RFC-0016 S8co (PRC-33 item 9): a literal `overlapping`
+        # true (`count:over`), and a literal, non-empty `set[char]`
+        # (`count:set:<chars>`; an empty one raises). A computed flag or set
+        # stays unregistered.
+        if isBuiltinNamed(calleeSym, ["count"]) and n.len in 3 .. 4:
+          var chars: string
+          if n.len == 3 and literalCharSet(n[2], chars) and chars.len > 0:
+            return mkStrOp(iekStrCount, "count:set:" & chars,
+                           @[parseExpr(n[1], preamble, ctx)])
+          var overlap = false
+          if (n.len == 3 or literalBool(n[3], overlap)) and
+             (n[2].typeKind == ntyChar or
+              (n[2].kind == nnkStrLit and n[2].strVal.len > 0)):
+            return mkStrOp(iekStrCount, (if overlap: "count:over" else: "count"),
+                           @[parseExpr(n[1], preamble, ctx),
+                             parseExpr(n[2], preamble, ctx)])
         # Round-4 Slice B (ADR-0026): `strutils.strip(s[, leading[,
         # trailing[, chars]]])` with LITERAL flags and a LITERAL char set →
         # `iekStrStrip` (decomposition constraints, runtime_strings.nim).
@@ -14618,42 +14665,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           var trailing = true
           var chars = " \t\v\r\n\f"     # strutils.Whitespace (the default)
           var literalOk = true
-          proc boolLit(b: NimNode, into: var bool): bool =
-            case b.kind
-            of nnkIntLit:
-              into = b.intVal != 0
-              true
-            of nnkSym, nnkIdent:
-              if b.strVal == "true": into = true; true
-              elif b.strVal == "false": into = false; true
-              else: false
-            else: false  # k2: fail-closed: false: strip declines seUnsupportedStringOp
-          if n.len >= 3 and not boolLit(n[2], leading): literalOk = false
-          if n.len >= 4 and not boolLit(n[3], trailing): literalOk = false
-          if literalOk and n.len >= 5:
-            var curly = n[4]
-            while curly.kind in {nnkHiddenStdConv, nnkStmtListExpr} and
-                  curly.len >= 1:
-              curly = curly[curly.len - 1]
-            if curly.kind == nnkCurly:
-              chars = ""
-              for el in curly:
-                if el.kind == nnkCharLit:
-                  chars.add char(el.intVal and 0xFF)
-                elif (el.kind == nnkRange and el.len == 2 and
-                      el[0].kind == nnkCharLit and el[1].kind == nnkCharLit):
-                  for code in el[0].intVal .. el[1].intVal:
-                    chars.add char(code and 0xFF)
-                elif (el.kind == nnkInfix and el.len == 3 and
-                      el[0].kind in {nnkSym, nnkIdent} and
-                      el[0].strVal == ".." and
-                      el[1].kind == nnkCharLit and el[2].kind == nnkCharLit):
-                  for code in el[1].intVal .. el[2].intVal:
-                    chars.add char(code and 0xFF)
-                else:
-                  literalOk = false
-            else:
-              literalOk = false
+          if n.len >= 3 and not literalBool(n[2], leading): literalOk = false
+          if n.len >= 4 and not literalBool(n[3], trailing): literalOk = false
+          if literalOk and n.len >= 5 and not literalCharSet(n[4], chars):
+            literalOk = false
           if literalOk:
             let flags = (if leading and trailing: "LT"
                          elif leading: "L"

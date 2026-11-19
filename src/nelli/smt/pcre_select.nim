@@ -85,6 +85,7 @@ import ./pcre_code
 import ./pcre_jit
 import ./pcre_engine
 import ./pcre_possess
+import ./pcre_jitrepeat
 
 export pcre_startopt.StartOpt
 export pcre_engine.PcreEngine
@@ -165,8 +166,12 @@ proc nlStepU(st: int8; s: int): int8 =
   of symFC2, symFE2:
     if (base and nlR2) != 0: return -1
     return nlR2 or (if s == symFC2: nlU else: 2 * nlU)
-  of symNC2: return nlU
-  of symNE2: return 2 * nlU
+  of symNC2, symNE2:
+    # RFC-0016 S8co: after `symR2` only the final LF may follow. Reading a
+    # non-final multi-byte newline there read `\r\xC2\x85\n` as a final
+    # CRLF, so `$` held before it.
+    if (base and nlR2) != 0: return -1
+    return (if s == symNC2: nlU else: 2 * nlU)
   of symF80, symFA8, symFA9: return -1
   else: discard
   if s >= symFin and s < symR2:
@@ -388,9 +393,6 @@ type
     concrete*: bool
       ## RFC-0005 S8cf: built for `pcreExec` alone (`regex_parser.concreteEntry`):
       ## its automaton reads what no language holds, a whole next character
-    jitCountUnread*: bool
-      ## RFC-0005 S8cf: a repeat whose `count_match` calls 8.37's JIT folds
-      ## (`detect_repeat`)
       ## RFC-0005 S8bt: the automaton counts pcre_exec.c's `match()` calls
       ## (`nkCost`; `buildNfa`'s `limitRoom`), its threads are kept apart
     capRoom*: int
@@ -461,9 +463,15 @@ type Build = object
   match: int
   catchers: bool   ## the pattern has a THEN: multi-alternative groups catch
   costWhy: string  ## RFC-0005 S8bt: why the call accounting is not modelled
+  folds: JitFolds  ## RFC-0016 S8co: 8.37's JIT's `detect_repeat` folds
+  jitFold: bool    ## RFC-0016 S8co: they are counted (`costs` on the JIT)
+  braMin: Table[int, int]
+    ## RFC-0016 S8co: 8.37's JIT's OP_BRAMINZERO counts (`braMinZeroCounts`)
+  braMinWhy: string  ## RFC-0016 S8co: an OP_BRAMINZERO count not read
 
 proc cost(b: var Build; deep: bool; next: int): int
 proc jitCost(b: var Build; next: int): int
+proc braMinCost(b: var Build; base, next: int): int
 
 proc add(b: var Build; s: NState): int =
   if b.n.states.len >= maxNfaStates:
@@ -581,9 +589,12 @@ proc compBranch(b: var Build; items: seq[Rx]; next, base: int): int =
     a += codeSize(it)
   result = next
   for i in countdown(items.high, 0):
+    # RFC-0016 S8co: a repeat with no mandatory copy whose chain a JIT loop
+    # started before it runs (`JitFolds.absorbed`) is that loop's.
+    if b.jitFold and bases[i] in b.folds.absorbed: continue
     result = b.compItem(items[i], result, bases[i])
 
-proc compGroup(b: var Build; x: Rx; next, base: int; sGroup = false): int =
+proc compGroupBody(b: var Build; x: Rx; next, base: int; sGroup = false): int =
   ## A bracket: its alternatives in order. RFC-0005 S8bj: with a THEN in
   ## the pattern, each alternative of a multi-alternative group enters
   ## through `nkAlt` (a frame for THEN's catch test). RFC-0005 S8bt
@@ -622,6 +633,36 @@ proc compGroup(b: var Build; x: Rx; next, base: int; sGroup = false): int =
   if x.cap > 0:
     e = b.add NState(kind: nkSave, slot: 2 * x.cap, out1: e)
   e
+
+
+proc compUpto(b: var Build; base, next: int): int =
+  ## RFC-0016 S8co. An OP_UPTO / OP_MINUPTO loop 8.37's JIT folds a bracket
+  ## and the nested optional copies after it into (`JitFolds.upto`): the
+  ## bracket is the first iteration, the counter allows one per copy. Greedy
+  ## (OP_KETRMAX with a counter): an iteration goes on to the next without a
+  ## `count_match`; leaving the loop, after the last iteration or when the
+  ## next one fails, counts once. Lazy (OP_KETRMIN): each iteration counts
+  ## at its end, then the rest is tried before another iteration.
+  let fold = b.folds.upto[base]
+  let ex = b.jitCost(next)
+  var o = -1
+  for j in countdown(fold.iters.high, 0):
+    let aft =
+      if j == fold.iters.high: ex
+      elif fold.lazy: b.jitCost(b.add NState(kind: nkSplit, out1: next, out2: o))
+      else: b.add NState(kind: nkSplit, out1: o, out2: ex)
+    o = b.compGroupBody(fold.iters[j].x, aft, fold.iters[j].base)
+  o
+
+proc compGroup(b: var Build; x: Rx; next, base: int; sGroup = false): int =
+  ## A bracket at `base`. RFC-0016 S8co: when the JIT's `count_match` calls
+  ## are counted, a bracket that starts a `detect_repeat` loop is the loop,
+  ## and one in an OP_EXACT fold counts at its end.
+  if b.jitFold:
+    if base in b.folds.upto: return b.compUpto(base, next)
+    if base in b.folds.exact:
+      return b.compGroupBody(x, b.jitCost(next), base, sGroup)
+  b.compGroupBody(x, next, base, sGroup)
 
 proc compLoop(b: var Build; sub: Rx; lazy, once: bool; next, base: int): int =
   ## An unbounded loop of `sub` (`once`: at least one iteration, entered
@@ -678,15 +719,19 @@ proc compRep(b: var Build; x: Rx; next, base: int): int =
       result = b.compItem(sub, result, b0 + i * sz)
 
 proc compLoopCost(b: var Build; sub: Rx; lazy, once, sGrp: bool;
-                  next, base: int): int =
+                  next, base: int; repBase = -1): int =
   ## RFC-0005 S8bt. A group's looping copy with `match()`'s calls: entered
   ## by OP_BRAZERO (an RMATCH into the group, or none past it) /
   ## OP_BRAMINZERO (an RMATCH past it first, then the group in the same
-  ## frame), or directly (`once`); after a non-empty iteration OP_KETRMAX
+  ## frame), or directly (`once`; otherwise `repBase` is the repeat's
+  ## address); after a non-empty iteration OP_KETRMAX
   ## re-enters the group by RMATCH, then goes on by TAIL_RECURSE; OP_KETRMIN
   ## goes on by RMATCH, then re-enters by RMATCH (`sGrp`, an OP_SBRA) or
   ## TAIL_RECURSE. An empty iteration of an OP_SBRA goes on in the same
   ## frame.
+  # RFC-0016 S8co: OP_BRAMINZERO's label, where the rest is tried first and
+  # after every iteration.
+  let next = (if lazy and not once: b.braMinCost(repBase, next) else: next)
   let headK = b.add NState(kind: nkSplit)
   var bodyEnd = headK
   let nullable = lenRange(sub)[0] == 0
@@ -797,29 +842,55 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
     return
   let sz = codeSize(sub)
   let b0 = base + 1
-  if b.n.engine == peJit837 and x.hi >= 0 and
-     (x.lo >= 3 or x.hi - x.lo >= 2):
-    # RFC-0005 S8cf: detect_repeat folds these copies into OP_EXACT / OP_UPTO
-    # loops with counts of their own: not read (`limitEffect`).
-    b.n.jitCountUnread = true
+  if b.n.engine == peJit837 and x.hi >= 0:
+    # RFC-0016 S8co: the copies as 8.37's JIT runs them. The mandatory ones
+    # are brackets (`compGroup` reads their folds); the optional ones are
+    # pcre_compile.c's nested chain, unless the last mandatory copy starts a
+    # loop that takes it.
+    proc chainAt(b: var Build; i, cont: int): int =
+      let bi = b0 + i * sz
+      # The outermost OP_BRAMINZERO counts where the rest is tried, first and
+      # after the chain, when the unit it reads says so (`braMinCost`); a
+      # nested one reads its wrapper's link.
+      let cont = (if x.lazy and i == x.lo: b.braMinCost(base, cont) else: cont)
+      if i == x.hi - 1:
+        # OP_BRAZERO counts at the copy's end and on its way past.
+        if x.lazy:
+          return b.add NState(kind: nkSplit, out1: cont,
+                              out2: b.compGroup(sub, cont, bi))
+        let c = b.jitCost(cont)
+        return b.add NState(kind: nkSplit, out1: b.compGroup(sub, c, bi),
+                            out2: c)
+      # An OP_BRA wrapping the copy and the rest of the chain: behind
+      # OP_BRAZERO its end counts.
+      let c2 = (if x.lazy: cont else: b.jitCost(cont))
+      let body =
+        if b.jitFold and bi in b.folds.upto: b.compGroup(sub, c2, bi)
+        else: b.compGroup(sub, b.chainAt(i + 1, c2), bi)
+      if x.lazy: b.add NState(kind: nkSplit, out1: cont, out2: body)
+      else: b.add NState(kind: nkSplit, out1: body, out2: c2)
+    result = next
+    if x.hi > x.lo and
+       not (b.jitFold and x.lo >= 1 and b0 + (x.lo - 1) * sz in b.folds.upto):
+      result = b.chainAt(x.lo, next)
+    for i in countdown(x.lo - 1, 0):
+      result = b.compGroup(sub, result, b0 + i * sz)
+    return
   if x.hi < 0:
     let copies = max(x.lo, 1)
     result = b.compLoopCost(sub, x.lazy, x.lo >= 1, couldBeEmpty(sub), next,
-                            b0 + (copies - 1) * sz)
+                            b0 + (copies - 1) * sz, base)
     for i in countdown(copies - 2, 0):
       result = b.compGroup(sub, result, b0 + i * sz)
   else:
     var o = next
     for i in countdown(x.hi - 1, x.lo):
-      # RFC-0005 S8cf: the JIT counts at the end of a copy behind OP_BRAZERO.
-      var take = b.compGroup(sub, (if x.lazy: o else: b.jitCost(o)),
-                             b0 + i * sz)
+      var take = b.compGroup(sub, o, b0 + i * sz)
       if i != x.hi - 1: take = b.cost(b.catchers, take)   # the wrapper
       if x.lazy:
         o = b.add NState(kind: nkSplit, out1: b.cost(true, next), out2: take)
       else:
-        o = b.add NState(kind: nkSplit, out1: b.cost(true, take),
-                         out2: b.jitCost(next))
+        o = b.add NState(kind: nkSplit, out1: b.cost(true, take), out2: next)
     result = o
     for i in countdown(x.lo - 1, 0):
       result = b.compGroup(sub, result, b0 + i * sz)
@@ -836,6 +907,20 @@ proc jitCost(b: var Build; next: int): int =
   ## repeating ket closes, and at OP_BRAMINZERO).
   if b.n.costs and b.n.engine == peJit837:
     b.add NState(kind: nkCost, out1: next)
+  else: next
+
+proc braMinCost(b: var Build; base, next: int): int =
+  ## RFC-0016 S8co (PRC-33 item 4a). OP_BRAMINZERO's `count_match` before
+  ## the rest after the group repeat at `base` (`braMinZeroCounts`: it reads
+  ## the unit after the opcode that follows the group). An unread unit is
+  ## counted, and the call accounting declined.
+  case b.braMin.getOrDefault(base, 0)
+  of 1: b.jitCost(next)
+  of -1:
+    if b.n.costs and b.n.engine == peJit837:
+      b.braMinWhy = "8.37's JIT's OP_BRAMINZERO count after a group followed " &
+                    "by a class, an OP_XCLASS or a long link"
+    b.jitCost(next)
   else: next
 
 proc cost(b: var Build; deep: bool; next: int): int =
@@ -999,6 +1084,21 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
   b.n.limitMatch = pr.limitMatch
   b.n.limitRecursion = pr.limitRecursion
   b.catchers = hasThenVerb(pr.root)
+  if engine == peJit837:
+    # RFC-0016 S8co: 8.37's JIT's `detect_repeat` folds, over the copies as
+    # auto-possessification compiled them. A fold behind a zero bracket
+    # crashes the native call: declined, with or without a limit.
+    let poss = (if b.n.costs: b.n.possess
+                else: autoPossess(compileCode(pr), pr.utf))
+    let why = jitFoldDecline(pr.root, poss)
+    if why.len > 0:
+      result = b.n
+      result.ok = false
+      result.why = why
+      return
+    b.folds = jitFolds(pr.root, poss)
+    b.jitFold = b.n.costs
+    b.braMin = braMinZeroCounts(compileCode(pr), pr.utf)
   # SKIP:NAME names first, so a MARK knows whether it is tracked.
   proc collect(b: var Build; x: Rx) =
     case x.kind
@@ -1023,30 +1123,16 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
   if result.costs:
     # A SKIP:NAME without its MARK re-runs the attempt from a fresh count,
     # ignoring the SKIP:NAMEs it passed (no RMATCH for them).
-    if result.possess.unknown and engine == peInterp:
-      b.costWhy = "auto-possessification next to a character property or " &
-                  "an extended class"
-    if b.costWhy.len > 0 and not boundOnly and
-       not (concrete and not result.possess.unknown):
+    if b.costWhy.len > 0 and not boundOnly and not concrete:
       result.ok = false
       result.why = "match()'s call accounting is not modelled for " &
                    b.costWhy
       return
+    if b.braMinWhy.len > 0 and not boundOnly:
+      result.ok = false
+      result.why = "the call accounting is not modelled for " & b.braMinWhy
+      return
   result.classifySkipNames()
-  if result.costs and not boundOnly and result.hasNeverSkip and
-     result.recLimit < high(int):
-    # RFC-0016 PRC-33 hotfix (SND-16): a SKIP:NAME that can run without its
-    # MARK re-runs the attempt, and under `(*LIMIT_RECURSION=n)` the re-run's
-    # depths are not modelled: a SKIP:NAME terminal a decided item cut left
-    # its continuation one frame too deep (`rerunCosts`), and a run that
-    # reached the limit before the re-run went on. pcre_exec.c stops with
-    # -21 where the call read -1 or a match, and the other way round:
-    # `(*LIMIT_RECURSION=2)(a(*SKIP:N)c|ab(*SKIP)q|b)+c?` on `a`, and
-    # `(*LIMIT_RECURSION=6)(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+` on `acab`.
-    result.ok = false
-    result.why = "match()'s call accounting is not modelled for a " &
-                 "SKIP:NAME without its MARK under LIMIT_RECURSION"
-    return
   # RFC-0005 S8bt: an attempt can leave `ignore_skip_arg` set for the next
   # one when a SKIP:NAME without its MARK can re-run it and the attempt can
   # then end by a SKIP's jump or past a CRLF's LF.
@@ -1103,6 +1189,9 @@ type
     tmBarrier   ## RFC-0005 S8bt: a SKIP:NAME without one (id `marker`)
     tmArgOff    ## RFC-0005 S8bt: a tmArgSkip a re-run ignores (a link)
     tmStale     ## RFC-0005 S8bt: a SKIP:NAME under a stale ignore count
+    tmArgRec
+      ## RFC-0016 S8co: a SKIP:NAME terminal a decided item cut, kept for
+      ## its run number while that item may still need it (`SkipGuess`)
   Cond = enum
     cdNone
     cdDieLF   ## a `(*CRLF)` dot read a CR: dies if the next byte is LF
@@ -1130,19 +1219,28 @@ type
     marker: int32          ## ikMarker: its id; ikThen: the target;
                            ## a SKIP:NAME's terminal: its id
     term: TermKind         ## ikTerm
-    tag: int32             ## ikTerm tmSkip / ikMatch: where
+    tag: int32             ## ikTerm tmSkip / ikMatch: where (an automaton's:
+                           ## `atEvent` / `pastStart`)
     anc: int32
       ## RFC-0005 S8bt: the latest SKIP:NAME terminal on the path whose
       ## continuation this is (-1 none): a thread's, a SKIP:NAME terminal's
       ## parent
-    ac: int8
+    ac: int32
       ## RFC-0005 S8bt (`countArgs`): a thread's count of the SKIP:NAMEs
       ## pcre_exec.c runs before its next one; a SKIP:NAME terminal's run
       ## number (`skip_arg_count`), up to `argCap` (`argCap + 1`: more)
-    stl: int8
+    stl: int32
       ## RFC-0005 S8bt: the attempt's `ignore_skip_arg`: the count it
       ## started with, then the run number of the last SKIP:NAME without
       ## its MARK that re-ran it
+    cov: int32
+      ## RFC-0016 S8co (PRC-33 item 6b): the `ignore_skip_arg` the attempt
+      ## started with, constant through it. Whether a SKIP:NAME's run is
+      ## covered reads this, never `stl`: a re-run within the attempt
+      ## covers exactly its chain (marked `tmArgOff` where it happens), and
+      ## every SKIP:NAME run after it is past the count; `stl` can be
+      ## saturated (`argCap + 1`) after such a re-run, and a saturated run
+      ## compared with it read as covered.
     soft: bool
       ## RFC-0005 S8bt: a tmArgSkip a re-run may still ignore (it decides
       ## only at the front)
@@ -1151,6 +1249,14 @@ type
       ## a tmBump that is that re-run (`ignore_skip_arg` stays set)
     co: Cost
       ## RFC-0005 S8bt: the item's `match()` calls (`Nfa.costs`)
+    sk: int16
+      ## RFC-0016 S8co (`costs`, the automata's cut): the SKIP:NAME frames on
+      ## the item's path a re-run may still take out -- one per SKIP:NAME
+      ## whose RMATCH the path took (none for one `ignore_skip_arg` covers)
+      ## and no re-run has ignored yet, at most `argCap + 1`. A re-run lifts
+      ## an item one frame per such SKIP:NAME in the re-running barrier's
+      ## chain (`rerunCosts`), never more: an upper bound on the lift the
+      ## item's depths can still get (`capCosts`).
     cap: T
 
   StepCtx = object
@@ -1182,14 +1288,68 @@ type
 const argCap* = 7
   ## RFC-0005 S8bt: the SKIP:NAME run count the agenda keeps exactly
 
-const execArgCap = 100
-  ## RFC-0005 S8cf (item 5): the run count a concrete call keeps (`int8`); the
-  ## languages and tables hold `argCap`, and past it the call is read at points
+const execArgCap = high(int32) - 1
+  ## RFC-0016 S8co (PRC-33 item 6): a concrete call keeps pcre_exec.c's count
+  ## as PCRE does: `skip_arg_count` and `ignore_skip_arg` are `int`s
+  ## (pcre_internal.h), so no count it can reach saturates. The languages
+  ## and tables hold `argCap`, and past it the call is read at points.
+
+const maxGuessStates* = 256
+  ## RFC-0016 S8co (PRC-33 item 4, the automata): the states a guessing
+  ## attempt (`World`: `ignore_skip_arg` set at its start, calls counted)
+  ## may hold. Its worlds stay few (at most two in any build measured), but a
+  ## search needs one such verifier per kept count and outcome, each step
+  ## runs the closure under the guesses, and the counts spread the cost
+  ## vectors: `(*LIMIT_RECURSION=8)(?:a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x)+|c`
+  ## built 33 verifiers of up to 327 states in 50 s to end past
+  ## `maxRegexSize`. Past this the attempt declines (`guessBudgetWhy`),
+  ## never truncates.
+
+const guessBudgetWhy* = "the attempt that starts with ignore_skip_arg set " &
+  "and counts match()'s calls is past its budget (" & $maxGuessStates &
+  " states)"
+  ## RFC-0016 S8co: `maxGuessStates`, a documented decline.
+
+const maxWorlds* = 64
+  ## RFC-0016 S8co (PRC-33 item 4, the automata): the guess worlds a state
+  ## of an attempt that starts with `ignore_skip_arg` set may hold (one per
+  ## assignment of the SKIP:NAME guesses still open, `World`); past it the
+  ## automaton declines (`worldBudgetWhy`), never truncates. A guess stays
+  ## open only while its run number is within the count (`stepWorlds`), so
+  ## the worlds are at most 2^`argCap`; the corpus reaches 2.
+
+const worldBudgetWhy* = "the attempt that starts with ignore_skip_arg set " &
+  "holds more than " & $maxWorlds & " open-guess worlds in one state"
+  ## RFC-0016 S8co: `maxWorlds`, a documented decline.
 
 const costStaleWhy* = "match()'s call accounting where pcre_exec.c's " &
-  "ignore_skip_arg outlives an attempt (a SKIP:NAME's provisional run " &
-  "number decides whether it calls match()), or past " & $argCap &
-  " SKIP:NAME runs"
+  "ignore_skip_arg outlives an attempt: a SKIP:NAME guess whose terminal " &
+  "left the agenda"
+  ## RFC-0016 S8co: the automata's one remaining cost-side decline (never
+  ## reached in any build measured). A concrete call reads every such call
+  ## (`SkipGuess`).
+
+var worldPeak*: int
+  ## RFC-0016 S8co: the most guess worlds one state held in any build so
+  ## far (a diagnostic the guards pin: the worlds have a live producer).
+
+const maxAgenda* = 512
+  ## RFC-0016 S8co (the automata): the items one agenda (a world's) may hold
+  ## after a step. The cuts bound it on every pattern measured (`capCosts`:
+  ## past a limit, or past the recursion limit by more than a re-run can
+  ## lift; `foldsSat`; `normalize`'s folds), but no bound is proved for every
+  ## pattern (the recursion limit itself may be large), and an agenda that
+  ## grows with the subject never repeats a state: the build would run to
+  ## `maxDfaStates` through ever longer steps. Past this the automaton
+  ## declines (`agendaBudgetWhy`), never truncates.
+
+const agendaBudgetWhy* = "the attempt's agenda holds more than " &
+  $maxAgenda & " items in one state"
+  ## RFC-0016 S8co: `maxAgenda`, a documented decline.
+
+var agendaPeak*: int
+  ## RFC-0016 S8co: the most items one agenda held after a step in any
+  ## build so far (a diagnostic the guards read against `maxAgenda`).
 
 const staleWhy* = "pcre_exec.c's ignore_skip_arg count past " & $argCap &
   " SKIP:NAME runs (an attempt re-run by a (*SKIP:NAME) without its " &
@@ -1225,7 +1385,69 @@ var concreteCall {.threadvar.}: bool
 
 proc curArgCap(): int = (if concreteCall: execArgCap else: argCap)
 
-proc sat(x: int): int8 = int8(min(x, curArgCap() + 1))
+type SkipGuess = ref object
+  ## RFC-0016 S8co (PRC-33 item 4). A concrete attempt that starts with
+  ## pcre_exec.c's `ignore_skip_arg` set skips the RMATCH of each SKIP:NAME
+  ## whose run number it covers: one `match()` call fewer, and its
+  ## continuation one frame shallower. The number is provisional while the
+  ## agenda steps (a thread above may still run one first), so the closure
+  ## guesses (`made`: ignored, against the count it started with) and each
+  ## guess is checked once the number is final: when the SKIP:NAME's
+  ## terminal, or an item of its continuation, reaches the front. A wrong
+  ## guess re-runs the attempt with it corrected (`forced`); the run
+  ## numbers do not depend on the calls, so the attempt that verifies every
+  ## guess it used is pcre_exec.c's.
+  forced: Table[int32, bool]
+  made: Table[int32, bool]
+    ## the guesses: id -> covered (checked against the terminal's `cov`)
+  seen: Table[int32, bool]
+    ## RFC-0016 S8co (the automata): the guesses checked, id -> covered
+  wrong: bool
+  lost: bool    ## a guess whose number is no longer on the agenda
+
+var skipGuess {.threadvar.}: SkipGuess
+
+proc isArgTerm[T](x: Item[T]): bool =
+  x.kind == ikTerm and x.term in {tmArgSkip, tmBarrier, tmArgOff, tmArgRec}
+
+proc keepsCut(n: Nfa): bool = n.costs and n.hasNeverSkip
+  ## RFC-0016 S8co: a SKIP:NAME terminal a decided item cuts stays
+  ## (`tmArgRec`) where a re-run counts calls: `rerunCosts` lifts each item
+  ## one frame per ignored SKIP:NAME whose continuation holds it, read off
+  ## the terminals after it. A terminal cut behind a match a thread above
+  ## has not yet reached left its continuation at the depth of the first
+  ## run: `(?:a(*SKIP:N)c|a(*SKIP:N)b(*SKIP)x|b)+` under
+  ## LIMIT_RECURSION=6 read `acab` as a recursion-limit error where
+  ## pcre_exec.c finds no match.
+
+proc verifyAt[T](cur: seq[Item[T]]; i: int) =
+  ## RFC-0016 S8co. The item at `i` reaches the front: the run numbers of
+  ## its own SKIP:NAME and of those whose continuation holds it are final.
+  if skipGuess == nil or i >= cur.len: return
+  let f = cur[i]
+  proc check(m: int32; ac, cov: int32) =
+    if m in skipGuess.made:
+      let g = skipGuess.made[m]
+      let actual = ac > 0 and ac <= cov
+      skipGuess.seen[m] = actual
+      if actual != g:
+        skipGuess.forced[m] = actual
+        skipGuess.wrong = true
+  if isArgTerm(f): check(f.marker, f.ac, f.cov)
+  elif f.kind notin {ikThread, ikMatch, ikTerm, ikThen} or
+       f.kind == ikTerm and (f.term == tmStale or f.rerun):
+    # Not on a path (a re-run's own outcome holds no continuation).
+    return
+  var a = f.anc
+  for k in i + 1 ..< cur.len:
+    if a < 0: break
+    let x = cur[k]
+    if isArgTerm(x) and x.marker == a:
+      check(a, x.ac, x.cov)
+      a = x.anc
+  if a >= 0 and skipGuess.made.len > 0: skipGuess.lost = true
+
+proc sat(x: int): int32 = int32(min(x, curArgCap() + 1))
 
 proc then(a, b: Cost): Cost =
   ## RFC-0005 S8bt. The calls of `a`, then those of `b`.
@@ -1236,10 +1458,10 @@ proc then(a, b: Cost): Cost =
 proc spent(c: Cost): bool = c.cc > 0 or c.pk > 0
 
 proc ckey[T](it: Item[T]): (int32, seq[Frame], seq[int32], Cond, int32,
-                            int8) =
+                            int32) =
   (it.st, it.frames, it.marks, it.cond, it.anc, it.ac)
 
-proc exempt(n: Nfa; st: int32; ac: int8): bool =
+proc exempt(n: Nfa; st: int32; ac: int32): bool =
   ## RFC-0005 S8bt. A thread kept beside an identical one: pcre_exec.c runs
   ## both, and the SKIP:NAMEs the second runs count (`countArgs`).
   n.countArgs and n.reachArg[st] and ac <= curArgCap()
@@ -1263,20 +1485,21 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
     marks: seq[int32]
     cond: Cond
     anc: int32
-    ac: int8
-    stl: int8
+    ac: int32
+    stl: int32
+    cov: int32
     co: Cost
+    sk: int16
     cap: T
     item: Item[T]
   var visited = initHashSet[(int32, uint64, seq[Frame], seq[int32], Cond,
-                             int32, int8)]()
+                             int32, int32)]()
   var seenC = initHashSet[(int32, seq[Frame], seq[int32], Cond, int32,
-                           int8)]()
+                           int32)]()
   var cutting = false
   var work = items
   var stack: seq[Entry]
-  proc isArg(x: Item[T]): bool =
-    x.kind == ikTerm and x.term in {tmArgSkip, tmBarrier, tmArgOff}
+  proc isArg(x: Item[T]): bool = isArgTerm(x)
   proc countRun(anc: int32; from0: int) =
     ## RFC-0005 S8bt: a SKIP:NAME runs: pcre_exec.c runs it before every
     ## path after this one, so their counts move on -- the threads after
@@ -1308,11 +1531,15 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
       elif not cutting:
         result.add it
         if decided(it): cutting = true
+      elif (skipGuess != nil or keepsCut(n)) and isArg(it):
+        var r = it
+        r.term = tmArgRec
+        result.add r
       continue
     if cutting: continue
     stack = @[Entry(kind: 0, st: it.st, frames: it.frames, marks: it.marks,
                     cond: it.cond, anc: it.anc, ac: it.ac, stl: it.stl,
-                    co: it.co, cap: it.cap)]
+                    cov: it.cov, co: it.co, sk: it.sk, cap: it.cap)]
     while stack.len > 0:
       let e = stack.pop()
       case e.kind
@@ -1324,6 +1551,11 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
         if not cutting:
           result.add e.item
           if decided(e.item): cutting = true
+        elif (skipGuess != nil or keepsCut(n)) and isArg(e.item):
+          # RFC-0016 S8co: kept for its run number (`tmArgRec`).
+          var r = e.item
+          r.term = tmArgRec
+          result.add r
         continue
       else: discard
       if cutting: continue
@@ -1338,19 +1570,24 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
       template dead() =
         # RFC-0005 S8bt: the path fails here; its calls stay counted.
         if n.costs and spent(e.co):
-          result.add Item[T](kind: ikCost, co: e.co)
+          result.add Item[T](kind: ikCost, co: e.co, sk: e.sk)
       var coNext = e.co
+      var skNext = e.sk
       template goWith(target: int; fs: seq[Frame]; mk: seq[int32]; c: Cond;
-                      a: int32; cnt: int8; cp: T; en: uint64) =
+                      a: int32; cnt: int32; cp: T; en: uint64) =
         stack.add Entry(kind: 0, st: int32(target), ent: en, frames: fs,
                         marks: mk, cond: c, anc: a, ac: cnt, stl: e.stl,
-                        co: coNext, cap: cp)
+                        cov: e.cov, co: coNext, sk: skNext, cap: cp)
       template go(target: int; c: Cond = e.cond) =
         goWith(target, e.frames, e.marks, c, e.anc, e.ac, e.cap, e.ent)
       template emitAfter(itm: Item[T]) =
         # The item comes after everything the continuation reaches.
         var x = itm
         x.stl = e.stl
+        x.cov = e.cov
+        x.sk = e.sk
+        # RFC-0016 S8co: on the path of the SKIP:NAMEs before it.
+        if skipGuess != nil and not isArg(x): x.anc = e.anc
         stack.add Entry(kind: 2, item: x)
       case s.kind
       of nkByte:
@@ -1359,7 +1596,8 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
           seenC.incl k
           result.add Item[T](kind: ikThread, st: e.st, frames: e.frames,
                              marks: e.marks, cond: e.cond, anc: e.anc,
-                             ac: e.ac, stl: e.stl, co: e.co, cap: e.cap)
+                             ac: e.ac, stl: e.stl, cov: e.cov, co: e.co,
+                             sk: e.sk, cap: e.cap)
       of nkSplit:
         # RFC-0005 S8bt: the first branch keeps the calls so far.
         coNext = Cost(dp: e.co.dp)
@@ -1423,8 +1661,10 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
                save(e.cap, s.slot, sc), e.ent)
       of nkMatch:
         if not sc.noEmpty:
-          let m = Item[T](kind: ikMatch, cond: e.cond, tag: sc.tagNow,
-                          stl: e.stl, co: e.co, cap: e.cap)
+          var m = Item[T](kind: ikMatch, cond: e.cond, tag: sc.tagNow,
+                          stl: e.stl, cov: e.cov, co: e.co, sk: e.sk,
+                          cap: e.cap)
+          if skipGuess != nil: m.anc = e.anc
           result.add m
           if decided(m): cutting = true
         else: dead()
@@ -1472,10 +1712,22 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
             # whose continuation holds it.
             let id = markerCtr
             inc markerCtr
-            var run = 0'i8     # not counted (`countArgs` off): live
+            var run = 0'i32    # not counted (`countArgs` off): live
             if n.countArgs:
               run = sat(int(e.ac) + 1)
               countRun(e.anc, idx + 1)
+            var cont = s.out1
+            if skipGuess != nil and run > 0 and run <= e.cov:
+              # RFC-0016 S8co: `ignore_skip_arg` may cover it (`SkipGuess`):
+              # then no RMATCH (the cost state after it).
+              let ig = skipGuess.forced.getOrDefault(id, true)
+              skipGuess.made[id] = ig
+              if ig and n.states[cont].kind == nkCost:
+                cont = n.states[cont].out1
+            if n.costs and n.states[cont].kind == nkCost:
+              # RFC-0016 S8co: its RMATCH is a frame a re-run may take out
+              # (`sk`).
+              skNext = int16(min(int(e.sk) + 1, argCap + 1))
             if e.marks[s.name] >= 0:
               emitAfter(Item[T](kind: ikTerm, term: tmArgSkip,
                                 tag: e.marks[s.name], marker: id,
@@ -1485,7 +1737,7 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
               emitAfter(Item[T](kind: ikTerm, term: tmBarrier, marker: id,
                                 anc: e.anc, ac: run, rerun: sc.eligAll,
                                 cond: e.cond))
-            goWith(s.out1, e.frames, e.marks, e.cond, id,
+            goWith(cont, e.frames, e.marks, e.cond, id,
                    (if n.countArgs: run else: e.ac), e.cap, e.ent)
         of vbThen:
           var target = -1'i32
@@ -1502,7 +1754,7 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
 
 proc advance[T](n: Nfa; items: seq[Item[T]]; c: char): seq[Item[T]] =
   ## The agenda after the byte `c`: each consumer that reads it moves on.
-  var seen = initHashSet[(int32, seq[Frame], seq[int32], Cond, int32, int8)]()
+  var seen = initHashSet[(int32, seq[Frame], seq[int32], Cond, int32, int32)]()
   for it in items:
     if it.kind != ikThread:
       result.add it
@@ -1510,7 +1762,7 @@ proc advance[T](n: Nfa; items: seq[Item[T]]; c: char): seq[Item[T]] =
     let s = n.states[it.st]
     # RFC-0005 S8bt: a path that fails leaves its calls (`costs`).
     if c notin s.bytes or (c == '\r' and s.crlfDot and it.cond == cdNeedLF):
-      if spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
+      if spent(it.co): result.add Item[T](kind: ikCost, co: it.co, sk: it.sk)
       continue
     var t = it
     t.st = int32(s.out1)
@@ -1533,20 +1785,20 @@ proc resolve[T](items: seq[Item[T]]; nextLF: bool): seq[Item[T]] =
         var t = it
         t.cond = cdNone
         result.add t
-      elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
+      elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co, sk: it.sk)
     of cdNeedLF:
       if nextLF:
         var t = it
         t.cond = cdNone
         result.add t
-      elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
+      elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co, sk: it.sk)
 
 proc dropThreads[T](items: seq[Item[T]]): seq[Item[T]] =
   ## The agenda at the end: no thread reads on (RFC-0005 S8bt: each leaves
   ## its calls).
   for it in items:
     if it.kind != ikThread: result.add it
-    elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
+    elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co, sk: it.sk)
 
 proc rerunCosts[T](cur: var seq[Item[T]]; f: Item[T]; recLimit: int): bool =
   ## RFC-0005 S8bt (`costs`). The re-run of a SKIP:NAME without its MARK
@@ -1563,8 +1815,7 @@ proc rerunCosts[T](cur: var seq[Item[T]]; f: Item[T]; recLimit: int): bool =
   for k in 0 ..< cur.len:
     if a < 0: break
     let x = cur[k]
-    if x.kind == ikTerm and x.term in {tmArgSkip, tmBarrier, tmArgOff} and
-       x.marker == a:
+    if isArgTerm(x) and x.marker == a:
       if x.ac > f.stl: chain.incl k
       a = x.anc
   var r = 0'i16
@@ -1578,6 +1829,7 @@ proc rerunCosts[T](cur: var seq[Item[T]]; f: Item[T]; recLimit: int): bool =
           if int(co.md) - 1 >= recLimit: return false
           co.dv = 0
       cur[k].co = co
+      cur[k].sk = int16(max(int(cur[k].sk) - int(r), 0))
     if k in chain: inc r
   let pre = Cost(cc: c.cc - int32(f.ac - f.stl), dp: c.dp, md: c.md,
                  pk: max(c.pk, c.cc))
@@ -1586,7 +1838,7 @@ proc rerunCosts[T](cur: var seq[Item[T]]; f: Item[T]; recLimit: int): bool =
   true
 
 proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
-                       recLimit = high(int)): bool =
+                       recLimit = high(int); matchLimit = -1): bool =
   ## RFC-0005 S8bt. A SKIP:NAME at the front: every path before it failed,
   ## so its run number is final. One `ignore_skip_arg` covers (`ac <= stl`)
   ## is a no-op (left as a link). Otherwise one without its MARK re-runs
@@ -1597,8 +1849,17 @@ proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
   ## set (`stl`). If the attempt starts at a CRLF's LF past the start
   ## offset, the re-run's start moves past the LF instead: the attempt ends
   ## as a bump that keeps the count. A SKIP:NAME with its MARK decides
-  ## (`decidesAtFront`). Past `argCap` the comparison is not modelled
-  ## (tmStale). True when the agenda changed.
+  ## (`decidesAtFront`). RFC-0016 S8co (PRC-33 item 6): a re-run marks every
+  ## SKIP:NAME of the chain ignored (tmArgOff), so a count the automata hold
+  ## past `argCap` decides nothing within the attempt: the run numbers are
+  ## given in agenda order (`countRun`), so the SKIP:NAMEs that ran before
+  ## the re-run's are exactly its chain, and every other one, or one run
+  ## later, is past `ignore_skip_arg`. So whether a run is covered is read
+  ## against the count the attempt started with (`cov`, at most `argCap`):
+  ## a saturated `stl` (a re-run's number past `argCap`) compared with a
+  ## saturated run would read it as covered (PRC-33 item 6b, the
+  ## within-attempt boundary). Counting calls past `argCap` (the calls the
+  ## re-run saves) is not modelled (tmStale). True when the agenda changed.
   if cur.len == 0 or cur[0].kind != ikTerm or cur[0].cond != cdNone:
     return false
   let f = cur[0]
@@ -1613,17 +1874,22 @@ proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
     return true
   of tmArgSkip, tmBarrier:
     let counted = f.ac > 0     # 0: not counted, never ignored
-    if counted and f.ac > curArgCap() and f.stl > curArgCap() or
-       costs and f.ac > curArgCap():
+    if costs and f.ac > curArgCap():
       cur = @[Item[T](kind: ikTerm, term: tmStale)]
       return true
-    if counted and f.ac <= f.stl:
+    if counted and f.ac <= f.cov:
       cur[0].term = tmArgOff
       return true
     if f.term == tmArgSkip: return false
     if f.rerun:
       cur = @[Item[T](kind: ikTerm, term: tmBump, rerun: true, stl: f.ac,
-                      co: f.co)]
+                      cov: f.cov, co: f.co)]
+      return true
+    if costs and (f.co.dv > 0 or matchLimit >= 0 and f.co.cc > matchLimit):
+      # RFC-0016 S8co: the run that reached it already passed a limit (its
+      # last calls can fail in the step the SKIP:NAME reaches the front):
+      # pcre_exec.c stops there, before the re-run.
+      cur = @[Item[T](kind: ikCost, co: f.co)]
       return true
     var a = f.anc
     cur = cur[1 .. ^1]
@@ -1633,9 +1899,8 @@ proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
     for k in 0 ..< cur.len:
       if a < 0: break
       let x = cur[k]
-      if x.kind == ikTerm and x.term in {tmArgSkip, tmBarrier, tmArgOff} and
-         x.marker == a:
-        if x.term == tmArgSkip: cur[k].term = tmArgOff
+      if isArgTerm(x) and x.marker == a:
+        if x.term in {tmArgSkip, tmBarrier}: cur[k].term = tmArgOff
         a = x.anc
     if counted:
       for x in cur.mitems: x.stl = f.ac
@@ -1643,8 +1908,41 @@ proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
   else:
     return false
 
+proc foldsSat[T](a: var Item[T]; b: Item[T]; refsB: int): bool =
+  ## RFC-0016 S8co (PRC-33 item 6b). `b` right after `a` on the agenda,
+  ## both SKIP:NAME terminals with a saturated run number (past `argCap`,
+  ## never in a concrete call) and alike but for their ids, `b` linked from
+  ## nothing but `a` (`refsB`: the items whose `anc` is `b`): `b` never
+  ## decides anything `a` does not. At the front `a` is never covered
+  ## (`cov` is at most `argCap`): without its MARK it re-runs the attempt
+  ## with the count saturated and its chain (`b` in it) ignored, with its
+  ## MARK it decides, and counting calls it is stale -- in each case as `b`
+  ## would. So `b` folds into `a`: its calls after `a`'s, `a` linked past
+  ## it. Without this a repeat that runs a SKIP:NAME per iteration grows the
+  ## agenda with the subject (`(?:a(*SKIP:x))+c|...`), and the automata
+  ## reach neither a decision nor their state cap in any useful time.
+  ## The terminals `capCosts` keeps past a cut for their run numbers
+  ## (`tmArgRec`, wherever a re-run counts calls) fold alike: run numbers
+  ## are given in agenda order, so a saturated one is in no unsaturated
+  ## front's chain and `rerunCosts` never lifts by it. Kept one per repeat
+  ## iteration, they grew the agenda with the subject:
+  ## `(*LIMIT_MATCH=2)a+(*SKIP:N)c|ab(*SKIP)q|ab` never finished building.
+  if not (isArgTerm(a) and isArgTerm(b)) or a.term != b.term or
+     a.term notin {tmArgSkip, tmBarrier, tmArgRec}: return false
+  if a.ac != b.ac or a.ac <= curArgCap(): return false
+  if a.cond != cdNone or b.cond != cdNone: return false
+  if a.stl != b.stl or a.cov != b.cov or a.soft != b.soft or
+     a.rerun != b.rerun or a.tag != b.tag: return false
+  if a.anc == b.marker:
+    if refsB != 1: return false
+  elif a.anc != b.anc or refsB != 0: return false
+  a.anc = b.anc
+  a.co = a.co.then(b.co)
+  true
+
 proc normalize[T](items: seq[Item[T]]; costs = false;
-                  recLimit = high(int)): seq[Item[T]] =
+                  recLimit = high(int); matchLimit = -1;
+                  keepArgs = false): seq[Item[T]] =
   ## See the module doc: the front decides or jumps, an unconditional
   ## decided item kills what follows it up to the next marker, and a marker
   ## nothing refers to goes. RFC-0005 S8bt: a SKIP:NAME at the front
@@ -1658,10 +1956,13 @@ proc normalize[T](items: seq[Item[T]]; costs = false;
     var carry: Cost
     while i < cur.len:
       let it = cur[i]
-      if it.kind == ikMarker or it.kind == ikCost:
+      if it.kind == ikMarker or it.kind == ikCost or
+         it.kind == ikTerm and it.term == tmArgRec:
+        verifyAt(cur, i)
         carry = carry.then(it.co)
         inc i
       elif it.kind == ikThen and it.cond == cdNone:
+        verifyAt(cur, i)
         carry = carry.then(it.co)
         var j = i + 1
         while j < cur.len and
@@ -1679,7 +1980,8 @@ proc normalize[T](items: seq[Item[T]]; costs = false;
       cur = cur[i .. ^1]
       if spent(carry): cur[0].co = carry.then(cur[0].co)
       changed = true
-    if resolveBarrier(cur, costs, recLimit): continue
+    verifyAt(cur, 0)
+    if resolveBarrier(cur, costs, recLimit, matchLimit): continue
     if cur.len > 0 and decidesAtFront(cur[0]):
       return @[cur[0]]
     # RFC-0016 S8ck-r: the initializer is load-bearing. Without it Nim 2.2.10
@@ -1689,12 +1991,37 @@ proc normalize[T](items: seq[Item[T]]; costs = false;
     # (tests/asan/nim_firstwrite_leak.nim).
     var nx: seq[Item[T]] = @[]
     var cutting = false
-    for it in cur:
+    for it0 in cur:
+      var it = it0
+      if not costs and it.kind == ikTerm and it.term == tmBarrier and
+         it.cond == cdNone and it.ac == 0:
+        # RFC-0016 S8co (PRC-33 item 9c): an uncounted SKIP:NAME without its
+        # MARK (`countArgs` off, so every one is) does at the front what it
+        # does anywhere (`resolveBarrier`): a re-run that takes the CRLF
+        # start skip is a bump that keeps no count, decided; any other with
+        # no chain is a no-op and goes. Left in place, an unanchored
+        # attempt's agenda keeps one per repeat iteration that reached it,
+        # and grows with the subject (`a+(*SKIP:x)b|a`).
+        if it.rerun:
+          it = Item[T](kind: ikTerm, term: tmBump, rerun: true, cov: it.cov,
+                       co: it.co)
+          changed = true
+        elif it.anc < 0:
+          changed = true
+          continue
       if it.kind == ikMarker:
         cutting = false
         nx.add it
       elif cutting:
-        changed = true
+        if (skipGuess != nil or keepArgs) and isArgTerm(it):
+          # RFC-0016 S8co: kept for its run number (`tmArgRec`).
+          var r = it
+          if r.term != tmArgRec:
+            r.term = tmArgRec
+            changed = true
+          nx.add r
+        else:
+          changed = true
       else:
         nx.add it
         if decided(it): cutting = true
@@ -1737,10 +2064,14 @@ proc normalize[T](items: seq[Item[T]]; costs = false;
     # RFC-0005 S8bt: an ignored SKIP:NAME's link no thread or SKIP:NAME
     # terminal reaches goes too.
     var links = initHashSet[int32]()
+    var ancRefs = initCountTable[int32]()
     for it in nx:
-      if it.kind == ikThread or
-         it.kind == ikTerm and it.term in {tmArgSkip, tmBarrier, tmArgOff}:
-        if it.anc >= 0: links.incl it.anc
+      if it.kind == ikThread or isArgTerm(it) or
+         skipGuess != nil and it.kind in {ikMatch, ikTerm, ikThen}:
+        # RFC-0016 S8co: and any item's, for its guesses (`verifyAt`).
+        if it.anc >= 0:
+          links.incl it.anc
+          ancRefs.inc it.anc
     cur = @[]
     for it in nx:
       if it.kind == ikMarker and it.marker notin refs:
@@ -1752,6 +2083,9 @@ proc normalize[T](items: seq[Item[T]]; costs = false;
         changed = true
       elif it.kind == ikCost and cur.len > 0 and cur[^1].kind == ikCost:
         cur[^1].co = cur[^1].co.then(it.co)
+        changed = true
+      elif cur.len > 0 and isArgTerm(it) and
+           foldsSat(cur[^1], it, ancRefs[it.marker]):
         changed = true
       else:
         cur.add it
@@ -1770,7 +2104,7 @@ proc outcome[T](items: seq[Item[T]]): OutcomeKind =
     of tmCommit: okCommit
     of tmSkip, tmArgSkip: okSkip
     of tmStale: okStale
-    of tmBarrier, tmArgOff: okUndecided
+    of tmBarrier, tmArgOff, tmArgRec: okUndecided
   else: okUndecided
 
 # ---- the concrete runs -----------------------------------------------------------
@@ -1793,7 +2127,7 @@ proc initMarks(n: Nfa): seq[int32] =
 type AttemptResult*[T] = object
   kind*: OutcomeKind
   pos*: int        ## okMatch: the match's end; okSkip: the landing
-  ign*: int8
+  ign*: int32
     ## RFC-0005 S8bt: `ignore_skip_arg` after the attempt (`nextIgn`)
   calls*: int      ## RFC-0005 S8bt (`costs`): its `match()` calls
   depth*: int      ## RFC-0005 S8bt (`costs`): its deepest call's frame
@@ -1815,25 +2149,23 @@ proc limitHit[T](n: Nfa; items: seq[Item[T]]): OutcomeKind =
   if depthHit: return okLimitR
   okUndecided
 
-proc nextIgn[T](oc: OutcomeKind; it: Item[T]; landed: bool): int8 =
+proc nextIgn[T](oc: OutcomeKind; it: Item[T]; landed: bool): int32 =
   ## RFC-0005 S8bt. pcre_exec.c's `ignore_skip_arg` for the next attempt:
   ## kept by a SKIP's jump past the start and by a re-run past a CRLF's
   ## LF, reset by every other way on.
   if oc == okSkip and landed or oc == okBump and it.rerun: it.stl
   else: 0
 
-proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
-                    cap0: T;
-                    save: proc (t: T; slot: int; sc: StepCtx): T;
-                    ign0 = 0'i8): AttemptResult[T] =
+proc runAttemptOnce[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
+                       cap0: T;
+                       save: proc (t: T; slot: int; sc: StepCtx): T;
+                       ign0 = 0'i32): AttemptResult[T] =
   ## RFC-0005 S8bj. The concrete attempt at `x` of `s` (the search's start
-  ## offset `s0`): its outcome, with positions as tags.
-  if n.costs and ign0 > 0:
-    # RFC-0005 S8bt: not modelled (`costStaleWhy`).
-    result.kind = okStale
-    return
+  ## offset `s0`): its outcome, with positions as tags. RFC-0016 S8co: it
+  ## stops where a `SkipGuess` it made proves wrong.
   var items = @[Item[T](kind: ikThread, st: int32(n.start),
-                        marks: initMarks(n), anc: -1, stl: ign0, cap: cap0)]
+                        marks: initMarks(n), anc: -1, stl: ign0, cov: ign0,
+                        cap: cap0)]
   var ctr = 0'i32
   var pc = classAt(s, x, uAny(n))
   let elig = (not anchored) and x > s0 and x < s.len and s[x - 1] == '\r' and
@@ -1855,7 +2187,10 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
     items = closure(n, items, sc, ctr, save)
     if atEnd: items = dropThreads(items)
     else: items = advance(n, items, s[j])
-    items = normalize(items, n.costs, n.recLimit)
+    items = normalize(items, n.costs, n.recLimit, n.matchLimit, keepsCut(n))
+    # RFC-0016 S8co: `normalize` checked the guesses its front reads
+    # (`verifyAt`), before a decided front drops what follows it.
+    if skipGuess != nil and (skipGuess.wrong or skipGuess.lost): return
     var oc = outcome(items)
     let lim = limitHit(n, items)
     if lim != okUndecided: oc = lim
@@ -1872,10 +2207,34 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
       return
     pc = nextClass(s[j], pc, uAny(n))
 
+proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
+                    cap0: T;
+                    save: proc (t: T; slot: int; sc: StepCtx): T;
+                    ign0 = 0'i32): AttemptResult[T] =
+  ## RFC-0005 S8bj. The concrete attempt at `x` of `s` (the search's start
+  ## offset `s0`): its outcome, with positions as tags. RFC-0016 S8co: one
+  ## that starts with `ignore_skip_arg` set and counts calls guesses which
+  ## SKIP:NAMEs it covers, and runs again until every guess holds
+  ## (`SkipGuess`).
+  if not (n.costs and ign0 > 0):
+    return runAttemptOnce(n, s, x, s0, anchored, ne, cap0, save, ign0)
+  let outer = skipGuess
+  skipGuess = SkipGuess()
+  defer: skipGuess = outer
+  # Each re-run settles one more guess for good (the numbers do not move
+  # with the calls), so the SKIP:NAMEs the attempt runs bound them.
+  for round in 0 .. 4096:
+    result = runAttemptOnce(n, s, x, s0, anchored, ne, cap0, save, ign0)
+    if skipGuess.lost: break
+    if not skipGuess.wrong: return
+    skipGuess.wrong = false
+    skipGuess.made.clear()
+  result = AttemptResult[T](kind: okStale)
+
 proc noSave(t: int8; slot: int; sc: StepCtx): int8 = t
 
 proc runAttempt*(n: Nfa; s: string; x: int; s0 = -1; anchored = true;
-                 ne = false; ign0 = 0'i8): (OutcomeKind, int, int8) =
+                 ne = false; ign0 = 0'i32): (OutcomeKind, int, int32) =
   ## RFC-0005 S8bj. The concrete attempt at `x` of `s`: its outcome and
   ## (a match's end / a SKIP's landing) position. `s0`: the call's start
   ## offset (default `x`). RFC-0005 S8bt: `ign0` its `ignore_skip_arg`, and
@@ -1928,7 +2287,7 @@ proc capSave(t: seq[int32]; slot: int; sc: StepCtx): seq[int32] =
   result[slot] = sc.tagNow
 
 proc chosenCapsAt*(n: Nfa; s: string; x: int; s0 = -1;
-                   anchored = true; ign0 = 0'i8): (int, seq[(int, int)]) =
+                   anchored = true; ign0 = 0'i32): (int, seq[(int, int)]) =
   ## RFC-0005 S8bj. The concrete attempt at `x` with captures: the match's
   ## end (-1: none) and each group's `(start, end)` in `s` (`(-1, -1)`:
   ## unset). RFC-0005 S8bt: `ign0` the attempt's `ignore_skip_arg`
@@ -1974,8 +2333,8 @@ proc hash[T](it: Item[T]): Hash =
   var h: Hash = 0
   h = h !& hash(ord(it.kind)) !& hash(ord(it.cond)) !& hash(it.st) !&
       hash(it.marker) !& hash(ord(it.term)) !& hash(it.tag) !&
-      hash(it.anc) !& hash(it.ac) !& hash(it.stl) !& hash(it.soft) !&
-      hash(it.rerun) !&
+      hash(it.anc) !& hash(it.ac) !& hash(it.stl) !& hash(it.cov) !&
+      hash(it.soft) !& hash(it.rerun) !& hash(it.sk) !&
       hash(it.cap)
   for f in it.frames: h = h !& hash(f)
   for m in it.marks: h = h !& hash(m)
@@ -1996,7 +2355,31 @@ proc capCosts[T](n: Nfa; items: seq[Item[T]]): seq[Item[T]] =
   # at most one frame per counted SKIP:NAME) still tells them apart.
   let lift = n.hasNeverSkip
   let top = int16(min(r, 30000) + (if lift: argCap + 2 else: 0))
-  for it in items:
+  # RFC-0016 S8co: a re-run takes the calls so far less one per SKIP:NAME
+  # it now ignores (`rerunCosts`), at most `argCap` over the attempt (the
+  # count past it is `tmStale`), and the SKIP:NAME that re-runs it may not
+  # be in the agenda yet (a thread's continuation runs it later). So an
+  # item whose calls before it pass the match limit by at most `argCap` is
+  # still reached: `(a(*SKIP:N)c|ab(*SKIP)q|b)+c?` under LIMIT_MATCH=8
+  # matches `aca` at 0 with eight calls on the re-run, where the first
+  # run's agenda held nine before the match.
+  let slack = (if lift: argCap else: 0)
+  # RFC-0016 S8co: an item whose calls pass the recursion limit (`dv`) errs
+  # at the front unless a re-run first lifts its depths under it. A re-run
+  # is a SKIP:NAME without its MARK (`tmBarrier`) reaching the front before
+  # the item, and it lifts the item one frame per SKIP:NAME of its chain
+  # whose continuation holds the item -- SKIP:NAME frames on the item's own
+  # path, at most `sk` of them (`rerunCosts`; the chain's other terminals
+  # come after the item: the continuation of a SKIP:NAME is one contiguous
+  # run of the agenda that its terminal ends). So with no barrier before it,
+  # or its deepest call (`md - 1`) at least `sk` frames past the limit, the
+  # item decides at the front and nothing after it is reached: it is cut as
+  # one whose calls pass the match limit is. Kept, `a+(*SKIP:N)c|ab(*SKIP)q|ab`
+  # under LIMIT_RECURSION=2 held one such item per repeat iteration (its
+  # exit's calls, two frames past the limit, lifted by one at most), and
+  # the agenda grew with the subject.
+  var barrier = false
+  for i, it in items:
     var x = it
     x.co.pk = 0
     x.co.cc = (if l >= 0: min(x.co.cc, int32(l + 1)) else: 0'i32)
@@ -2006,14 +2389,37 @@ proc capCosts[T](n: Nfa; items: seq[Item[T]]): seq[Item[T]] =
       x.co.dv = (if l >= 0: min(x.co.dv, int32(l + 2)) else: 1'i32)
     result.add x
     pre += int(x.co.cc)
-    if not n.hasThen and ((l >= 0 and pre > l) or x.co.dv > 0): break
+    let revivable = lift and barrier and x.co.dv > 0 and
+                    int(x.co.md) - r <= int(x.sk)
+    if not n.hasThen and ((l >= 0 and pre > l + slack) or
+                          (x.co.dv > 0 and not revivable)):
+      if skipGuess != nil or lift:
+        # RFC-0016 S8co (PRC-33 item 4, the automata): the SKIP:NAME
+        # terminals past here stay, with no calls, for the run numbers of
+        # the guesses the items before here still verify (`verifyAt`) and
+        # for the chains a re-run walks (`keepsCut`); nothing past here is
+        # explored (the front decides at `x`).
+        for y in items[i + 1 .. ^1]:
+          if isArgTerm(y):
+            var r = y
+            r.term = tmArgRec
+            r.co = Cost()
+            r.sk = 0
+            result.add r
+      break
+    if x.kind == ikTerm and x.term == tmBarrier and not x.rerun:
+      barrier = true
 
-proc canon[T](items: seq[Item[T]]): seq[Item[T]] =
-  ## Marker ids renumbered by first appearance.
-  var ren = initTable[int32, int32]()
-  proc idOf(m: int32): int32 =
-    if m notin ren: ren[m] = int32(ren.len)
-    ren[m]
+proc renId(ren: var Table[int32, int32]; m: int32): int32 =
+  ## `m`'s canonical id: the next one on first appearance.
+  if m notin ren: ren[m] = int32(ren.len)
+  ren[m]
+
+proc canonRen[T](items: seq[Item[T]]; ren: var Table[int32, int32]):
+    seq[Item[T]] =
+  ## Marker ids renumbered by first appearance (`ren`: the numbering so
+  ## far, shared by the worlds of one state).
+  template idOf(m: int32): int32 = renId(ren, m)
   result = items
   for it in result.mitems:
     case it.kind
@@ -2023,11 +2429,238 @@ proc canon[T](items: seq[Item[T]]): seq[Item[T]] =
     of ikMarker, ikThen:
       it.marker = idOf(it.marker)
     of ikTerm:
-      # RFC-0005 S8bt: SKIP:NAME terminals' ids and links.
-      if it.term in {tmArgSkip, tmBarrier, tmArgOff}:
+      # RFC-0005 S8bt: SKIP:NAME terminals' ids and links (RFC-0016 S8co:
+      # the kept ones too).
+      if it.term in {tmArgSkip, tmBarrier, tmArgOff, tmArgRec}:
         it.marker = idOf(it.marker)
         if it.anc >= 0: it.anc = idOf(it.anc)
     else: discard
+
+proc canon[T](items: seq[Item[T]]): seq[Item[T]] =
+  var ren = initTable[int32, int32]()
+  canonRen(items, ren)
+
+type World = object
+  ## RFC-0016 S8co (PRC-33 item 4, the automata). An attempt that starts
+  ## with `ignore_skip_arg` set skips the RMATCH of each SKIP:NAME it
+  ## covers; which ones it covers is their run number, final only at the
+  ## front, so the closure guesses (`SkipGuess`). A state of such an
+  ## attempt holds one world per assignment of the guesses still open: the
+  ## agenda with those guesses' calls. The run numbers and the agenda's
+  ## structure do not depend on the guesses (only the calls do), so every
+  ## world checks the same guess at the same position with the same actual
+  ## value: a check kills the worlds that guessed otherwise and closes the
+  ## guess in the rest. The principal world (every open guess covered, as
+  ## the concrete call guesses first) is the one whose outcome stands; a
+  ## world that decided while another is live keeps its outcome (its
+  ## decision read no open guess, `verifyAt`), to stand if the principal's
+  ## lineage is refuted. One world with no guesses is the plain attempt.
+  items: seq[Item[int8]]
+  gt, gf: seq[int32]   ## the open guesses: covered / not (sorted ids)
+
+proc hash(w: World): Hash =
+  var h: Hash = 0
+  for it in w.items: h = h !& hash(it)
+  for g in w.gt: h = h !& hash(g)
+  h = h !& hash(-1)
+  for g in w.gf: h = h !& hash(g)
+  !$h
+
+proc cmpSeq[T](a, b: seq[T]; f: proc (x, y: T): int): int =
+  for i in 0 ..< min(a.len, b.len):
+    let c = f(a[i], b[i])
+    if c != 0: return c
+  cmp(a.len, b.len)
+
+proc cmpItem(a, b: Item[int8]): int =
+  let ka = (ord(a.kind), ord(a.cond), a.st, a.marker, ord(a.term), a.tag,
+            a.anc, a.ac, a.stl, a.cov, a.soft, a.rerun, a.co.cc, a.co.dp,
+            a.co.md, a.co.dv, a.co.pk, a.sk, a.cap)
+  let kb = (ord(b.kind), ord(b.cond), b.st, b.marker, ord(b.term), b.tag,
+            b.anc, b.ac, b.stl, b.cov, b.soft, b.rerun, b.co.cc, b.co.dp,
+            b.co.md, b.co.dv, b.co.pk, b.sk, b.cap)
+  result = cmp(ka, kb)
+  if result != 0: return
+  result = cmpSeq(a.frames, b.frames, proc (x, y: Frame): int = cmp(x, y))
+  if result != 0: return
+  result = cmpSeq(a.marks, b.marks, proc (x, y: int32): int = cmp(x, y))
+
+proc cmpWorld(a, b: World): int =
+  result = cmpSeq(a.items, b.items, cmpItem)
+  if result != 0: return
+  result = cmpSeq(a.gt, b.gt, proc (x, y: int32): int = cmp(x, y))
+  if result != 0: return
+  result = cmpSeq(a.gf, b.gf, proc (x, y: int32): int = cmp(x, y))
+
+proc canonWs(ws: seq[World]): seq[World] =
+  ## The worlds of one state canonical: one id numbering for all (their
+  ## agendas agree but for a suffix the calls cut, longest first), sorted.
+  var order = toSeq(0 ..< ws.len)
+  order.sort(proc (a, b: int): int = cmp(ws[b].items.len, ws[a].items.len))
+  var ren = initTable[int32, int32]()
+  template idOf(m: int32): int32 = renId(ren, m)
+  result = newSeq[World](ws.len)
+  for i in order:
+    result[i].items = canonRen(ws[i].items, ren)
+  for i in order:
+    # An open guess whose terminal no item refers to any more is never
+    # checked (the concrete call keeps it as guessed): numbered after.
+    for g in ws[i].gt: result[i].gt.add idOf(g)
+    for g in ws[i].gf: result[i].gf.add idOf(g)
+    result[i].gt.sort()
+    result[i].gf.sort()
+  result.sort(cmpWorld)
+
+proc overAgenda(ws: seq[World]): bool =
+  ## RFC-0016 S8co. Whether a world's agenda is past `maxAgenda`
+  ## (`agendaPeak` updated).
+  for w in ws:
+    agendaPeak = max(agendaPeak, w.items.len)
+    if w.items.len > maxAgenda: return true
+
+proc principalOf(ws: seq[World]): World =
+  for w in ws:
+    if w.gf.len == 0: return w
+  raiseAssert "no principal world"
+
+proc decidedWorld(n: Nfa; w: World): bool =
+  outcome(w.items) != okUndecided or limitHit(n, w.items) != okUndecided
+
+
+type
+  ClosureKey = (Ctx, int, bool, bool)
+  WorldCache = Table[(ClosureKey, int, int),
+                     (seq[Item[int8]], Table[int32, bool])]
+    ## RFC-0016 S8co: per byte class, world and guess mask, the closure and
+    ## the guesses it made
+
+proc runGuess(n: Nfa; items0: seq[Item[int8]]; sc: StepCtx;
+              save: proc (t: int8; slot: int; sc: StepCtx): int8;
+              atEnd: bool; c: char; key: (ClosureKey, int, int);
+              f: Table[int32, bool]; cache: var WorldCache):
+    (seq[Item[int8]], SkipGuess) =
+  ## RFC-0016 S8co. One world's step under the guess table `f`: the closure
+  ## (cached per byte class, world and mask: the ids are deterministic, a
+  ## forced value changes only the calls), advanced and normalized; the
+  ## `SkipGuess` it ran under carries what the front verified.
+  skipGuess = SkipGuess(forced: f, made: f)
+  var cl: seq[Item[int8]]
+  if key in cache:
+    let hit = cache[key]
+    cl = hit[0]
+    skipGuess.made = hit[1]
+  else:
+    var ctr = 1_000_000'i32
+    cl = closure(n, items0, sc, ctr, save)
+    cache[key] = (cl, skipGuess.made)
+  var items: seq[Item[int8]]
+  items = (if atEnd: dropThreads(cl) else: advance(n, cl, c))
+  items = normalize(items, n.costs, n.recLimit, n.matchLimit, keepsCut(n))
+  (items, skipGuess)
+
+proc stepGuess(n: Nfa; w: World; wi: int; sc: StepCtx;
+               save: proc (t: int8; slot: int; sc: StepCtx): int8;
+               nextLF, atEnd: bool; c: char; ck: ClosureKey;
+               cache: var WorldCache; verified: var Table[int32, bool];
+               lost: var bool): seq[World] =
+  ## RFC-0016 S8co. The world's agendas after this position: one per
+  ## assignment of the guesses the closure makes here, less those the
+  ## front refutes (`verifyAt`); the guesses checked go to `verified`.
+  let outer = skipGuess
+  defer: skipGuess = outer
+  var forced = initTable[int32, bool]()
+  for id in w.gt: forced[id] = true
+  for id in w.gf: forced[id] = false
+  var items0: seq[Item[int8]]
+  items0 = resolve(w.items, nextLF)
+  template run(f: Table[int32, bool]; mask: int): untyped =
+    runGuess(n, items0, sc, save, atEnd, c, (ck, wi, mask), f, cache)
+  # The first run guesses every new SKIP:NAME covered (`closure`'s
+  # default): mask 0.
+  let (items1, g1) = run(forced, 0)
+  var newIds: seq[int32]
+  for id in g1.made.keys:
+    if id notin forced: newIds.add id
+  newIds.sort()
+  for mask in 0 ..< (1 shl newIds.len):
+    var f = forced
+    for i, id in newIds: f[id] = ((mask shr i) and 1) == 0
+    let (items, g) = (if mask == 0: (items1, g1) else: run(f, mask))
+    if g.lost:
+      lost = true
+      return
+    for id, v in g.seen: verified[id] = v
+    if g.wrong: continue
+    var ww: World
+    ww = World(items: capCosts(n, items))
+    for id, v in f:
+      if id in g.seen: continue
+      if v: ww.gt.add id else: ww.gf.add id
+    ww.gt.sort()
+    ww.gf.sort()
+    result.add ww
+
+
+const worldWhy = "the attempt's guess worlds hold no single principal"
+  ## RFC-0016 S8co: never expected (`World`); a decline, not a crash
+
+proc stepWorlds(n: Nfa; ws: seq[World]; sc: StepCtx;
+                save: proc (t: int8; slot: int; sc: StepCtx): int8;
+                nextLF, atEnd: bool; c: char; ck: ClosureKey;
+                cache: var WorldCache; why: var string): seq[World] =
+  ## RFC-0016 S8co. A guessing state's worlds after this position (see
+  ## `World`); `why` set: the automaton declines.
+  var verified = initTable[int32, bool]()
+  var lost = false
+  var nx: seq[World]
+  for wi, w in ws:
+    if decidedWorld(n, w): nx.add w
+    else:
+      nx.add stepGuess(n, w, wi, sc, save, nextLF, atEnd, c, ck, cache,
+                       verified, lost)
+    if lost:
+      why = costStaleWhy
+      return @[]
+  # Every world reads this position's checks (the same actual values). A
+  # run number only grows (`countRun`: a SKIP:NAME run by a thread above
+  # moves the numbers after it on), so a guess "covered" whose terminal is
+  # already past the count is refuted before the terminal reaches the
+  # front, and "not covered" is final there: the check at the front would
+  # read the same values, so they are read here. Without this a greedy
+  # repeat that runs a SKIP:NAME per iteration (`a+(*SKIP:N)c|...`) kept
+  # every iteration's guess open while the repeat consumed, one world per
+  # assignment, past `maxWorlds` at seven.
+  for w in nx:
+    var ww = World(items: w.items)
+    var past = initHashSet[int32]()
+    for it in w.items:
+      if isArgTerm(it) and it.ac > it.cov: past.incl it.marker
+    var dead = false
+    for id in w.gt:
+      if id in verified:
+        if not verified[id]: dead = true
+      elif id in past: dead = true
+      else: ww.gt.add id
+    for id in w.gf:
+      if id in verified:
+        if verified[id]: dead = true
+      elif id notin past: ww.gf.add id
+    if not dead: result.add ww
+  result.sort(cmpWorld)
+  result = deduplicate(result, isSorted = true)
+  worldPeak = max(worldPeak, result.len)
+  if result.len > maxWorlds:
+    why = worldBudgetWhy
+    return @[]
+  if overAgenda(result):
+    why = agendaBudgetWhy
+    return @[]
+  var np = 0
+  for w in result:
+    if w.gf.len == 0: inc np
+  if np != 1:
+    why = worldWhy
+    return @[]
 
 type
   AcceptKind = enum
@@ -2058,9 +2691,13 @@ type
       ## RFC-0005 S8bt: the consumer follows `ignore_skip_arg` across
       ## attempts (`ign0` / `ign1`); otherwise an outcome that leaves it set
       ## declines (`staleWhy`)
+    nl0: int8
+      ## RFC-0016 S8co: the newline bookkeeping (`nlStepFor`) where the
+      ## attempt starts: under `uAny`, inside a multi-byte newline (the
+      ## JIT's scan stops at a continuation byte), its progress
 
   AKey = object
-    items: seq[Item[int8]]
+    ws: seq[World]    ## RFC-0016 S8co: the agenda, or the guess worlds
     pc: PrevClass
     nl: int8
     ev: int8          ## events read: 1 `#`, 2 `%`, 4 LAND
@@ -2070,13 +2707,13 @@ type
 
 proc hash(k: AKey): Hash =
   var h: Hash = 0
-  for it in k.items: h = h !& hash(it)
+  for w in k.ws: h = h !& hash(w)
   h = h !& hash(ord(k.pc)) !& hash(k.nl) !& hash(k.ev) !& hash(k.just) !&
       hash(k.atStart) !& hash(k.sink)
   !$h
 
 proc `==`(a, b: AKey): bool =
-  a.items == b.items and a.pc == b.pc and a.nl == b.nl and a.ev == b.ev and
+  a.ws == b.ws and a.pc == b.pc and a.nl == b.nl and a.ev == b.ev and
     a.just == b.just and a.atStart == b.atStart and a.sink == b.sink
 
 proc requiredEvents(acc: AcceptKind): int8 =
@@ -2094,39 +2731,97 @@ proc capSaveDfa(g: int): proc (t: int8; slot: int; sc: StepCtx): int8 =
     elif slot == 2 * g + 1: int8(3 * (int(t) div 3) + (if sc.capEnd: 1 else: 2))
     else: t
 
+proc atEvent(tag: int32): bool = tag == 1 or tag == 3
+  ## An automaton item's tag (`buildAttempt`'s `tagNow`): 0 the attempt's
+  ## start, 1 an event's position, 2 elsewhere; RFC-0016 S8co (PRC-33 item
+  ## 6b): 3 an event read at the attempt's start. A MARK set there, and a
+  ## SKIP landing on it, are at the event and not past the start
+  ## (pcre_exec.c: a SKIP landing at `start_match` is a NOMATCH, and resets
+  ## `ignore_skip_arg`); one value for both read the landing as a jump that
+  ## kept the count.
+
+proc pastStart(tag: int32): bool = tag != 0 and tag != 3
+
 proc accepts(spec: AttemptSpec; oc: OutcomeKind; it: Item[int8];
              ev: int8; atStart: bool): bool =
   if (ev and requiredEvents(spec.acc)) != requiredEvents(spec.acc):
     return false
   case spec.acc
-  of acMarkT: oc == okMatch and it.tag == 1
+  of acMarkT: oc == okMatch and atEvent(it.tag)
   of acNone: oc != okMatch
-  of acEndsT: oc == okMatch and it.tag == 1 and not (spec.nonEmpty and atStart)
+  of acEndsT:
+    oc == okMatch and atEvent(it.tag) and not (spec.nonEmpty and atStart)
   of acBump:
-    (oc in {okNoMatch, okBump} or (oc == okSkip and it.tag == 0)) and
-      nextIgn(oc, it, false) == spec.ign1
+    (oc in {okNoMatch, okBump} or (oc == okSkip and not pastStart(it.tag))) and
+      nextIgn(oc, it, false) == int32(spec.ign1)
   of acSkipT: oc == okSkip and it.tag == 1 and it.stl == spec.ign1
   of acCommit: oc == okCommit
   of acMatch: oc == okMatch
-  of acMatchT: oc == okMatch and it.tag == 1
+  of acMatchT: oc == okMatch and atEvent(it.tag)
   of acCapSet: oc == okMatch and int(it.cap) mod 3 != 0
   of acCapMark: oc == okMatch and it.cap == 3 * 1 + 1
   of acErrM: oc == okLimitM
   of acErrR: oc == okLimitR
 
+proc possClasses(n: Nfa): array[256, int] =
+  ## RFC-0016 S8co. Per byte, its class among the possessive exits' tests
+  ## (`nkPoss`'s byte sets: under `costs` the one place `closure` reads the
+  ## next byte, besides the newline bytes and CR), so a state's closure is
+  ## computed once per class, not once per byte. -1: no such test.
+  var sets: seq[set[char]]
+  for st in n.states:
+    if st.kind == nkPoss: sets.add st.bytes
+  if sets.len == 0:
+    for b in 0 .. 255: result[b] = -1
+    return
+  var classOf = initTable[seq[bool], int]()
+  for b in 0 .. 255:
+    var sig = newSeq[bool](sets.len)
+    for i, cs in sets: sig[i] = char(b) in cs
+    if sig notin classOf: classOf[sig] = classOf.len
+    result[b] = classOf[sig]
+
+proc byteReps(n: Nfa; extra: seq[set[char]]): array[256, int] =
+  ## RFC-0005 S8bt. Per byte, the least byte that every byte test of the
+  ## search's construction reads alike: the automaton's byte sets, the
+  ## newline bytes, CR and LF, `nextClass`'s classes, the UTF-8 ranges
+  ## `utfStep` tells apart, the start-of-match filter's and `extra` (the
+  ## JIT scan's sets). A row is computed once per class.
+  var sets = extra
+  for st in n.states:
+    if st.kind == nkByte: sets.add st.bytes
+  sets.add nlBytes(n.nl)
+  # RFC-0005 S8bt: a possessive exit's test; `uAny`'s multi-byte newlines.
+  for st in n.states:
+    if st.kind == nkPoss: sets.add st.bytes
+  if uAny(n):
+    for b in ['\xC2', '\xE2', '\x80', '\x85']: sets.add {b}
+    sets.add {'\xA8', '\xA9'}
+  sets.add {'\r'}
+  sets.add {'\n'}
+  sets.add {'\v', '\f', '\x85'}
+  for (lo, hi) in [(0x80, 0x8F), (0x90, 0x9F), (0xA0, 0xBF), (0xC0, 0xC1),
+                   (0xC2, 0xDF), (0xE0, 0xE0), (0xE1, 0xEC), (0xED, 0xED),
+                   (0xEE, 0xEF), (0xF0, 0xF0), (0xF1, 0xF3), (0xF4, 0xF4),
+                   (0xF5, 0xFF)]:
+    sets.add {char(lo) .. char(hi)}
+  sets.add {n.fc1, n.fc2}
+  sets.add n.bits
+  var firstOf = initTable[seq[bool], int]()
+  for b in 0 .. 255:
+    var sig = newSeq[bool](sets.len)
+    for i, cs in sets: sig[i] = char(b) in cs
+    result[b] = firstOf.mgetOrPut(sig, b)
+
 proc staleOutcome(n: Nfa; spec: AttemptSpec; oc: OutcomeKind;
                   it: Item[int8]): bool =
   ## RFC-0005 S8bt. An unanchored attempt's outcome that leaves
   ## `ignore_skip_arg` set for the next one where the consumer does not
-  ## follow it (or the calls count, `costStaleWhy`), or past `argCap`
-  ## (`staleWhy`).
+  ## follow it, or past `argCap` (`staleWhy`). RFC-0016 S8co: counting
+  ## calls no longer declines it (`World`).
   if spec.anchored: return oc == okStale
-  let ig = nextIgn(oc, it, oc == okSkip and it.tag != 0)
-  oc == okStale or ig > argCap or
-    (ig != 0 and (not spec.tracksIgn or n.costs))
-
-proc staleWhyOf(n: Nfa): string =
-  (if n.costs: costStaleWhy else: staleWhy)
+  let ig = nextIgn(oc, it, oc == okSkip and pastStart(it.tag))
+  oc == okStale or ig > argCap or (ig != 0 and not spec.tracksIgn)
 
 proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
   ## RFC-0005 S8bj. The deterministic attempt (the agenda machine) as a
@@ -2141,10 +2836,21 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
   var save: proc (t: int8; slot: int; sc: StepCtx): int8 = noSave
   if spec.group > 0: save = capSaveDfa(spec.group)
   let pc0 = (if n.needPc or spec.pc0 == pcStart: spec.pc0 else: pcOther)
-  discard intern(AKey(items: @[Item[int8](kind: ikThread, st: int32(n.start),
-                                          marks: initMarks(n), anc: -1,
-                                          stl: spec.ign0)],
-                      pc: pc0, atStart: true))
+  discard intern(AKey(ws: @[World(items: @[Item[int8](kind: ikThread,
+                                                      st: int32(n.start),
+                                                      marks: initMarks(n),
+                                                      anc: -1, stl: spec.ign0,
+                                                      cov: spec.ign0)])],
+                      pc: pc0, nl: spec.nl0, atStart: true))
+  # RFC-0016 S8co: an attempt that starts with `ignore_skip_arg` set and
+  # counts calls guesses (`World`).
+  let guessing = n.costs and spec.ign0 > 0
+  let possCls = possClasses(n)
+  # RFC-0016 S8co: a row is computed once per byte class (`byteReps`: every
+  # byte test of the attempt reads the bytes of a class alike, as the search
+  # construction already assumes of its rows); the rest of the class copies
+  # it. The closure, the advance and the normalization ran once per byte.
+  let reps = byteReps(n, @[])
   let evSyms = [(symMark, 1'i8), (symMark2, 2'i8), (symLand, 4'i8)]
   let need = requiredEvents(spec.acc)
   result.ok = true
@@ -2152,6 +2858,10 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
   while i < keys.len:
     if keys.len > maxDfaStates:
       result.ok = false
+      return
+    if guessing and keys.len > maxGuessStates:
+      result.ok = false
+      result.why = guessBudgetWhy
       return
     let k = keys[i]
     var row: array[nSyms, int32]
@@ -2169,7 +2879,8 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
         row[s] = int32 intern(k2)
     else:
       let tagNow = (proc (just: int8): int32 =
-        if (just and (1 or 4)) != 0: 1'i32
+        # `atEvent` / `pastStart` read these.
+        if (just and (1 or 4)) != 0: (if k.atStart: 3'i32 else: 1'i32)
         elif k.atStart: 0'i32
         else: 2'i32)
       proc mkCtx(ctx: Ctx; nb: int; finCRLF: bool; endEv: bool;
@@ -2185,18 +2896,28 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
                 capStart: (k.just and 1) != 0, capEnd: (k.just and 2) != 0)
       # The end of the subject.
       if nlCanEnd(k.nl):
-        var ctr = 1_000_000'i32
-        var items = resolve(k.items, false)
-        items = closure(n, items, mkCtx(cxEnd, -1, false,
-                                        spec.acc == acEndsT), ctr, save)
-        items = normalize(dropThreads(items), n.costs, n.recLimit)
+        let sc = mkCtx(cxEnd, -1, false, spec.acc == acEndsT)
+        var items: seq[Item[int8]]
+        if guessing:
+          var cache: WorldCache
+          var why = ""
+          let ws = stepWorlds(n, k.ws, sc, save, false, true, '\0',
+                              (cxEnd, -1, false, false), cache, why)
+          if why.len > 0: return Dfa(ok: false, why: why)
+          items = principalOf(ws).items
+        else:
+          var ctr = 1_000_000'i32
+          items = resolve(k.ws[0].items, false)
+          items = closure(n, items, sc, ctr, save)
+          items = normalize(dropThreads(items), n.costs, n.recLimit,
+                            n.matchLimit, keepsCut(n))
         var oc = outcome(items)
         let lim = limitHit(n, items)
         if lim != okUndecided: oc = lim
         let it = (if items.len > 0: items[0] else: Item[int8]())
         if staleOutcome(n, spec, oc, it):
-          return Dfa(ok: false, why: staleWhyOf(n))
-        result.igns.incl nextIgn(oc, it, oc == okSkip and it.tag != 0)
+          return Dfa(ok: false, why: staleWhy)
+        result.igns.incl int8(nextIgn(oc, it, oc == okSkip and pastStart(it.tag)))
         acc = accepts(spec, oc, it, k.ev, k.atStart)
       # The events.
       for (sym, bit) in evSyms:
@@ -2209,8 +2930,12 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
         row[sym] = int32 intern(k2)
       # A byte, or a final newline's.
       if (k.nl and nlFinal) == 0:
-        var cache = initTable[(Ctx, int, bool, bool), seq[Item[int8]]]()
+        var cache = initTable[ClosureKey, seq[Item[int8]]]()
+        var wcache: WorldCache
         for s in 0 ..< symMark:
+          if s < 256 and reps[s] != s:
+            row[s] = row[reps[s]]
+            continue
           let nls = nlStepFor(n.nl, k.nl, s, uAny(n))
           if nls < 0: continue
           let c = symByte(s)
@@ -2218,30 +2943,45 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
           let fin = s == symR2
           let here = symNls(n, s)
           # The closure depends on the byte only through these (RFC-0005
-          # S8bt: and through a possessive exit's test, `costs`).
-          let nbKey = (if n.costs or c in nlBytes(n.nl): ord(c)
-                       elif c == '\r': ord(c)
+          # S8bt: and through a possessive exit's test, `costs`: RFC-0016
+          # S8co, its class, `possClasses`).
+          let nbKey = (if c in nlBytes(n.nl) or c == '\r': ord(c)
+                       elif n.costs and possCls[ord(c)] >= 0:
+                         256 + possCls[ord(c)]
                        else: -2)
           let ck = (ctx, nbKey * 2 + (if c == '\n': 1 else: 0), fin, here)
-          var cl: seq[Item[int8]]
-          if ck in cache:
-            cl = cache[ck]
+          var ws: seq[World]
+          if guessing:
+            var why = ""
+            ws = stepWorlds(n, k.ws, mkCtx(ctx, ord(c), fin, false, here),
+                            save, c == '\n', false, c, ck, wcache, why)
+            if why.len > 0: return Dfa(ok: false, why: why)
           else:
-            var ctr = 1_000_000'i32
-            cl = closure(n, resolve(k.items, c == '\n'),
-                         mkCtx(ctx, ord(c), fin, false, here), ctr, save)
-            cache[ck] = cl
-          var items = capCosts(n, normalize(advance(n, cl, c), n.costs,
-                                            n.recLimit))
-          var oc = outcome(items)
-          let lim = limitHit(n, items)
+            var cl: seq[Item[int8]]
+            if ck in cache:
+              cl = cache[ck]
+            else:
+              var ctr = 1_000_000'i32
+              cl = closure(n, resolve(k.ws[0].items, c == '\n'),
+                           mkCtx(ctx, ord(c), fin, false, here), ctr, save)
+              cache[ck] = cl
+            ws = @[World(items: capCosts(n, normalize(advance(n, cl, c),
+                                                      n.costs, n.recLimit,
+                                                      n.matchLimit,
+                                                      keepsCut(n))))]
+            if overAgenda(ws): return Dfa(ok: false, why: agendaBudgetWhy)
+          var oc, lim: OutcomeKind
+          var items: seq[Item[int8]]
+          items = principalOf(ws).items
+          oc = outcome(items)
+          lim = limitHit(n, items)
           if lim != okUndecided: oc = lim
           var k2 = AKey(nl: nls, ev: k.ev, just: 0, atStart: false)
           if oc != okUndecided:
             let it = (if items.len > 0: items[0] else: Item[int8]())
             if staleOutcome(n, spec, oc, it):
-              return Dfa(ok: false, why: staleWhyOf(n))
-            result.igns.incl nextIgn(oc, it, oc == okSkip and it.tag != 0)
+              return Dfa(ok: false, why: staleWhy)
+            result.igns.incl int8(nextIgn(oc, it, oc == okSkip and pastStart(it.tag)))
             # Decided: accepted for good once the required events are read.
             if (k.ev and need) == need and
                accepts(spec, oc, it, k.ev, false):
@@ -2249,7 +2989,7 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
             else:
               continue
           else:
-            k2.items = canon(items)
+            k2.ws = canonWs(ws)
             k2.pc = (if n.needPc: nextClass(c, k.pc, uAny(n)) else: pcOther)
           row[s] = int32 intern(k2)
     result.trans.add row
@@ -2734,41 +3474,9 @@ proc jitScanObservable*(n: Nfa): bool =
   ## runs the scan everywhere; the JIT tests compare the two.
   n.engine == peJit837 and n.jit.on and n.skipActive
 
-proc byteReps(n: Nfa; extra: seq[set[char]]): array[256, int] =
-  ## RFC-0005 S8bt. Per byte, the least byte that every byte test of the
-  ## search's construction reads alike: the automaton's byte sets, the
-  ## newline bytes, CR and LF, `nextClass`'s classes, the UTF-8 ranges
-  ## `utfStep` tells apart, the start-of-match filter's and `extra` (the
-  ## JIT scan's sets). A row is computed once per class.
-  var sets = extra
-  for st in n.states:
-    if st.kind == nkByte: sets.add st.bytes
-  sets.add nlBytes(n.nl)
-  # RFC-0005 S8bt: a possessive exit's test; `uAny`'s multi-byte newlines.
-  for st in n.states:
-    if st.kind == nkPoss: sets.add st.bytes
-  if uAny(n):
-    for b in ['\xC2', '\xE2', '\x80', '\x85']: sets.add {b}
-    sets.add {'\xA8', '\xA9'}
-  sets.add {'\r'}
-  sets.add {'\n'}
-  sets.add {'\v', '\f', '\x85'}
-  for (lo, hi) in [(0x80, 0x8F), (0x90, 0x9F), (0xA0, 0xBF), (0xC0, 0xC1),
-                   (0xC2, 0xDF), (0xE0, 0xE0), (0xE1, 0xEC), (0xED, 0xED),
-                   (0xEE, 0xEF), (0xF0, 0xF0), (0xF1, 0xF3), (0xF4, 0xF4),
-                   (0xF5, 0xFF)]:
-    sets.add {char(lo) .. char(hi)}
-  sets.add {n.fc1, n.fc2}
-  sets.add n.bits
-  var firstOf = initTable[seq[bool], int]()
-  for b in 0 .. 255:
-    var sig = newSeq[bool](sets.len)
-    for i, cs in sets: sig[i] = char(b) in cs
-    result[b] = firstOf.mgetOrPut(sig, b)
-
 proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
                    ign0, ign1: int8; ok: var bool; why: var string;
-                   igns: var set[int8]): Verifier =
+                   igns: var set[int8]; nl0 = 0'i8): Verifier =
   ## RFC-0005 S8bt: `ign0` the attempt's `ignore_skip_arg`, `ign1` (exBump,
   ## exSkipFlight) the next one's; `igns` the next ones the attempt can
   ## leave.
@@ -2783,7 +3491,7 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
              of exErrR: acErrR)
   var d = buildAttempt(n, AttemptSpec(acc: acc, anchored: n.anchoredPat, pc0: pc,
                                       crlfElig: elig, ign0: ign0, ign1: ign1,
-                                      tracksIgn: n.countArgs))
+                                      tracksIgn: n.countArgs, nl0: nl0))
   if not d.ok:
     ok = false
     why = d.why
@@ -2843,7 +3551,7 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
         if idx(sg, u) notin bad[c]: result.univ[c].incl idx(sg, u)
 
 var verCache {.threadvar.}: Table[(string, Expect, PrevClass, bool, int8,
-                                    int8),
+                                    int8, int8),
                                    (Verifier, bool, string, set[int8])]
 
 proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
@@ -2851,41 +3559,42 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
   ## RFC-0005 S8bj. The search as a guess-and-verify automaton (see the
   ## module doc), determinized. RFC-0005 S8bt: the verifiers are shared by
   ## a pattern's searches (`cacheKey`: the pattern and engine).
-  var vers = initTable[(Expect, PrevClass, bool, int8, int8), int]()
+  var vers = initTable[(Expect, PrevClass, bool, int8, int8, int8), int]()
   var vlist: seq[Verifier]
   var vok = true
   var vwhy = ""
-  var nextIgns = initTable[(PrevClass, bool, int8), set[int8]]()
+  var nextIgns = initTable[(PrevClass, bool, int8, int8), set[int8]]()
   proc verifier(ex: Expect; pc: PrevClass; elig: bool; ign0 = 0'i8;
-                ign1 = 0'i8): int =
+                ign1 = 0'i8; nl0 = 0'i8): int =
     ## RFC-0005 S8bt: `ign0` the attempt's `ignore_skip_arg`, `ign1` the
-    ## next one's (a bump or a SKIP's jump).
+    ## next one's (a bump or a SKIP's jump). RFC-0016 S8co: `nl0` the
+    ## newline bookkeeping where it starts (`startNl`).
     let ex2 = (if ex == exSkip: exSkipFlight else: ex)
     let key = (ex2, canonPc0(n, pc), elig and n.hasNeverSkip, ign0,
-               (if ex2 in {exBump, exSkipFlight}: ign1 else: 0'i8))
+               (if ex2 in {exBump, exSkipFlight}: ign1 else: 0'i8), nl0)
     if key notin vers:
       vers[key] = vlist.len
-      let gk = (cacheKey, key[0], key[1], key[2], key[3], key[4])
+      let gk = (cacheKey, key[0], key[1], key[2], key[3], key[4], key[5])
       if gk notin verCache:
         var fine = true
         var why = ""
         var igns: set[int8]
         let v = buildVerifier(n, key[0], key[1], key[2], key[3], key[4],
-                              fine, why, igns)
+                              fine, why, igns, key[5])
         verCache[gk] = (v, fine, why, igns)
       let (v, fine, why, igns) = verCache[gk]
       if not fine:
         vok = false
         if vwhy.len == 0: vwhy = why
-      if key[0] == exBump: nextIgns[(key[1], key[2], key[3])] = igns
+      if key[0] == exBump: nextIgns[(key[1], key[2], key[3], key[5])] = igns
       vlist.add v
     vers[key]
-  proc ignsAfter(pc: PrevClass; elig: bool; ign0: int8): set[int8] =
+  proc ignsAfter(pc: PrevClass; elig: bool; ign0, nl0: int8): set[int8] =
     ## RFC-0005 S8bt: the `ignore_skip_arg` values an attempt can leave.
     if not n.countArgs: return {0'i8}
-    discard verifier(exBump, pc, elig, ign0, 0)
-    nextIgns.getOrDefault((canonPc0(n, pc), elig and n.hasNeverSkip, ign0),
-                          {0'i8})
+    discard verifier(exBump, pc, elig, ign0, 0, nl0)
+    nextIgns.getOrDefault((canonPc0(n, pc), elig and n.hasNeverSkip, ign0,
+                           nl0), {0'i8})
   var ids = initTable[SKey, int]()
   var keys: seq[SKey]
   proc intern(k: SKey): int =
@@ -2903,18 +3612,14 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
   # over fails without effect: the scan is observable only through the
   # CRLF start skip after a bump (`jitScanObservable`).
   let jitOn = jitScanObservable(n) and not anchored
-  if jitOn and uAny(n):
-    # RFC-0005 S8bt: the scan can stop inside a multi-byte newline, where
-    # the attempt's start class (`pcU1` .. `pcU3`) has no verifier: the
-    # concrete reading (`pcreExec`) is modelled, the search's languages
-    # are not. RFC-0005 S8cf (item 6): the walker reads such a call at points
-    # (`regex_parser.pointNfa`). Without this decline the languages differ
-    # from the reference, and many are past the regex cap
-    # (`tsymex_rfc0005_s8cf_jitutf`).
-    result.ok = false
-    result.why = "UTF mode with (*ANY) under the JIT's prefix scan (an " &
-      "attempt can start inside a multi-byte newline)"
-    return
+  proc startNl(nl: int8): int8 =
+    # RFC-0016 S8co (PRC-33 item 7): the scan can stop inside a multi-byte
+    # newline (start classes `pcU1` .. `pcU3`). The attempt there reads the
+    # newline's remaining bytes as the search does, from the search's own
+    # progress through it (`nlStepU`'s k = 1 .. 3, a final one with `nlR2`);
+    # from a fresh state it would have no reading of a final newline's last
+    # bytes. Elsewhere it starts fresh.
+    if jitOn and uAny(n) and ((nl shr 4) and 7) in 1 .. 3: nl else: 0'i8
   var obSets: seq[set[char]]
   var obIds = initTable[set[char], int16]()
   proc sid(cs: set[char]): int16 =
@@ -3146,14 +3851,15 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
     for ex in exs:
       if ex in {exBump, exSkipFlight}:
         for i1 in 0'i8 .. int8(argCap):
-          if i1 in ignsAfter(k.pc, elig, node.ign): plan.add (ex, i1)
+          if i1 in ignsAfter(k.pc, elig, node.ign, startNl(k.nl)):
+            plan.add (ex, i1)
       else: plan.add (ex, 0'i8)
     for (ex, i1) in plan:
      for sn in starts:
       var x = sn
       x.want = false
       x.ign = i1
-      let v = verifier(ex, k.pc, elig, node.ign, i1)
+      let v = verifier(ex, k.pc, elig, node.ign, i1, startNl(k.nl))
       # An empty verifier: no attempt here has that outcome.
       if vlist[v].trans.len == 0: continue
       var st0 = 0'i32
@@ -3370,12 +4076,11 @@ proc captureLangV*(n: Nfa; cacheKey: string; g: int; pc0: PrevClass;
       tracksIgn: n.countArgs)), "capture")
   selCache[key] = result
 
-proc attemptIgns*(n: Nfa): seq[int8] =
-  ## RFC-0005 S8bt. The `ignore_skip_arg` values an unanchored attempt can
-  ## start with: 0 (a call's first), and every value an attempt leaves
-  ## for the next one (`nextIgn`) -- `[0]` unless `Nfa.countArgs`. Values
-  ## past `argCap`, or an attempt past the caps, are the languages'
-  ## declines.
+proc attemptIgns(n: Nfa; ok: var bool): seq[int8] =
+  ## `attemptIgns`, with `ok` false when an attempt is past the caps (its
+  ## values are then not all read): RFC-0016 S8co, for a consumer that has
+  ## no decline of its own (`replaceFacts`).
+  ok = true
   result = @[0'i8]
   if not n.ok or not n.countArgs or n.anchoredPat: return
   var i = 0
@@ -3385,9 +4090,19 @@ proc attemptIgns*(n: Nfa): seq[int8] =
       for el in eligs:
         let d = buildAttempt(n, AttemptSpec(acc: acBump, pc0: pc,
           crlfElig: el, ign0: result[i], tracksIgn: true))
+        if not d.ok: ok = false
         for ig in d.igns:
           if ig notin result: result.add ig
     inc i
+
+proc attemptIgns*(n: Nfa): seq[int8] =
+  ## RFC-0005 S8bt. The `ignore_skip_arg` values an unanchored attempt can
+  ## start with: 0 (a call's first), and every value an attempt leaves
+  ## for the next one (`nextIgn`) -- `[0]` unless `Nfa.countArgs`. Values
+  ## past `argCap`, or an attempt past the caps, are the languages'
+  ## declines.
+  var ok: bool
+  attemptIgns(n, ok)
 
 proc captureLang*(n: Nfa; cacheKey: string; g: int; atStart,
                   marked: bool): SelLang =
@@ -3432,7 +4147,7 @@ proc startAgenda(n: Nfa; ign0 = 0'i8): seq[Item[int8]] =
   ## The attempt's agenda before its first position; RFC-0005 S8bt: `ign0`
   ## its `ignore_skip_arg`.
   @[Item[int8](kind: ikThread, st: int32(n.start), marks: initMarks(n),
-               anc: -1, stl: ign0)]
+               anc: -1, stl: int32(ign0), cov: int32(ign0))]
 
 proc crlfSkipObservable*(n: Nfa): bool =
   ## RFC-0005 S8bj. Whether the bumpalong's CRLF skip (pcre_exec.c: no start
@@ -3556,7 +4271,7 @@ type
       ## (`[0]` unless `Nfa.countArgs`)
 
   TKey = object
-    items: seq[Item[int8]]
+    ws: seq[World]    ## RFC-0016 S8co: the agenda, or the guess worlds
     pc: PrevClass
     start: int8    ## 0 none; else 1 + 2*ne + 4*elig (+ 8 pos0)
     elig: bool     ## RFC-0005 S8bt: the attempt starts at a CRLF's LF (a
@@ -3564,12 +4279,14 @@ type
 
 proc hash(k: TKey): Hash =
   var h: Hash = hash(ord(k.pc)) !& hash(k.start) !& hash(k.elig)
-  for it in k.items: h = h !& hash(it)
+  for w in k.ws: h = h !& hash(w)
   !$h
 
 proc `==`(a, b: TKey): bool =
-  a.items == b.items and a.pc == b.pc and a.start == b.start and
+  a.ws == b.ws and a.pc == b.pc and a.start == b.start and
     a.elig == b.elig
+
+proc tagsOf(ws: seq[World]): seq[int32]
 
 proc tagsOf(items: seq[Item[int8]]): seq[int32] =
   ## The registers the agenda refers to, in order of first reference.
@@ -3583,6 +4300,11 @@ proc tagsOf(items: seq[Item[int8]]): seq[int32] =
       for m in it.marks:
         if m >= 0 and m notin result: result.add m
     else: discard
+
+proc tagsOf(ws: seq[World]): seq[int32] =
+  for w in ws:
+    for t in tagsOf(w.items):
+      if t notin result: result.add t
 
 proc retag(items: seq[Item[int8]]; order: seq[int32]): seq[Item[int8]] =
   result = items
@@ -3625,25 +4347,31 @@ proc stepTable*(n: Nfa): StepTable =
           let st = int8(1 + 2 * ord(ne) + 4 * ord(el) +
                         8 * ord(pc == pcStart))
           starts[(pc, ne, el, ig)] =
-            intern(TKey(items: startAgenda(n, ig), pc: pc, start: st,
-                        elig: el))
+            intern(TKey(ws: @[World(items: startAgenda(n, ig))], pc: pc,
+                        start: st, elig: el))
   addIgn(0)
+  let possCls = possClasses(n)
   var i = 0
   while i < keys.len:
     if keys.len > maxStepStates:
       return StepTable(ok: false, why: "the pattern's run is past its " &
                        "step-table cap (" & $maxStepStates & " states)")
     let k = keys[i]
-    let regs = int32(tagsOf(k.items).len)
+    let regs = int32(tagsOf(k.ws).len)
     let st = k.start
+    # RFC-0016 S8co: an attempt that starts with `ignore_skip_arg` set and
+    # counts calls guesses (`World`).
+    let guessing = n.costs and k.ws[0].items.len > 0 and
+                   k.ws[0].items[0].cov > 0
+    var wcache: WorldCache
+    var wsWhy = ""
     proc mkCtx(ctx: Ctx; nb: int; fin: bool; nls = false): StepCtx =
       StepCtx(ctx: ctx, nb: nb, nls: nls, finCRLF: fin, pc: k.pc,
               pos0: (st and 8) != 0, atStart: st != 0,
               noEmpty: (st and 2) != 0, crlfElig: (st and 4) != 0,
               eligAll: k.elig, anchored: false, tagNow: regs)
-    proc leafOf(items0: seq[Item[int8]]; pcNext: PrevClass;
-                ok: var bool): Leaf =
-      let items = capCosts(n, normalize(items0, n.costs, n.recLimit))
+    proc leafOf(ws: seq[World]; pcNext: PrevClass; ok: var bool): Leaf =
+      let items = principalOf(ws).items
       var oc = outcome(items)
       let lim = limitHit(n, items)
       if lim != okUndecided: oc = lim
@@ -3654,8 +4382,8 @@ proc stepTable*(n: Nfa): StepTable =
       # `argCap`.
       var ig = 0'i8
       if oc != okUndecided and items.len > 0:
-        ig = nextIgn(oc, items[0], true)
-      if oc == okStale or ig > argCap or (n.costs and ig != 0):
+        ig = int8(nextIgn(oc, items[0], true))
+      if oc == okStale or ig > argCap:
         stale = true
         ok = false
         return Leaf(kind: lfBump)
@@ -3667,22 +4395,39 @@ proc stepTable*(n: Nfa): StepTable =
       of okMatch: Leaf(kind: lfMatch, reg: reg(items[0].tag))
       of okSkip, okStale: Leaf(kind: lfSkip, reg: reg(items[0].tag), ign: ig)
       of okUndecided:
-        let order = tagsOf(items)
+        let order = tagsOf(ws)
         if order.len > maxRegs:
           ok = false
           return Leaf(kind: lfBump)
         var mp: seq[int8]
         for t in order: mp.add reg(t)
-        let k2 = TKey(items: canon(retag(items, order)),
+        var ws2: seq[World]
+        for w in ws:
+          ws2.add World(items: retag(w.items, order), gt: w.gt, gf: w.gf)
+        let k2 = TKey(ws: canonWs(ws2),
                       pc: (if n.needPc: pcNext else: pcOther), elig: k.elig)
         Leaf(kind: lfNext, next: int32 intern(k2), regMap: mp)
+    proc stepped(sc: StepCtx; nextLF, atEnd: bool; c: char; ck: ClosureKey;
+                 cl: seq[Item[int8]]): seq[World] =
+      ## RFC-0016 S8co: the worlds after this position (`cl`: the plain
+      ## attempt's closure, computed by the caller).
+      if guessing:
+        return stepWorlds(n, k.ws, sc, noSave, nextLF, atEnd, c, ck, wcache,
+                          wsWhy)
+      let items = (if atEnd: dropThreads(cl) else: advance(n, cl, c))
+      @[World(items: capCosts(n, normalize(items, n.costs, n.recLimit,
+                                           n.matchLimit, keepsCut(n))))]
     var row: StepRow
     var fine = true
     block:
-      var ctr = 1_000_000'i32
-      let cl = closure(n, resolve(k.items, false), mkCtx(cxEnd, -1, false),
-                       ctr, noSave)
-      row.atEnd = leafOf(dropThreads(cl), pcOther, fine)
+      var cl: seq[Item[int8]]
+      let sc = mkCtx(cxEnd, -1, false)
+      if not guessing:
+        var ctr = 1_000_000'i32
+        cl = closure(n, resolve(k.ws[0].items, false), sc, ctr, noSave)
+      let ws = stepped(sc, false, true, '\0', (cxEnd, -1, false, false), cl)
+      if wsWhy.len > 0: return StepTable(ok: false, why: wsWhy)
+      row.atEnd = leafOf(ws, pcOther, fine)
     row.other = newSeq[Leaf](256)
     row.nll = newSeq[Leaf](256)
     row.nlsU = newSeq[Leaf](256)
@@ -3703,22 +4448,28 @@ proc stepTable*(n: Nfa): StepTable =
         let fin = ctx == cxNll and n.nl == nlCRLF and c == '\r'
         let here = c in nlBytesOf(n) or (lead and ci > 0)
         # The closure depends on the byte only as a newline byte or a CR
-        # (RFC-0005 S8bt: or a possessive exit's test, `costs`).
-        let ck = (ci, (if n.costs or here or c in {'\r', '\n'}: b else: -1))
+        # (RFC-0005 S8bt: or a possessive exit's test, `costs`: RFC-0016
+        # S8co, its class, `possClasses`).
+        let ck = (ci, (if here or c in {'\r', '\n'}: b
+                       elif n.costs and possCls[b] >= 0: 256 + possCls[b]
+                       else: -1))
+        let sc = mkCtx(ctx, b, fin, here)
         var cl: seq[Item[int8]]
-        if ck in cache: cl = cache[ck]
-        else:
-          var ctr = 1_000_000'i32
-          cl = closure(n, resolve(k.items, c == '\n'), mkCtx(ctx, b, fin, here),
-                       ctr, noSave)
-          cache[ck] = cl
-        let lf = leafOf(advance(n, cl, c), nextClass(c, k.pc, ua), fine)
+        if not guessing:
+          if ck in cache: cl = cache[ck]
+          else:
+            var ctr = 1_000_000'i32
+            cl = closure(n, resolve(k.ws[0].items, c == '\n'), sc, ctr, noSave)
+            cache[ck] = cl
+        let ws = stepped(sc, c == '\n', false, c, (ctx, ck[1], fin, here), cl)
+        if wsWhy.len > 0: return StepTable(ok: false, why: wsWhy)
+        let lf = leafOf(ws, nextClass(c, k.pc, ua), fine)
         case ci
         of 0: row.other[b] = lf
         of 1: row.nll[b] = lf
         else: row.nlsU[b] = lf
     if not fine:
-      if stale: return StepTable(ok: false, why: staleWhyOf(n))
+      if stale: return StepTable(ok: false, why: staleWhy)
       return StepTable(ok: false, why: "the pattern's run holds more than " &
                        $maxRegs & " pending positions")
     result.rows.add row
@@ -3755,7 +4506,6 @@ proc limitEffect*(n: Nfa): (LimitEffect, int) =
   ## against LIMIT_RECURSION, so LIMIT_MATCH=0 wins over LIMIT_RECURSION=0.
   let m = n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit
   let r = n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit
-  if n.jitCountUnread: return (leUnknown, 0)
   if countsLimits(n): return (leCounted, 0)
   if n.engine == peJit837:
     # RFC-0005 S8bt: the JIT ignores LIMIT_RECURSION, and counts
@@ -3799,7 +4549,7 @@ proc attemptMade*(n: Nfa; s: string; x: int; firstSet: bool;
   true
 
 proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
-              ne: bool; maxCalls, maxDepth: var int): ((int, int, int), int8) =
+              ne: bool; maxCalls, maxDepth: var int): ((int, int, int), int32) =
   ## `pcreExecIgn`, with the most `match()` calls of an attempt it made and
   ## its deepest frame (`pcreLimits`).
   if start < 0 or start > s.len: return ((pcreErrBadOffset, 0, 0), 0)
@@ -3819,7 +4569,7 @@ proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
   let anchored = anchoredCall or n.anchoredPat
   let filt = (if anchored or n.noStartOpt: fkNone else: n.filter)
   var x = start
-  var ign = 0'i8
+  var ign = 0'i32
   while true:
     if jit and n.jit.on and not anchored:
       # RFC-0005 S8bt: the JIT's prefix scan.
@@ -3846,10 +4596,9 @@ proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
     else:
       next = n.nextChar(s, x, jit)
     # RFC-0005 S8bt: pcre_exec.c's `ignore_skip_arg` for the next attempt
-    # (`nextIgn`). RFC-0005 S8cf: `argCap` bounds the automata; a concrete
-    # call keeps counting, to `execArgCap`.
+    # (`nextIgn`). RFC-0005 S8cf: `argCap` bounds the automata; RFC-0016
+    # S8co: a concrete call keeps PCRE's own count (`execArgCap`).
     ign = r.ign
-    if ign > execArgCap: return ((pcreUnmodelled, 0, 0), 0)
     if anchored or next > s.len: return ((-1, 0, 0), 0)
     x = next
     # RFC-0005 S8bt: the JIT resumes at a SKIP's landing without the CRLF
@@ -3860,7 +4609,7 @@ proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
       inc x
 
 proc pcreExecIgn*(n: Nfa; s: string; start: int; anchoredCall: bool;
-                  ne = false): ((int, int, int), int8) =
+                  ne = false): ((int, int, int), int32) =
   ## RFC-0005 S8bj. The concrete `pcre_exec` (8.45, the interpreter) of the
   ## pattern on `s` from `start`: `(1, first, end)` for a match, `(-1, ..)`
   ## for none, `(code, ..)` for an error. `leUnknown` limits are asserted
@@ -3936,6 +4685,356 @@ type LimitReach* = object
   ## the machine stack (a SIGSEGV: 8.45 is built with stack recursion).
   never*: bool   ## no subject length reaches any of them
   safe*: int     ## otherwise no subject of at most this many bytes does
+  anchored*: bool
+    ## RFC-0016 S8co (item 10): pcre_compile.c's `is_anchored`, one attempt
+  missNever*: bool
+    ## RFC-0016 S8co (item 10): on one attempt of the interpreter, no subject
+    ## length lets a run that ends in a match reach a limit, nor any run the
+    ## machine stack: a limit error there is a miss
+  missSafe*: int     ## otherwise, up to this many bytes
+  missNeverJit*: bool
+    ## the same on 8.37's JIT, whose stack ends in -27, an error: only the
+    ## runs that end in a match are bounded, in calls and in depth
+  missSafeJit*: int
+
+proc missBound*(r: LimitReach; jit: bool): tuple[never: bool; safe: int] =
+  ## RFC-0016 S8co (item 10). The lengths at which one attempt on `jit`'s
+  ## engine stops at a limit only where it misses.
+  if r.never: return (true, high(int))
+  if jit: (r.missNeverJit, max(r.safe, r.missSafeJit))
+  else: (r.missNever, max(r.safe, r.missSafe))
+
+proc growsFrom(edges: seq[seq[tuple[to: int; carry: bool]]]): seq[bool] =
+  ## RFC-0016 S8co (item 10). Per node of a graph of recurrence terms (an
+  ## edge: a term the node's value reads; `carry`: the term adds to it), true
+  ## when the node can grow without bound: its reach holds a strongly
+  ## connected component with a carrying edge inside. Otherwise every chain
+  ## of terms crosses each cycle at no cost, so the value is at most what
+  ## the acyclic part adds. Tarjan's algorithm, iteratively: a component is
+  ## numbered after every component it reaches.
+  let nn = edges.len
+  var index = newSeq[int](nn)
+  var low = newSeq[int](nn)
+  var onStack = newSeq[bool](nn)
+  var comp = newSeq[int](nn)
+  for i in 0 ..< nn: index[i] = -1
+  var stack: seq[int]
+  var counter = 0
+  var comps = 0
+  for root in 0 ..< nn:
+    if index[root] >= 0: continue
+    var call: seq[(int, int)] = @[(root, 0)]
+    index[root] = counter
+    low[root] = counter
+    inc counter
+    stack.add root
+    onStack[root] = true
+    while call.len > 0:
+      let (v, i) = call[^1]
+      if i < edges[v].len:
+        call[^1] = (v, i + 1)
+        let w = edges[v][i].to
+        if index[w] < 0:
+          index[w] = counter
+          low[w] = counter
+          inc counter
+          stack.add w
+          onStack[w] = true
+          call.add (w, 0)
+        elif onStack[w]: low[v] = min(low[v], index[w])
+      else:
+        discard call.pop()
+        if call.len > 0:
+          let u = call[^1][0]
+          low[u] = min(low[u], low[v])
+        if low[v] == index[v]:
+          while true:
+            let w = stack.pop()
+            onStack[w] = false
+            comp[w] = comps
+            if w == v: break
+          inc comps
+  var members = newSeq[seq[int]](comps)
+  for v in 0 ..< nn: members[comp[v]].add v
+  var grows = newSeq[bool](comps)
+  for c in 0 ..< comps:
+    for v in members[c]:
+      for e in edges[v]:
+        if (e.carry and comp[e.to] == c) or grows[comp[e.to]]: grows[c] = true
+  result = newSeq[bool](nn)
+  for v in 0 ..< nn: result[v] = grows[comp[v]]
+
+const missTypeCap = 2048
+  ## RFC-0016 S8co (item 10): the most subject types `missReach` follows
+
+type
+  SubjType = object
+    ## RFC-0016 S8co (item 10). What an attempt's exploration from any state
+    ## needs of the bytes left, X: its first byte (-1: X is empty), whether
+    ## the rest is empty, and the byte states that match X.
+    c0: int
+    restEmpty: bool
+    bm: seq[bool]
+
+proc hash(t: SubjType): Hash = !$(hash(t.c0) !& hash(t.restEmpty) !& hash(t.bm))
+
+proc missReachAt(n: Nfa; r: var LimitReach; atStart: bool) =
+  ## RFC-0016 S8co (item 10). The lengths at which one attempt stops at a
+  ## limit only where it misses. `limitReachAuto`'s rows choose a subject
+  ## per state, so a split's "first branch fails, then the second matches"
+  ## costs the first branch's worst failure even where every subject that
+  ## the second matches lets the first match too (`(a|a)*b|c`, `a*a*b`).
+  ## Here a row is indexed by the type of the bytes left (`SubjType`), which
+  ## decides each state's outcome: without verbs or a `(?m)` assertion an
+  ## exploration matches exactly when some path does, so a split whose first
+  ## branch matches never runs its second. Per row, C is the `match()` calls
+  ## of the exploration and P its deepest frame; the attempt's runs that end
+  ## in a match bound C and P (P of every run on the interpreter, whose stack
+  ## ends in a SIGSEGV), up to the budgets (`missSafe`) or at every length,
+  ## by `growsFrom` over the same terms (`missNever`).
+  r.missSafe = r.safe
+  r.missSafeJit = r.safe
+  if not n.ok or n.nl != nlLF: return
+  for s in n.states:
+    if s.kind == nkVerb or (s.kind in {nkBol, nkEol} and s.multi) or
+       s.crlfDot:
+      return
+  # Byte classes: bytes no set or possessive guard tells apart.
+  var sig: array[256, string]
+  for s in n.states:
+    if s.kind in {nkByte, nkPoss}:
+      for c in 0 .. 255: sig[c].add(if char(c) in s.bytes: '1' else: '0')
+  for c in 0 .. 255: sig[c].add(if c == 10: '1' else: '0')
+  var reps: seq[int]
+  var seenSig = initHashSet[string]()
+  for c in 0 .. 255:
+    if sig[c] notin seenSig:
+      seenSig.incl sig[c]
+      reps.add c
+  var byteIdx = newSeq[int](n.states.len)
+  var byteStates: seq[int32]
+  for i, s in n.states:
+    byteIdx[i] = -1
+    if s.kind == nkByte:
+      byteIdx[i] = byteStates.len
+      byteStates.add int32(i)
+  # The types, from the empty subject's, one byte at a time.
+  var types: seq[SubjType]
+  var typeId = initTable[SubjType, int]()
+  proc outcome(t: SubjType; st: int32; mask: uint64; fresh: bool;
+               memo: var Table[(int32, uint64, bool), bool]): bool =
+    let key = (st, mask, fresh)
+    if key in memo: return memo[key]
+    memo[key] = false
+    let s = n.states[st]
+    var v = false
+    case s.kind
+    of nkMatch: v = true
+    of nkByte: v = t.bm[byteIdx[st]]
+    of nkSplit:
+      v = outcome(t, int32(s.out1), mask, fresh, memo) or
+          outcome(t, int32(s.out2), mask, fresh, memo)
+    of nkBol: v = fresh and atStart and outcome(t, int32(s.out1), mask, fresh, memo)
+    of nkEol:
+      v = (t.c0 < 0 or (t.c0 == 10 and t.restEmpty)) and
+          outcome(t, int32(s.out1), mask, fresh, memo)
+    of nkEolAbs: v = t.c0 < 0 and outcome(t, int32(s.out1), mask, fresh, memo)
+    of nkPoss:
+      v = (t.c0 < 0 or char(t.c0) notin s.bytes) and
+          outcome(t, int32(s.out1), mask, fresh, memo)
+    of nkEnter:
+      v = outcome(t, int32(s.out1), mask or (1'u64 shl s.loop), fresh, memo)
+    of nkBack:
+      let o = (if (mask and (1'u64 shl s.loop)) != 0: s.out2 else: s.out1)
+      v = outcome(t, int32(o), mask, fresh, memo)
+    of nkSave, nkAlt, nkCost: v = outcome(t, int32(s.out1), mask, fresh, memo)
+    of nkVerb: v = false
+    memo[key] = v
+    v
+  var outMemo: seq[Table[(int32, uint64, bool), bool]]
+  proc intern(t: SubjType): int =
+    if t in typeId: return typeId[t]
+    typeId[t] = types.len
+    types.add t
+    outMemo.add initTable[(int32, uint64, bool), bool]()
+    types.high
+  proc outc(ti: int; st: int32; mask: uint64; fresh: bool): bool =
+    outcome(types[ti], st, mask, fresh, outMemo[ti])
+  discard intern(SubjType(c0: -1, restEmpty: true,
+                          bm: newSeq[bool](byteStates.len)))
+  var succ: seq[seq[int]]   # per type, per class rep: the type of c & X
+  var i = 0
+  while i < types.len:
+    if types.len > missTypeCap: return
+    var row: seq[int]
+    for c in reps:
+      var bm = newSeq[bool](byteStates.len)
+      for j, b in byteStates:
+        bm[j] = char(c) in n.states[b].bytes and
+                outc(i, int32(n.states[b].out1), 0'u64, false)
+      row.add intern(SubjType(c0: c, restEmpty: types[i].c0 < 0, bm: bm))
+    succ.add row
+    inc i
+  var preds = newSeq[seq[int]](types.len)
+  for t, row in succ:
+    for u in row:
+      if t notin preds[u]: preds[u].add t
+  var entry = initHashSet[int32]()
+  for st in n.states:
+    if st.kind == nkByte: entry.incl int32(st.out1)
+  # The rows: C and P of each (state, type) the bytes left can have.
+  type V = tuple[c, p: int64]
+  let cap = reachCallBudget * 4
+  var live = @[0]
+  var prev = initTable[(int32, int), V]()
+  var missOver, jitOver = -1
+  for k in 0 .. reachLenCap:
+    if k > 0:
+      var nxt: seq[int]
+      for t in live:
+        for u in succ[t]:
+          if u notin nxt: nxt.add u
+      live = nxt
+    var liveSet = initHashSet[int]()
+    for t in live: liveSet.incl t
+    var memo = initTable[(int32, uint64, bool, int), V]()
+    proc go(st: int32; mask: uint64; fresh: bool; t: int): V =
+      let key = (st, mask, fresh, t)
+      if key in memo: return memo[key]
+      let s = n.states[st]
+      let ty = types[t]
+      var v: V = (0'i64, 0'i64)
+      case s.kind
+      of nkMatch: discard
+      of nkByte:
+        if ty.c0 >= 0 and char(ty.c0) in s.bytes:
+          for u in preds[t]:
+            let key2 = (int32(s.out1), u)
+            if key2 in prev:
+              let w = prev[key2]
+              v = (max(v.c, w.c), max(v.p, w.p))
+      of nkSplit:
+        let a = go(int32(s.out1), mask, fresh, t)
+        if outc(t, int32(s.out1), mask, fresh): v = a
+        else:
+          let b = go(int32(s.out2), mask, fresh, t)
+          v = (min(a.c + b.c, cap), max(a.p, b.p))
+      of nkCost:
+        let a = go(int32(s.out1), mask, fresh, t)
+        v = (min(a.c + 1, cap), min(a.p + (if s.deep: 1'i64 else: 0'i64), cap))
+      of nkBol:
+        if fresh and atStart: v = go(int32(s.out1), mask, fresh, t)
+      of nkEol:
+        if ty.c0 < 0 or (ty.c0 == 10 and ty.restEmpty):
+          v = go(int32(s.out1), mask, fresh, t)
+      of nkEolAbs:
+        if ty.c0 < 0: v = go(int32(s.out1), mask, fresh, t)
+      of nkPoss:
+        if ty.c0 < 0 or char(ty.c0) notin s.bytes:
+          v = go(int32(s.out1), mask, fresh, t)
+      of nkEnter:
+        v = go(int32(s.out1), mask or (1'u64 shl s.loop), fresh, t)
+      of nkBack:
+        let o = (if (mask and (1'u64 shl s.loop)) != 0: s.out2 else: s.out1)
+        v = go(int32(o), mask, fresh, t)
+      of nkSave, nkAlt: v = go(int32(s.out1), mask, fresh, t)
+      of nkVerb: discard
+      memo[key] = v
+      v
+    var cur = initTable[(int32, int), V]()
+    var sMax, psMax, pMax = 0'i64
+    for t in live:
+      for e in entry: cur[(e, t)] = go(e, 0'u64, false, t)
+      let v = go(int32(n.start), 0'u64, true, t)
+      pMax = max(pMax, v.p)
+      if outc(t, int32(n.start), 0'u64, true):
+        sMax = max(sMax, v.c)
+        psMax = max(psMax, v.p)
+    if missOver < 0 and (sMax > reachCallBudget or pMax > reachDepthBudget):
+      missOver = k
+    if jitOver < 0 and (sMax > reachCallBudget or psMax > reachDepthBudget):
+      jitOver = k
+    if missOver >= 0 and jitOver >= 0: break
+    prev = cur
+  proc bound(over: int): int =
+    (if over >= 0: max(over - 1, 0) else: reachLenCap)
+  r.missSafe = max(r.safe, bound(missOver))
+  r.missSafeJit = max(r.safe, bound(jitOver))
+  if missOver >= 0 and jitOver >= 0: return
+  # Every length: the same terms as a graph, over every type.
+  var ids = initTable[(int32, uint64, bool, int), int]()
+  var keys: seq[(int32, uint64, bool, int)]
+  var edges: seq[seq[tuple[to: int; carry: bool]]]
+  proc idOf(st: int32; mask: uint64; fresh: bool; t: int): int =
+    let k = (st, mask, fresh, t)
+    if k notin ids:
+      ids[k] = keys.len
+      keys.add k
+      edges.add @[]
+      edges.add @[]
+    ids[k]
+  for t in 0 ..< types.len: discard idOf(int32(n.start), 0'u64, true, t)
+  var id = 0
+  while id < keys.len:
+    let (st, mask, fresh, t) = keys[id]
+    let s = n.states[st]
+    let ty = types[t]
+    let me = id
+    proc link(to: int; carryC, carryP: bool) =
+      edges[2 * me].add (2 * to, carryC)
+      edges[2 * me + 1].add (2 * to + 1, carryP)
+    case s.kind
+    of nkMatch, nkVerb: discard
+    of nkByte:
+      if ty.c0 >= 0 and char(ty.c0) in s.bytes:
+        for u in preds[t]: link(idOf(int32(s.out1), 0'u64, false, u), false, false)
+    of nkSplit:
+      let a = idOf(int32(s.out1), mask, fresh, t)
+      if outc(t, int32(s.out1), mask, fresh): link(a, false, false)
+      else:
+        link(a, true, false)
+        link(idOf(int32(s.out2), mask, fresh, t), true, false)
+    of nkCost: link(idOf(int32(s.out1), mask, fresh, t), true, s.deep)
+    of nkBol:
+      if fresh and atStart: link(idOf(int32(s.out1), mask, fresh, t), false, false)
+    of nkEol:
+      if ty.c0 < 0 or (ty.c0 == 10 and ty.restEmpty):
+        link(idOf(int32(s.out1), mask, fresh, t), false, false)
+    of nkEolAbs:
+      if ty.c0 < 0: link(idOf(int32(s.out1), mask, fresh, t), false, false)
+    of nkPoss:
+      if ty.c0 < 0 or char(ty.c0) notin s.bytes:
+        link(idOf(int32(s.out1), mask, fresh, t), false, false)
+    of nkEnter:
+      link(idOf(int32(s.out1), mask or (1'u64 shl s.loop), fresh, t),
+           false, false)
+    of nkBack:
+      let o = (if (mask and (1'u64 shl s.loop)) != 0: s.out2 else: s.out1)
+      link(idOf(int32(o), mask, fresh, t), false, false)
+    of nkSave, nkAlt: link(idOf(int32(s.out1), mask, fresh, t), false, false)
+    inc id
+  let g = growsFrom(edges)
+  var sGrows, psGrows, pGrows = false
+  for t in 0 ..< types.len:
+    let v = ids[(int32(n.start), 0'u64, true, t)]
+    if g[2 * v + 1]: pGrows = true
+    if outc(t, int32(n.start), 0'u64, true):
+      if g[2 * v]: sGrows = true
+      if g[2 * v + 1]: psGrows = true
+  r.missNever = missOver < 0 and not sGrows and not pGrows
+  r.missNeverJit = jitOver < 0 and not sGrows and not psGrows
+
+proc missReach(n: Nfa; r: var LimitReach) =
+  ## `missReachAt` for an attempt at the subject's start (`^` holds where no
+  ## byte is read yet) and at any other offset (`^` never holds): a call's
+  ## start need not be a literal.
+  var a, b = r
+  missReachAt(n, a, true)
+  missReachAt(n, b, false)
+  r.missSafe = min(a.missSafe, b.missSafe)
+  r.missSafeJit = min(a.missSafeJit, b.missSafeJit)
+  r.missNever = a.missNever and b.missNever
+  r.missNeverJit = a.missNeverJit and b.missNeverJit
 
 proc limitReachAuto(n: Nfa): LimitReach =
   ## The bound on one attempt, row by row of the bytes left. F and S are the
@@ -3945,6 +5044,8 @@ proc limitReachAuto(n: Nfa): LimitReach =
   ## a match runs, so a repeat whose every exit matches (`a*`, `[ab]+`)
   ## costs the same at every length. Subjects are chosen per state, so this
   ## is an upper bound: pcre_exec.c resets the count per attempt.
+  ## RFC-0016 S8co (item 10): `missReach` adds the lengths at which one
+  ## attempt stops at a limit only where it misses.
   type V = tuple[f, s, d: int64]
   let cap = reachCallBudget * 4
   proc addSat(a, b: int64): int64 = min(a + b, cap)
@@ -3952,6 +5053,7 @@ proc limitReachAuto(n: Nfa): LimitReach =
   entry.incl int32(n.start)
   for st in n.states:
     if st.kind == nkByte: entry.incl int32(st.out1)
+  result.anchored = n.anchoredPat
   var prev, cur: Table[int32, V]
   for k in 0 .. reachLenCap:
     var memo = initTable[(int32, uint64), V]()
@@ -3990,10 +5092,15 @@ proc limitReachAuto(n: Nfa): LimitReach =
     for e in entry: cur[e] = go(e, 0'u64)
     let v = cur[int32(n.start)]
     if max(v.f, v.s) > reachCallBudget or v.d > reachDepthBudget:
-      return LimitReach(safe: max(k - 1, 0))
-    if k > 0 and cur == prev: return LimitReach(never: true)
+      result.safe = max(k - 1, 0)
+      missReach(n, result)
+      return
+    if k > 0 and cur == prev:
+      result.never = true
+      return
     prev = cur
-  LimitReach(safe: reachLenCap)
+  result.safe = reachLenCap
+  missReach(n, result)
 
 proc limitReach*(pr: PcreParse): LimitReach =
   ## RFC-0005 S8cf. The bound on the interpreter's own limits.
@@ -4076,54 +5183,103 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
   ##     COMMIT or a SKIP past its start, or at a limit below PCRE's default
   ##     (`searchMoves`; each keeps the rest, and PRUNE and THEN do not move
   ##     the search); a continuation byte is not sure in UTF mode and the fact
-  ##     holds of a valid subject (`utf`). A SKIP:NAME without a MARK keeps a
-  ##     count across attempts, whose runs differ: not computed. An LF is not
-  ##     sure where the bumpalong's CRLF skip can pass over it (`skipActive`).
+  ##     holds of a valid subject (`utf`). An LF is not sure where the
+  ##     bumpalong's CRLF skip can pass over it (`skipActive`).
   ##   * A byte is outside `first` when no attempt at a position holding
   ##     it matches, whatever follows: for every class of what precedes the
   ##     start, the no-match verifier (`buildVerifier`, the attempt as the
   ##     search runs it) accepts every well-formed continuation after it.
-  ##     Not computed in UTF mode or with a SKIP:NAME that has no MARK (its
-  ##     attempt is re-run differently).
+  ##     RFC-0016 S8co (PRC-33 item 9): in UTF mode a match starts at a
+  ##     character boundary of a valid subject (an invalid one is an error,
+  ##     no match), so the byte is read from the validator's boundary state
+  ##     and the verifier after it from the state it leaves; a byte no
+  ##     character starts with is not `first`. The JIT's prefix scan
+  ##     (`pcre_jit.jitScan`) counts bytes, so it can stop, or give up, at a
+  ##     continuation byte (inside a multi-byte newline under `(*ANY)`,
+  ##     `jitScanObservable`), and an attempt is made there; it never
+  ##     matches. The scan is on only where its first position reads the
+  ##     pattern's first character as a literal (OP_CHAR's UTF-8 bytes,
+  ##     compared as bytes, or a caseless one whose other case differs in
+  ##     more than one bit, read as a character that is never a lone
+  ##     continuation byte's 0x80 .. 0xBF) or an ASCII set or a non-negated
+  ##     type (ASCII-only tables): every non-ASCII set, negated type,
+  ##     property, `.` and an other case of another length ends the scan,
+  ##     so no first character the scan admits starts with a continuation
+  ##     byte. 37700 calls (18880 match starts, after U+0085, U+2028 and
+  ##     U+2029 among them) on the 8.37 JIT agree, and none starts at one.
+  ##   * RFC-0016 S8co (PRC-33 item 9): a SKIP:NAME some path reaches without
+  ##     its MARK (`hasNeverSkip`, the interpreter) re-runs the attempt at its
+  ##     start with `ignore_skip_arg` set, a count an attempt can leave for
+  ##     the next one: both facts range over every count an attempt starts
+  ##     with (`attemptIgns`; none when an attempt is past the caps) and over
+  ##     a start at a CRLF's LF (`first`; such a start is an LF, never
+  ##     `sure`), and `sure` reads the attempt as the search runs it (an
+  ##     anchored call fails at such a SKIP instead). With a COMMIT, a SKIP
+  ##     or a limit as well, `sure` is not computed. An uncounted one is
+  ##     resolved where it stands (`normalize`), so an unanchored attempt's
+  ##     agenda stays bounded.
   let (lo, hi) = lenRange(root)
   result.mn = (if hasAcceptRx(root): 0 else: lo)
   result.mx = hi
   result.first = {'\x00' .. '\xFF'}
-  if n.ok and not n.utf and not n.hasNeverSkip:
+  var ignsOk = true
+  let igs = (if n.ok: attemptIgns(n, ignsOk) else: @[0'i8])
+  let eligs = (if n.hasNeverSkip: @[false, true] else: @[false])
+  if n.ok and ignsOk:
     var first: set[char]
     var fine = true
-    for pc in startClasses(n):
-      var why: string
-      var igns: set[int8]
-      let v = buildVerifier(n, exNoMatch, pc, false, 0, 0, fine, why, igns)
-      if not fine: break
-      for sym in 0 ..< symMark:
-        let nls = nlStepFor(n.nl, 0'i8, sym)
-        if nls < 0: continue
-        let t = (if v.trans.len == 0: -1'i32 else: v.trans[0][sym])
-        if t < 0 or univIdx(nls, 0) notin v.univ[t]:
-          first.incl symByte(sym)
+    block scan:
+      for pc in startClasses(n):
+        for el in eligs:
+          for ig in igs:
+            var why: string
+            var igns: set[int8]
+            let v = buildVerifier(n, exNoMatch, pc, el, ig, 0, fine, why,
+                                  igns)
+            if not fine: break scan
+            for sym in 0 ..< symMark:
+              let nls = nlStepFor(n.nl, 0'i8, sym, uAny(n))
+              if nls < 0: continue
+              let u = (if n.utf: utfStep(0'i8, symByte(sym)) else: 0'i8)
+              if u < 0: continue
+              let t = (if v.trans.len == 0: -1'i32 else: v.trans[0][sym])
+              if t < 0 or univIdx(nls, u) notin v.univ[t]:
+                first.incl symByte(sym)
     if fine: result.first = first
   result.utf = n.utf
-  if not n.ok or n.hasNeverSkip or searchMoves(n): return
+  if not n.ok or not ignsOk or searchMoves(n): return
+  if n.hasNeverSkip and (n.hasCommit or n.hasSkip or
+                         limitEffect(n)[0] != leNone):
+    return
   var sure: set[char] = {'\x00' .. '\xFF'}
   var alive: array[256, set[char]]
   for pc in startClasses(n):
     for ne in [false, true]:
-      let d = buildAttempt(n, AttemptSpec(acc: acNone, anchored: true,
-                                          noEmpty: ne, pc0: pc))
-      if not d.ok: return
-      let (trans, _, mapped) = minimizeMap(d)
-      let st = mapped[0]
-      if st < 0: continue          # no subject fails the attempt
-      for sym in 0 ..< symMark:
-        let t = trans[st][sym]
-        if t < 0: continue
-        sure.excl symByte(sym)
-        # RFC-0005 S8cf: `sure`'s reading one byte further.
-        for sym2 in 0 ..< symMark:
-          if trans[t][sym2] >= 0:
-            alive[ord(symByte(sym))].incl symByte(sym2)
+      for ig in igs:
+        if ne and ig != 0: continue
+        # The attempt as the search runs it: an anchored call fails at a
+        # SKIP:NAME without its MARK, the search re-runs the attempt. One at
+        # a CRLF's LF (`crlfElig`) starts at an LF, which is not sure.
+        let spec = (if n.hasNeverSkip:
+                      AttemptSpec(acc: acNone, anchored: n.anchoredPat,
+                                  noEmpty: ne, pc0: pc, ign0: ig,
+                                  tracksIgn: n.countArgs)
+                    else:
+                      AttemptSpec(acc: acNone, anchored: true, noEmpty: ne,
+                                  pc0: pc))
+        let d = buildAttempt(n, spec)
+        if not d.ok: return
+        let (trans, _, mapped) = minimizeMap(d)
+        let st = mapped[0]
+        if st < 0: continue          # no subject fails the attempt
+        for sym in 0 ..< symMark:
+          let t = trans[st][sym]
+          if t < 0: continue
+          sure.excl symByte(sym)
+          # RFC-0005 S8cf: `sure`'s reading one byte further.
+          for sym2 in 0 ..< symMark:
+            if trans[t][sym2] >= 0:
+              alive[ord(symByte(sym))].incl symByte(sym2)
   if n.skipActive: sure.excl '\n'
   if n.utf: sure = sure - {'\x80' .. '\xBF'}
   result.sure = sure
@@ -4139,6 +5295,19 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
         result.pairs.add (x, y)
     if result.pairs.len > maxPairs: result.pairs = @[]
 
+const anchoredEntries = ["match", "matchLen", "startsWith", "endsWith"]
+  ## std/re's calls that pass PCRE_ANCHORED: the interpreter runs them
+
+proc walkerSpec*(sp: RegexSpec): PcreParse =
+  ## `pcre_syntax.parseSpec`, and, for a call std/re's library runs on 8.37's
+  ## JIT, its fold declines (`jitFoldDecline`), with or without a limit.
+  result = parseSpec(sp)
+  if result.status == psOk and pcreSearchEngine() == peJit837 and
+     sp.entry notin anchoredEntries:
+    let why = jitFoldDecline(result.root,
+                             autoPossess(compileCode(result), result.utf))
+    if why.len > 0:
+      return PcreParse(status: psUnmodelled, reason: why)
 # RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
 # default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
 # a thread that exits leaks none of it. A threadvar added to this module

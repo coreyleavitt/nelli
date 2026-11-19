@@ -90,7 +90,7 @@ suite "S8bt: (*ANY) in UTF mode":
   when s8btAnyPart in 1 .. 2:
     test "the attempt's and the search's languages, every variant":
       var bad: seq[string]
-      var runs, declined = 0
+      var runs, jitScan = 0
       for p in anyPats:
         if anyPats.find(p) mod 2 != s8btAnyPart - 1: continue
         let n = buildNfa(parsePcre(p), pcreSearchEngine())
@@ -103,15 +103,19 @@ suite "S8bt: (*ANY) in UTF mode":
           let none = selectionLangV(na, key & "|a", lkNone, pc)
           let noOcc = searchLangV(n, key, skNoOcc, pc)
           let first = searchLangV(n, key, skFirst, pc)
-          # Under the JIT's prefix scan the search's languages decline (an
-          # attempt can start inside a multi-byte newline); the concrete
-          # reading is checked in part 0.
-          let jitDecl = n.engine == peJit837 and jitScanObservable(n)
-          if jitDecl:
-            inc declined
-            for l in [noOcc, first]:
-              check not l.ok and "multi-byte newline" in l.why
-          for l in (if jitDecl: @[mark, none] else: @[mark, none, noOcc, first]):
+          # Under the JIT's prefix scan an attempt can start inside a
+          # multi-byte newline. RFC-0016 S8co (PRC-33 item 7) gives that
+          # attempt a verifier from the search's progress through the
+          # newline, so the search's languages build here too and are held
+          # to the same exactness as everywhere else (below). On the 8.37 JIT
+          # image `(*ANY)(*UTF)\xC3\xA9$` and `(*UTF)(*ANY)(?m)^\x{85}`
+          # agree with the native library on every subject of up to five
+          # bytes over {LF CR VT FF 85 C2 E2 80 A8 A9 C3 a} and of up to four
+          # characters over {LF CR VT FF U+0085 U+2028 U+2029 U+00E9 a b, a
+          # raw 85}, after twelve start prefixes, invalid UTF-8 included
+          # (with the CR fix below).
+          if n.engine == peJit837 and jitScanObservable(n): inc jitScan
+          for l in [mark, none, noOcc, first]:
             check l.ok
             if not l.ok: bad.add escape(p) & " " & $pc & ": " & l.why
           if not (mark.ok and none.ok and noOcc.ok and first.ok): continue
@@ -134,8 +138,43 @@ suite "S8bt: (*ANY) in UTF mode":
               if member(first.re, mw) != (q == j):
                 bad.add "skFirst " & w & " " & $j
             if bad.len > 20: break
-      echo "  ", runs, " runs, ", declined, " searches declined (JIT), ",
+      echo "  ", runs, " runs, ", jitScan, " searches under the JIT's scan, ",
            bad.len, " differ, ", lap()
+      checkpoint bad.join("\n")
+      check bad.len == 0
+
+  when s8btAnyPart == 1:
+    test "a CR before a non-final multi-byte newline is no final CRLF":
+      # RFC-0016 S8co: after the CR of a final CRLF (`symR2`) the newline
+      # state took a non-final U+0085 / U+2028 lead, so `\r\xC2\x85\n` read
+      # as a final CRLF and `$` held before it: the marked languages
+      # (`lkMark`, `skFirst`) admitted a match at the CR on both engines
+      # where PCRE has none (630 marked words after an empty prefix alone,
+      # over subjects of up to five bytes or five characters, on the 8.37
+      # JIT image). `lkNone` and `skNoOcc` were right.
+      var bad: seq[string]
+      for p in ["(*ANY)(*UTF)\xC3\xA9$", "(*UTF)(*ANY)$",
+                "(*UTF)(*ANY)\xC3\xA9\\Z"]:
+        let n = buildNfa(parsePcre(p), pcreSearchEngine())
+        let na = buildNfa(parsePcre(p))
+        check n.ok and na.ok
+        let key = "uanycr:" & p
+        let mark = selectionLangV(na, key & "|a", lkMark, pcStart)
+        let first = searchLangV(n, key, skFirst, pcStart)
+        check mark.ok and first.ok
+        if not (mark.ok and first.ok): continue
+        let rx = re(p)
+        for s in ["\xC3\xA9\r\xC2\x85\n", "\xC3\xA9\r\xC2\x85\r",
+                  "\xC3\xA9\r\xE2\x80\xA8\n", "\xC3\xA9\r\xE2\x80\xA9\x0B",
+                  "\xC3\xA9\r\n", "a\r\xC2\x85\n"]:
+          let ml = s.matchLen(rx)
+          let q = s.find(rx)
+          for j in 0 .. s.len:
+            let mw = toSyms(s[0 ..< j]) & @[markSym] & toSyms(s[j .. ^1])
+            if member(mark.re, mw) != (ml == j):
+              bad.add "lkMark " & escape(p) & " " & escape(s) & " " & $j
+            if member(first.re, mw) != (q == j):
+              bad.add "skFirst " & escape(p) & " " & escape(s) & " " & $j
       checkpoint bad.join("\n")
       check bad.len == 0
 

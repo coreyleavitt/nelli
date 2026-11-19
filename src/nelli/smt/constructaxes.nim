@@ -129,6 +129,12 @@ func constructRows(): seq[ConstructKey] =
      "notin/slice/int", "notin/slice/int/unsat"],
     "`x in a..b` and `x notin a..b` over int, uint8, char and enum bounds, " &
     "closed and half-open, literal and variable")
+  result.add decided(
+    ["regex/skipName/limitMatch", "regex/skipName/limitRecursion"],
+    "a `std/re` call on a literal or pinned subject whose pattern has a " &
+    "`(*SKIP:NAME)` some path runs without its MARK, under " &
+    "`(*LIMIT_MATCH=n)` or `(*LIMIT_RECURSION=n)`: the re-run's calls and " &
+    "depths are pcre_exec.c's (SND-16, PRC-33 item 4)")
   result.add declines(some(eeUnknownExnType),
     ["panic-raise-unknown", "raise-ref-exception", "raise-value-subtype"],
     "a raise whose exception type is not statically known (a `ref " &

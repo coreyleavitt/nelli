@@ -12647,6 +12647,66 @@ proc pointLit(st: RegexPointSite; p: RegexPoint): Z3AnyAst =
     toAnyAst(mkBool(p.b))
   else: toAnyAst(mkInt(p.i))
 
+proc foldPinnedPoints(ctx: Z3Context; roots: seq[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0016 S8co (PRC-33). `roots` with every regex call whose operands
+  ## the roots pin to literals (`subject == "..."` at the top or under an
+  ## `and`; a numeral start; a literal `by`) replaced by its value at that
+  ## point (`pointValue`, the automaton the formulas are verified against),
+  ## its definitions dropped. A scratch solve (`concreteScratchCheck`) that
+  ## kept the exact term searched Z3's membership of a marked split of a
+  ## concrete subject: on the 8.37 JIT languages of `tsymex_0016_s8co_skipcount`
+  ## 2 s at 8 bytes, 16 s at 18, undecided within its bound past that, so
+  ## the walk did not end within 900 s (the interpreter declines those
+  ## languages, so the call was a fresh value there and the solve trivial).
+  ## `pointCheck`'s `pinned` block does the same for the walker's queries.
+  if regexPointSites.len == 0: return roots
+  ensureByteDomainKinds()
+  let bk = byteDomainKinds
+  var lits = initTable[int, RawZ3Ast]()
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    let dk = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if dk == bk.andK:
+      for a in args: stack.add a
+    elif dk == bk.eq and args.len == 2:
+      if Z3_is_string(ctx.raw, args[1].raw):
+        lits[astId(ctx, args[0].raw)] = args[1].raw
+      elif Z3_is_string(ctx.raw, args[0].raw):
+        lits[astId(ctx, args[1].raw)] = args[0].raw
+  if lits.len == 0: return roots
+  var ff, tt: seq[RawZ3Ast]
+  var folded, dropped: HashSet[int]
+  for st in regexPointSites:
+    let xid = astId(ctx, st.exact.raw)
+    if xid in folded: continue
+    let id = astId(ctx, st.subject.raw)
+    if id notin lits: continue
+    let lit = literalStringBytes(wrap[Z3String](ctx, lits[id]))
+    let startS = simplify(st.start)
+    if not lit.ok or not isNumeralAst(ctx, startS.raw): continue
+    var by = ""
+    if st.sp.entry == "replace":
+      let b = literalStringBytes(st.by)
+      if not b.ok: continue
+      by = b.s
+    let p = pointValue(st, lit.s, by,
+                       int(parseBiggestInt(getNumeralString(startS))))
+    if not p.ok: continue
+    folded.incl xid
+    ff.add st.exact.raw
+    tt.add pointLit(st, p).raw
+    for d in st.defs: dropped.incl d
+  if ff.len == 0: return roots
+  for r in roots:
+    if astId(ctx, r.raw) in dropped: continue
+    result.add wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw,
+      cuint(ff.len), cast[ptr UncheckedArray[RawZ3Ast]](ff[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](tt[0].addr)))
+
 proc pointEq(st: RegexPointSite; v: Z3AnyAst; p: RegexPoint): Z3Bool =
   ## RFC-0005 S8cf. `v` is the value `p`.
   wrap[Z3Bool](v.ctx, checkedEq(v.ctx, v.raw, pointLit(st, p).raw))
@@ -17291,7 +17351,9 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   ## bound undecided sets `scratchCapped`, so its branch is not asked again.
   let rlimit = workLeftRLimit(concreteBranchRLimit(settings))
   let before = ownContextUnits
-  result = ownContextCheck(ownContextSolver(ctx, roots, rlimit))
+  # RFC-0016 S8co: a call on a pinned subject is its value here.
+  result = ownContextCheck(ownContextSolver(ctx, foldPinnedPoints(ctx, @roots),
+                                            rlimit))
   if result == zsUnknown and uint(max(ownContextUnits - before, 0)) >= rlimit:
     scratchCapped = true
 

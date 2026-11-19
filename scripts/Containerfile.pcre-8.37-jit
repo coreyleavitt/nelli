@@ -1,0 +1,48 @@
+# The PCRE oracle row: the dev image with std/re's libpcre swapped for PCRE 8.37
+# built WITH the JIT, the engine the Windows legs run (Nim's pcre64.dll reports
+# "8.37 2015-04-28" and PCRE_CONFIG_JIT=1; pcre_engine.nim's `pcreLibs` row
+# "8.37 2015-04-28|jit", read with the `peJit837` model). Everything else (Nim,
+# Z3, the mingw cross toolchain) is inherited unchanged, so the libpcre is the
+# ONLY difference between this row and the default image (8.45, interpreter).
+#
+# A walker test run here reads every unanchored regex call with the 8.37 JIT
+# model and checks it against that JIT (`std/re` studies with
+# PCRE_STUDY_JIT_COMPILE whenever the library reports the JIT), so it is the
+# local, native oracle for the JIT's scan, match limit and auto-possession.
+#
+# Configure options are the default image's (UTF, Unicode properties, no C++,
+# no static) plus --enable-jit; every other pcre_config value (newline LF,
+# link size 2, match limits 10000000, stack recursion) is the library default,
+# as on the Windows DLL.
+#
+# Build:  scripts/build-dev-image.sh pcre-8.37-jit  ->  localhost/nelli-dev:pcre-8.37-jit
+#         (BASE_IMAGE defaults to localhost/nelli-dev:latest; the version and
+#         tarball sha256 come from scripts/nim-toolchain.pin, PCRE_837_*)
+# Use:    scripts/dt-bounded.sh -i pcre-8.37-jit c tests/foo.nim
+# Check:  scripts/check-toolchain-parity.sh --image pcre-8.37-jit
+ARG BASE_IMAGE=localhost/nelli-dev:latest
+FROM ${BASE_IMAGE}
+ARG PCRE_VERSION=8.37
+ARG PCRE_SHA256=19d490a714274a8c4c9d131f651489b8647cdb40a159e9fb7ce17ba99ef992ab
+# The base's 8.45 is removed first so exactly one libpcre is resolvable: Nim's
+# wrapper dlopens libpcre.so(.3|.1|) and must not find 8.45.
+RUN set -eu; \
+    curl -fsSL --retry 5 -o /tmp/pcre.tar.gz \
+      "https://sourceforge.net/projects/pcre/files/pcre/${PCRE_VERSION}/pcre-${PCRE_VERSION}.tar.gz/download"; \
+    echo "${PCRE_SHA256}  /tmp/pcre.tar.gz" | sha256sum -c -; \
+    tar --no-same-owner -C /tmp -xzf /tmp/pcre.tar.gz; \
+    rm -f /usr/local/lib64/libpcre* /usr/local/include/pcre*.h; \
+    cd /tmp/pcre-${PCRE_VERSION}; \
+    ./configure --prefix=/usr/local --libdir=/usr/local/lib64 \
+      --disable-static --disable-cpp --enable-utf --enable-unicode-properties \
+      --enable-jit; \
+    make -j"$(nproc)"; make install; ldconfig; \
+    ldconfig -p | grep -q 'libpcre\.so\.1 '; \
+    got="$(python3 -I -c 'import ctypes; l = ctypes.CDLL("libpcre.so.1"); l.pcre_version.restype = ctypes.c_char_p; v = ctypes.c_int(0); l.pcre_config(9, ctypes.byref(v)); print(l.pcre_version().decode(), v.value)')"; \
+    case "$got" in "${PCRE_VERSION} "*" 1") ;; *) echo "libpcre.so.1 reports '$got', want ${PCRE_VERSION} with the JIT" >&2; exit 1 ;; esac; \
+    sed -i '/^pcre_/d' /etc/nelli-toolchain; \
+    { echo "pcre_version=$PCRE_VERSION"; echo "pcre_sha256=$PCRE_SHA256"; echo "pcre_jit=1"; } >> /etc/nelli-toolchain; \
+    cd /; rm -rf /tmp/pcre.tar.gz /tmp/pcre-${PCRE_VERSION}
+LABEL dev.leavitt.nelli.pcre-version="${PCRE_VERSION}" \
+      dev.leavitt.nelli.pcre-sha256="${PCRE_SHA256}" \
+      dev.leavitt.nelli.pcre-jit="1"

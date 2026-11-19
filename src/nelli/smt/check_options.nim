@@ -696,13 +696,16 @@ proc bodyAstOf(file: string): NimNode =
   bodyAsts[file]
 
 const loopIncExemptions* = [
-  (file: "system/iterators.nim", name: "unCheckedInc")]
+  (file: "system/iterators.nim", name: "unCheckedInc"),
+  (file: "pure/collections/sequtils.nim", name: "unCheckedInc")]
   ## RFC-0016 int6-t. The push regions the opaque defect scan reads through
   ## (`bodyCheckPragma`): a template of the toolchain's `lib/` file,
   ## whose body is exactly `{.push overflowChecks: off.}` `inc(x)` `{.pop.}`,
   ## as expanded inside a routine of that same file. Each entry is audited, use
   ## site by use site, in `tests/0016-allowlist/pushexempt.txt`, which must
-  ## list exactly these (`tsymex_0016_int6t_typedpush`).
+  ## list exactly these (`tsymex_0016_int6t_typedpush`). RFC-0016 int6-u:
+  ## `sequtils`' own copy, inside that module's routines (its exported
+  ## templates expand it into the caller's routine, which stays unreadable).
 
 proc isLoopIncTemplate(t: NimNode; name: string): bool =
   ## The parsed `template <name>(x) = {.push overflowChecks: off.}; inc(x);

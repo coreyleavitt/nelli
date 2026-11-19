@@ -143,6 +143,15 @@ where that note does not yet cover it.
   where natively it keeps 300. The host is now found in the typed body too
   (any enclosing routine whose typed body holds a check pragma), and a host
   whose typed body cannot be read declines.
+- **`sequtils`' own loop-counter step, under the opaque scan** (int6-u;
+  walker 482). `sequtils`' `unCheckedInc`, inside that module's own
+  routines (`concat`, `cycle`, `distribute`, `keepIf`, both `delete`s,
+  `insert`), joins the audited allowlist: every such step is held below
+  `high(int)` by an earlier comparison or a checked operation, so an opaque
+  callee reaching them has its verdict from before int6-t again. Not on it:
+  `count` (it steps `result`, which the region's shape does not admit) and
+  the exported templates `findIt`, `keepItIf` and `toSeq`, which expand the
+  step into the caller's own routine; a callee using them stays unreadable.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

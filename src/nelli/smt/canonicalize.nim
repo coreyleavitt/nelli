@@ -1517,8 +1517,13 @@ const renderAsChoicesVersion* = "12"
   ##   placed under that push and declines, as one inside a body whose text
   ##   pushes did (int6-a5); a template's or a macro's push around it was
   ##   missed and the routine walked under its host's checks. A host whose
-  ##   typed body cannot be read declines too. Verdicts move (a trusted
-  ##   verdict through such a routine now declines). No key bytes change.
+  ##   typed body cannot be read declines too. The opaque defect scan reads
+  ##   through `sequtils`' own `unCheckedInc` inside that module's routines
+  ##   (audited allowlist, `tests/0016-allowlist/pushexempt.txt`), so a
+  ##   callee reaching `concat`, `cycle`, `distribute`, `keepIf`, `delete` or
+  ##   `insert` has its pre-int6-t verdict again. Verdicts move (a trusted
+  ##   verdict through such a routine now declines; such a callee is readable
+  ##   again). No key bytes change.
 
 const symexWalkerVersion* = "482"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

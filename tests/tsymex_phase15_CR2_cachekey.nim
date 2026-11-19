@@ -1467,8 +1467,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## body, so a template's or a macro's push counts; the stdlib's audited
     ## loop-counter step is read through): 480->481.
     ## RFC-0016 int6-u (a routine declared inside a template's or a macro's
-    ## check push is placed under it, the host found in the typed body):
-    ## 481->482.
+    ## check push is placed under it, the host found in the typed body;
+    ## `sequtils`' own audited loop-counter step is read through): 481->482.
     check symexWalkerVersion == "482"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

@@ -1538,7 +1538,10 @@ const renderAsChoicesVersion* = "12"
   ##   `count` has its pre-int6-t verdict again). A stdlib routine declared
   ##   inside a stdlib body that pushes is placed under that push
   ##   (`typedPushingHost`, no longer skipped for the stdlib; none on 2.2.10).
-  ##   No key bytes change.
+  ##   The module-level call rule reads the definitions inside a module-level
+  ##   pragma block (`check_scan.defsWalk`): a template there, named by a
+  ##   proc's name too, keeps the coarse reading (a trusted verdict through
+  ##   a module it imports first now declines). No key bytes change.
 
 const symexWalkerVersion* = "483"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

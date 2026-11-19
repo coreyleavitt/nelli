@@ -1473,7 +1473,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## declines on an untyped expression, so an opaque `toSeq(s.items)`
     ## builds; the audited loop-counter step admits `result`, so
     ## `sequtils.count` is read through; a stdlib routine inside a pushing
-    ## stdlib body is placed under the push): 482->483.
+    ## stdlib body is placed under the push; the module-level call rule reads
+    ## a module-level pragma block's definitions): 482->483.
     check symexWalkerVersion == "483"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

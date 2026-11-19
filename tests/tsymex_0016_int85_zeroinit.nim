@@ -36,6 +36,14 @@ type
   ObjR = object
     r: R
     n: int
+  F = range[1.0..2.0]
+  F32 = range[1.0'f32..2.0'f32]
+  FRef = ref object
+    f: F
+    g: F32
+  ObjF = object
+    f: F
+    n: int
 
 # Enum without ordinal 0.
 proc seqElemW(k: int) =
@@ -98,6 +106,44 @@ proc arrayR(k: int) =
   var a: array[2, R]
   if k == 1 and int(a[0]) == 0: symexTarget("hit")
 
+# Float range without 0.0.
+proc seqElemF(k: int) =
+  let xs = newSeq[F](1)
+  if k == 1 and float(xs[0]) == 0.0: symexTarget("hit")
+
+proc seqElemF32(k: int) =
+  let xs = newSeq[F32](1)
+  if k == 1 and float32(xs[0]) == 0.0'f32: symexTarget("hit")
+
+proc setLenF(k: int) =
+  var xs: seq[F] = @[F(1.5)]
+  xs.setLen(2)
+  if k == 1 and float(xs[1]) == 0.0: symexTarget("hit")
+
+proc newFieldF(k: int) =
+  let r = new(FRef)
+  if k == 1 and float(r.f) == 0.0: symexTarget("hit")
+
+proc newFieldF32(k: int) =
+  let r = new(FRef)
+  if k == 1 and float32(r.g) == 0.0'f32: symexTarget("hit")
+
+proc defaultF(k: int) =
+  let v = default(F)
+  if k == 1 and float(v) == 0.0: symexTarget("hit")
+
+proc defaultObjF(k: int) =
+  let o = default(ObjF)
+  if k == 1 and float(o.f) == 0.0: symexTarget("hit")
+
+proc arrayF(k: int) =
+  var a: array[2, F]
+  if k == 1 and float(a[0]) == 0.0: symexTarget("hit")
+
+proc localF(k: int) =
+  var v: F
+  if k == 1 and float(v) == 0.0: symexTarget("hit")
+
 # Never-twins: a caller's value lies in the declared domain.
 proc inW(w: Wide) =
   if ord(w) == 0: symexTarget("hit")
@@ -122,6 +168,21 @@ proc inRefR(r: WRef) =
 
 proc inObjR(o: ObjR) =
   if int(o.r) == 0: symexTarget("hit")
+
+proc inF(v: F) =
+  if float(v) == 0.0: symexTarget("hit")
+
+proc inSeqF(xs: seq[F]) =
+  if xs.len > 0 and float(xs[0]) == 0.0: symexTarget("hit")
+
+proc inRefF(r: FRef) =
+  if r != nil and float(r.f) == 0.0: symexTarget("hit")
+
+proc inRefF32(r: FRef) =
+  if r != nil and float32(r.g) == 0.0'f32: symexTarget("hit")
+
+proc inObjF(o: ObjF) =
+  if float(o.f) == 0.0: symexTarget("hit")
 
 # A caller's seq grown by the program: the old slot is the caller's, the new
 # one is zeroed.
@@ -167,6 +228,26 @@ suite "INT-85: a zeroed slot of a range without 0 holds 0":
   test "a local array":
     check pinFind(arrayR, tLabel("hit")).status == sxSat
 
+suite "INT-85: a zeroed slot of a float range without 0.0 holds 0.0":
+  test "a newSeq element":
+    check pinFind(seqElemF, tLabel("hit")).status == sxSat
+  test "a float32 newSeq element":
+    check pinFind(seqElemF32, tLabel("hit")).status == sxSat
+  test "a setLen growth slot":
+    check pinFind(setLenF, tLabel("hit")).status == sxSat
+  test "a new ref cell's field":
+    check pinFind(newFieldF, tLabel("hit")).status == sxSat
+  test "a new ref cell's float32 field":
+    check pinFind(newFieldF32, tLabel("hit")).status == sxSat
+  test "default(T)":
+    check pinFind(defaultF, tLabel("hit")).status == sxSat
+  test "default of an object":
+    check pinFind(defaultObjF, tLabel("hit")).status == sxSat
+  test "a local array":
+    check pinFind(arrayF, tLabel("hit")).status == sxSat
+  test "a local left uninitialised":
+    check pinFind(localF, tLabel("hit")).status == sxSat
+
 suite "INT-85: a caller's value is never 0":
   test "an enum parameter":
     check pinFind(inW, tLabel("hit")).status == sxUnsat
@@ -184,12 +265,36 @@ suite "INT-85: a caller's value is never 0":
     check pinFind(inRefR, tLabel("hit")).status == sxUnsat
   test "a range object field":
     check pinFind(inObjR, tLabel("hit")).status == sxUnsat
+  test "a float range parameter":
+    check pinFind(inF, tLabel("hit")).status == sxUnsat
+  test "a float range seq element":
+    check pinFind(inSeqF, tLabel("hit")).status == sxUnsat
+  test "a float range ref cell's field":
+    check pinFind(inRefF, tLabel("hit")).status == sxUnsat
+  test "a float32 range ref cell's field":
+    check pinFind(inRefF32, tLabel("hit")).status == sxUnsat
+  test "a float range object field":
+    check pinFind(inObjF, tLabel("hit")).status == sxUnsat
+
+proc grownInputF(xs: seq[F]) =
+  var ys = xs
+  ys.setLen(xs.len + 1)
+  if float(ys[xs.len]) == 0.0: symexTarget("hit")
+
+proc grownInputOldF(xs: seq[F]) =
+  var ys = xs
+  ys.setLen(xs.len + 1)
+  if xs.len > 0 and float(ys[0]) == 0.0: symexTarget("hit")
 
 suite "INT-85: a caller's seq grown by the program":
   test "the grown slot holds 0":
     check pinFind(grownInputW, tLabel("hit")).status == sxSat
   test "the caller's slot does not":
     check pinFind(grownInputOldW, tLabel("hit")).status == sxUnsat
+  test "a float range's grown slot holds 0.0":
+    check pinFind(grownInputF, tLabel("hit")).status == sxSat
+  test "a float range's caller slot does not":
+    check pinFind(grownInputOldF, tLabel("hit")).status == sxUnsat
 
 suite "INT-85: version floor":
   test "the walker version is at least INT-85's":

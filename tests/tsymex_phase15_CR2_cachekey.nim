@@ -1417,7 +1417,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## alias; a splice's bit-vector recorded): 455->456.
     ## RFC-0016 int6 R2-08 (a heap write drains its allocations' taint onto
     ## its own path; 457 reserved): 456->458.
-    check symexWalkerVersion == "458"
+    ## RFC-0016 int6 D1 (a command-syntax call is a call in expression
+    ## position; 459 reserved): 458->460.
+    check symexWalkerVersion == "460"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

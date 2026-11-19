@@ -2334,7 +2334,7 @@ proc regexCtorCall(n: NimNode): NimNode =
   var x = n
   while x.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and x.len > 0:
     x = x[^1]
-  if x.kind notin {nnkCallStrLit, nnkCall} or x.len < 2 or
+  if x.kind notin {nnkCallStrLit, nnkCall, nnkCommand} or x.len < 2 or
      x[0].kind != nnkSym or x[0].strVal notin ["re", "rex"] or
      not isStdlibDecl(x[0]) or not isRegexTyped(x):
     return nil
@@ -6135,8 +6135,9 @@ proc isMarkerCall(n: NimNode, name: string): bool =
   ## RFC-0005 S8c: a resolved (`nnkSym`) head is a marker only when it IS
   ## nelli's marker -- declared in `markers.nim` -- not a same-named user
   ## proc (which is walked as the routine it is). An untyped `nnkIdent`
-  ## head matches by name, as before.
-  if n.kind != nnkCall:
+  ## head matches by name, as before. A command (`symexTarget "t"`) is the
+  ## same call (RFC-0016 int6 D1).
+  if n.kind notin {nnkCall, nnkCommand}:
     return false
   let callee = n[0]
   case callee.kind
@@ -10453,7 +10454,7 @@ proc formalAddressTaken(impl: NimNode; skip: seq[string] = @[]): bool =
     false
   proc walk(n: NimNode): bool =
     if n.kind in {nnkAddr, nnkHiddenAddr} or
-       (n.kind == nnkCall and n.len > 1 and n[0].kind == nnkSym and
+       (n.kind in {nnkCall, nnkCommand} and n.len > 1 and n[0].kind == nnkSym and
         n[0].strVal in ["addr", "unsafeAddr"]):
       var steps: seq[NimNode]
       let r = lvalueRoot(n[^1], steps)
@@ -10494,7 +10495,7 @@ proc addrTakenArrayFormal(impl: NimNode; k: int): bool =
   if f.sym.typeKind != ntyArray: return false
   proc walk(n: NimNode; name: string): bool =
     if n.kind in {nnkAddr, nnkHiddenAddr} or
-       (n.kind == nnkCall and n.len > 1 and n[0].kind == nnkSym and
+       (n.kind in {nnkCall, nnkCommand} and n.len > 1 and n[0].kind == nnkSym and
         n[0].strVal in ["addr", "unsafeAddr"]):
       var steps: seq[NimNode]
       let r = lvalueRoot(n[^1], steps)
@@ -13762,7 +13763,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # of the source width, while an untagged literal lowers at 64 bits: a
       # `weInternalWalkerFault` on `y > int(high(int32))`. The hidden
       # conversion arm already passes a literal through (`isIntLiteralNode`).
-      let lowHighOp = operand.kind == nnkCall and operand.len == 2 and
+      let lowHighOp = operand.kind in {nnkCall, nnkCommand} and operand.len == 2 and
         operand[0].kind == nnkSym and operand[0].strVal in ["low", "high"] and
         isStdlibDecl(operand[0]) and typeNodeName(operand[1]) in intTyNames
       if isIntLiteralNode(operand) or lowHighOp:
@@ -14898,7 +14899,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                   $n.kind & " (feUnsupportedExprKind)")
     let dummy = zeroValueForType(dummyTy)
     if dummy != nil: dummy else: mkIntLit(0)
-  of nnkCall:
+  of nnkCall, nnkCommand:
+    # RFC-0016 int6 D1: a command (`f x`) is a call. Semantic analysis keeps
+    # the node kind the source spelled, so a command reaches here typed as
+    # `nnkCommand` (`move result`, the last statement of Nim 2.2.10's
+    # `filterIt`; `let y = f x`). The statement arm (`parseStmtInner`) has
+    # always read both; this arm declined the command with
+    # `feUnsupportedExprKind` on every path that evaluated it.
     if isMarkerCall(n):
       error("symex: marker call `" & n[0].repr & "` used in expression " &
             "position; markers are statements only", n)
@@ -23635,7 +23642,7 @@ proc parseStmtInner(n: NimNode,
         lit = lit[lit.len - 1]
       if lit.kind in nnkCharLit..nnkUInt64Lit: lit else: nil
     let unsignedCount = iterVar.typeKind in {ntyUInt, ntyUInt32, ntyUInt64}
-    let isCountCall = iterExpr.kind == nnkCall and iterExpr.len in {3, 4} and
+    let isCountCall = iterExpr.kind in {nnkCall, nnkCommand} and iterExpr.len in {3, 4} and
       iterExpr[0].kind == nnkSym and
       isBuiltinNamed(iterExpr[0], ["countup", "countdown"]) and
       (iterVar.typeKind in {ntyBool, ntyChar, ntyEnum, ntyInt, ntyInt8,
@@ -23729,11 +23736,11 @@ proc parseStmtInner(n: NimNode,
       var allStmts = preamble3
       allStmts.add boundedWhile(cond, hb.hiPre, @[bindIter, body, incIv])
       mkBlock(allStmts)
-    elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
+    elif iterExpr.kind in {nnkCall, nnkCommand} and iterExpr.len == 2 and
          iterExpr[0].kind == nnkSym and
          isBuiltinNamed(iterExpr[0], ["mitems", "mpairs"]):
       parseMutIter(n, iterExpr, bodyNode, ctx)   # RFC-0005 S8bu
-    elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
+    elif iterExpr.kind in {nnkCall, nnkCommand} and iterExpr.len == 2 and
          iterExpr[0].kind == nnkSym and isBuiltinNamed(iterExpr[0], ["items", "pairs"]):
       # `for x in container` semchecks to `for x in items(container)`.
       let container = iterExpr[1]
@@ -23983,7 +23990,7 @@ proc parseStmtInner(n: NimNode,
             " (" & facetNote("sets.HashSet/iterationOrder") & ")"
           else: ""
         ctx.declineMarker(feUnsupportedStmtKind, &"unsupported for-loop container kind: {recvCls.ty.kind}" & cellNote)
-    elif iterExpr.kind == nnkCall and iterExpr.len >= 1 and
+    elif iterExpr.kind in {nnkCall, nnkCommand} and iterExpr.len >= 1 and
          iterExpr[0].kind == nnkSym:
       # Phase 16 A7-S3: intercept `for r in s.runes` / `for r in lit.runes`
       # BEFORE A3 attempts to getImpl/inline the std/unicode `runes` iterator.

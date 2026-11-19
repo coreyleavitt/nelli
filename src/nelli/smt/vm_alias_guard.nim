@@ -162,7 +162,7 @@ proc calleeReturnsVar*(callNode: NimNode): bool =
   ## `callNode` (an already-`unwrapHidden`-ed `nnkCall`) resolves to a
   ## routine whose DECLARED return type is `var T` -- see the test file's
   ## header for the full probe-backed rationale.
-  if callNode.kind != nnkCall or callNode.len == 0: return false
+  if callNode.kind notin {nnkCall, nnkCommand} or callNode.len == 0: return false
   let callee = callNode[0]
   if callee.kind != nnkSym or callee.symKind notin routineSymKinds: return false
   var impl: NimNode
@@ -211,7 +211,7 @@ proc rhsAliasKind*(n: NimNode): NimNode =
   ## to classify by type.
   let r = unwrapHidden(n)
   if r.kind in {nnkBracketExpr, nnkDotExpr, nnkSym}: return r
-  if r.kind == nnkCall and calleeReturnsVar(r): return r
+  if r.kind in {nnkCall, nnkCommand} and calleeReturnsVar(r): return r
   nil
 
 proc walkLets*(n: NimNode; owner: string; hits: var seq[string]) =

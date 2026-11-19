@@ -1333,8 +1333,18 @@ const renderAsChoicesVersion* = "12"
   ##   before the RHS is lowered. The INT-37 entry check stopped such a walk
   ##   with `weInternalWalkerFault`; the decline's own kind is now reported
   ##   on its path. No key bytes change.
+  ## - RFC-0016 int6 D1 (458->460; 459 is reserved on another branch): a
+  ##   command (`f x`) is a call in expression position too (`parseExpr`),
+  ##   as it always was in statement position, and the call-shape
+  ##   recognisers (`isMarkerCall`, the `addr` and `low`/`high` shapes, the
+  ##   `for` iterator shapes, `calleeReturnsVar`) read both kinds. Semantic
+  ##   analysis keeps the kind the source spelled: Nim 2.2.10's `filterIt`
+  ##   ends in `move result`, and every path through it declined with
+  ##   `feUnsupportedExprKind`, so no hit was clean and a `seq[seq[int]]`
+  ##   parameter's walk enumerated every unwound path (past 900 s). No key
+  ##   bytes change.
 
-const symexWalkerVersion* = "458"
+const symexWalkerVersion* = "460"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

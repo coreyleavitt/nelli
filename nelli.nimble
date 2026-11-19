@@ -2100,6 +2100,8 @@ task test, "Run the test suite":
             "tsymex_0016_int90_heapput_audit",
             # RFC-0016 INT-93: a local's address is an object of its own (distinct from other locals and the entry state; its fields and elements at their offsets).
             "tsymex_0016_int93_localaddr",
+            # RFC-0016 int6 D1: a command-syntax call (`move result`, `f x`, `symexTarget "t"`) is a call in expression and statement position.
+            "tsymex_0016_int6_d1_command",
             # RFC-0016 INT-87: a cstring parameter is held by value, whether it is nil and its bytes up to the NUL.
             "tsymex_0016_int87_cstringparam",
             "tsymex_0016_d3b_walklog",

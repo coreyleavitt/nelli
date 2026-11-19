@@ -161,12 +161,12 @@ suite "W1-d1a low(T) div -1":
     check not r.errors.named(ubIntMinModMinusOne)
 
   test "checks off by push in a checks-on build: declines, no halt (rule a)":
-    ## RFC-0016 W1-d2: was the `ubSignedOverflow` halt under an opt-out. A
-    ## pushed-off routine in a checks-on build always declines
-    ## (feOverflowCheckOption). The halt itself needs a checks-off BUILD:
-    ## `tsymex_0016_w1d1a_intminmod_checksoff.nim`.
+    ## RFC-0016 int6-o: the pushed-off routine is modelled, so the overflow
+    ## inside it halts as `ubSignedOverflow` (the `div -1` traps natively,
+    ## see the pinCrash rows above), not as the mod kind.
     let r = symexFind(sutDivUnchecked, tLabel("hit"), noOverflowChecks)
     checkpoint show(r.errors)
     check not r.trusted
-    check r.errors.named(feOverflowCheckOption)
+    check r.errors.named(ubSignedOverflow)
+    check not r.errors.named(feOverflowCheckOption)
     check not r.errors.named(ubIntMinModMinusOne)

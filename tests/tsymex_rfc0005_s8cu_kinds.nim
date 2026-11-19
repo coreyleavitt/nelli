@@ -8,6 +8,12 @@
 ## declining whole with `feCheckOption`; its wrong-branch write declines on
 ## its own path (`inactiveFieldSide`, `feUnsupportedOp`). Natively it reaches
 ## the label, so the decline is sound.
+##
+## RFC-0016 int6-o: a routine under `overflowChecks: off` in a checked build is
+## walked as an off build walks it, so a signed overflow in it is an
+## `ubSignedOverflow` halt, not a `feOverflowCheckOption` decline. A closure
+## iterator whose `overflowChecks` differs from its caller's still declines
+## (`feCheckOption`).
 import std/[unittest, sets, options]
 import nelli
 import nelli/symex
@@ -180,9 +186,9 @@ suite "S8cu: routines of other kinds":
 
   test "a func and an inline proc":
     check native(viaFunc(high(int))) == "hit"
-    pinDecline(viaFunc, declKey, feOverflowCheckOption)
+    pinDecline(viaFunc, declKey, ubSignedOverflow)
     check native(viaInline(high(int))) == "hit"
-    pinDecline(viaInline, declKey, feOverflowCheckOption)
+    pinDecline(viaInline, declKey, ubSignedOverflow)
 
   test "a method":
     check native(viaMethod(high(int))) == "hit"
@@ -198,14 +204,20 @@ suite "S8cu: routines of other kinds":
     let r = symexFind(viaConverter, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
-    check r.errors.named(feOverflowCheckOption)
+    # int6-o: `int(v) + high(int)` is modelled in the pushed region, where
+    # it is a signed-overflow halt.
+    check r.errors.named(ubSignedOverflow)
+    check not r.errors.named(feOverflowCheckOption)
 
   test "a closure iterator is compiled at its definition":
     check native(viaClosureIter(high(int))) == "hit"
     let r = symexFind(viaClosureIter, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
-    check r.errors.named(feOverflowCheckOption)
+    # int6-o: still declined, now by name: a closure iterator is compiled
+    # under its own `overflowChecks`, which differs from its caller's.
+    check r.errors.named(feCheckOption)
+    check not r.errors.named(feOverflowCheckOption)
 
   test "a lambda":
     check native(viaLambda(high(int))) == "hit"
@@ -218,7 +230,7 @@ suite "S8cu: routines of other kinds":
     check native(viaInlineIter(high(int))) == "OverflowDefect"
     decides(viaInlineIter, sxRaised)
     check native(inlineIterInPush(high(int))) == "hit"
-    pinDecline(inlineIterInPush, declKey, feOverflowCheckOption)
+    pinDecline(inlineIterInPush, declKey, ubSignedOverflow)
 
 suite "S8cu: a callee":
 
@@ -236,7 +248,7 @@ suite "S8cu: templates":
     check native(tplOutOfPush(high(int))) == "OverflowDefect"
     decides(tplOutOfPush, sxRaised)
     check native(tplInPush(high(int))) == "hit"
-    pinDecline(tplInPush, declKey, feOverflowCheckOption)
+    pinDecline(tplInPush, declKey, ubSignedOverflow)
 
 suite "S8cu: the float checks":
 

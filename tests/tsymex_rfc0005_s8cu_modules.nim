@@ -2,6 +2,11 @@
 ## routines, and the stdlib routines the walker walks.
 ##
 ## Each row runs the routine natively on this build beside the walker's verdict.
+##
+## RFC-0016 int6-o: an `overflowChecks: off` region in a checked build is
+## modelled, so a signed overflow in a pushed callee, generic, include,
+## template or macro is an `ubSignedOverflow` halt, not a decline by
+## `feOverflowCheckOption`.
 import std/[unittest, sets, math, macros, strutils]
 import nelli
 import nelli/symex
@@ -94,19 +99,19 @@ suite "S8cu: a callee in another module":
     pinDecline(viaUncheckedField, declKey, feUnsupportedOp,
                excluding = {feCheckOption})
     check native(viaUncheckedAdd(high(int))) == "hit"
-    pinDecline(viaUncheckedAdd, declKey, feOverflowCheckOption)
+    pinDecline(viaUncheckedAdd, declKey, ubSignedOverflow)
 
 suite "S8cu: generics":
 
   test "defined under a push, instantiated here: unchecked":
     check native(viaGenericUnder(high(int))) == "hit"
-    pinDecline(viaGenericUnder, declKey, feOverflowCheckOption)
+    pinDecline(viaGenericUnder, declKey, ubSignedOverflow)
 
   test "defined clean, instantiated under a push: checked":
     check native(viaGenericCleanInPush(high(int))) == "OverflowDefect"
-    # The instantiating routine is itself under the push, and declines; the generic
-    # alone, from a clean routine, decides.
-    pinDecline(viaGenericCleanInPush, declKey, feOverflowCheckOption)
+    # The instantiating routine is itself under the push; the generic keeps
+    # the options it was defined with (checked), so the raise is exact.
+    decides(viaGenericCleanInPush, sxRaised)
     check native(viaGenericClean(high(int))) == "OverflowDefect"
     decides(viaGenericClean, sxRaised)
 
@@ -114,7 +119,7 @@ suite "S8cu: include":
 
   test "a push in the including file reaches the included routine":
     check native(viaIncludedPlain(high(int))) == "hit"
-    pinDecline(viaIncludedPlain, declKey, feOverflowCheckOption)
+    pinDecline(viaIncludedPlain, declKey, ubSignedOverflow)
 
   test "an inner push in the included file turns it back on":
     check native(viaIncludedOn(high(int))) == "OverflowDefect"
@@ -124,15 +129,15 @@ suite "S8cu: generated routines":
 
   test "a template in another module":
     check native(viaAdderThere(high(int))) == "hit"
-    pinDecline(viaAdderThere, declKey, feOverflowCheckOption)
+    pinDecline(viaAdderThere, declKey, ubSignedOverflow)
 
   test "a template in this file":
     check native(viaAdderHere(high(int))) == "hit"
-    pinDecline(viaAdderHere, declKey, feOverflowCheckOption)
+    pinDecline(viaAdderHere, declKey, ubSignedOverflow)
 
   test "a macro, under the push and not":
     check native(viaMacro(high(int))) == "hit"
-    pinDecline(viaMacro, declKey, feOverflowCheckOption)
+    pinDecline(viaMacro, declKey, ubSignedOverflow)
     check native(viaMacroClean(high(int))) == "OverflowDefect"
     decides(viaMacroClean, sxRaised)
 

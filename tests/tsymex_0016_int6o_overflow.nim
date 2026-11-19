@@ -109,10 +109,9 @@ suite "int6-o: an overflow-off region in a checked build":
 
   test "native: v + 1 > v at high(int) is undefined (compiler-dependent)":
     let n = nativeRun(sutAddCmp(high(int)))
-    when defined(vcc):
-      check "hit" in n.hits
-    else:
-      check "hit" notin n.hits
+    # Whether "hit" is reached is the compiler's choice (gcc folds the
+    # comparison, MSVC wraps); both are legal for undefined behaviour, so only
+    # the absence of a raise is pinned.
     check n.raised == ""
 
   test "the region's signed overflow halts as in an off build":

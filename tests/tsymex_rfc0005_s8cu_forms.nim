@@ -8,7 +8,8 @@
 ## (`inactiveFieldSide`, `feUnsupportedOp`): the union image and the
 ## active-member state follow the build's bit, which checks. Natively the
 ## routine reaches the label, so the decline is sound. Under `checks: off`
-## the overflow push still declines (`feOverflowCheckOption`). A value that
+## the overflow push is modelled off too (int6-o), so the routine whose
+## inner push turns the four back on raises as native does. A value that
 ## is no literal and an undecided `when` still decline `feCheckOption`.
 import std/[unittest, sets]
 import nelli
@@ -165,8 +166,9 @@ suite "S8cu: nesting":
 
   test "under `checks: off` the others stay off":
     check native(umbrellaInnerOn(4)) == "FieldDefect"
-    pinDecline(umbrellaInnerOn, declKey, feOverflowCheckOption,
-               excluding = {feCheckOption})
+    let r = pinFind(umbrellaInnerOn, tFieldDefect())
+    checkpoint show(r.errors)
+    check r.status == sxRaised
 
 suite "S8cu: spelling":
 

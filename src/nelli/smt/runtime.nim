@@ -2536,7 +2536,7 @@ const walkerTermUnits* = 15
   ##   walk's units/s is within the arithmetic shapes' (see
   ##   `tests/tsymex_0016_k7_twosearch.nim`).
 
-const walkerContextUnits* = 25_000
+const walkerContextUnits* = 20_000
   ## RFC-0016 int6 D1b. Units charged per own-context solver
   ## (`ownContextSolver`): the fixed cost of one check that neither Z3's step
   ## count nor the term visits count -- the fresh Z3 context, the solver and
@@ -2566,6 +2566,21 @@ const walkerContextUnits* = 25_000
   ## units) at 36 s; it ran 42-57 s on a loaded host. In the instrumented
   ## build the context alone (`newContext`) was 2.2 ms of filterIt's 6.6 and
   ## `mergeMemberships`' fixed set-up 1.6 ms.
+  ##
+  ## Re-measured for int6 D1d (2026-11-19, the same method and host, each
+  ## suite run alone): `mergeMemberships` now returns a query holding no
+  ## membership literal at once, and a pruning check a kept model satisfies
+  ## is not searched (`refuteStatus`), so the walks' solvers are fewer:
+  ##   filterIt unroll 3: 270 solvers, 170,863 visits, 338,515 Z3 units,
+  ##     2,033 ms
+  ##   `tsymex_0016_k7_twosearch`'s third walk: 58 solvers, 563,532 visits,
+  ##     167,159 Z3 units, 2,094 ms
+  ## gives b = 3.1 us/visit (15 stays) and a = 5.25 ms/solver = 20,666 units;
+  ## 20,000 is used. What is left of a solver is Z3's own: a fresh context
+  ## and its teardown about 1.8 ms and the default solver's set-up and check
+  ## about 1.5 ms on a trivial query (a micro-benchmark, the same image),
+  ## the rest the per-query passes. The context stays fresh: it is what
+  ## makes a search a function of its query (RFC-0005 S8bm; `refuteStatus`).
 
 template chargeWalkerTerms(n: int) =
   ## One count-based charge (a function of the query's terms alone, so the
@@ -11125,6 +11140,38 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
   # id of a released temporary could name a new `merged` literal).
   let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
   let byteReId = astId(ctx, byteRe.raw)
+  # RFC-0016 int6 D1d: a query holding no membership literal anywhere is its
+  # own result (no group forms, and `holds` is false on every term, so every
+  # root is left as it is); one pass over its terms, each once, says so,
+  # where the passes below walk each top-level conjunct's depth on its own.
+  block:
+    var seen: HashSet[int]
+    var stack: seq[RawZ3Ast]
+    for r in roots: stack.add r.raw
+    var found = false
+    while stack.len > 0:
+      let t = stack.pop()
+      let id = astId(ctx, t)
+      if id in seen: continue
+      seen.incl id
+      chargeWalkerTerms(1)
+      if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+      let app = Z3_to_app(ctx.raw, t)
+      let k = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)))
+      let n = int(Z3_get_app_num_args(ctx.raw, app))
+      if k == kinds.inRe and n == 2 and
+         astId(ctx, Z3_get_app_arg(ctx.raw, app, 1)) != byteReId:
+        found = true
+        break
+      if k == bk.notK and n == 1:
+        let a = Z3_get_app_arg(ctx.raw, app, 0)
+        if Z3_get_ast_kind(ctx.raw, a) == Z3_APP_AST and
+           ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw,
+             Z3_to_app(ctx.raw, a)))) == kinds.inRe:
+          found = true
+          break
+      for i in 0 ..< n: stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+    if not found: return @roots
   type
     Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]
     Held = seq[tuple[re: Z3AnyAst, neg: bool]]
@@ -13494,6 +13541,113 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
       result.why = limitReason(ctx, sites)
   else: discard
 
+const satModelsKept = 4
+  ## RFC-0016 int6 D1d. The SAT models `refuteStatus` keeps (`satModels`):
+  ## the walk's most recent, newest last.
+
+const satModelVisits = walkerContextUnits div walkerTermUnits
+  ## RFC-0016 int6 D1d. The term visits `satByModel` may spend evaluating a
+  ## query's roots that its kept models were not found for: what the fixed
+  ## cost of the search it would save is charged (`walkerContextUnits`), so
+  ## trying the models never costs more than that. A root past what is left
+  ## ends the try (a large new root, a const table's lookup, is the shape).
+
+type SatModel = object
+  ## RFC-0016 int6 D1d. A model `m` (a term of the walk's context) that a
+  ## search found for the query `held`. `held` keeps those roots alive, so
+  ## no id in `ids` is recycled while it names one (RFC-0016 CRH-07).
+  ## `checked`: every root of `held` was evaluated true in `m`.
+  m: Z3Model
+  held: seq[Z3Bool]
+  ids: HashSet[int]
+  checked: bool
+
+var satModels {.threadvar.}: seq[SatModel]
+  ## RFC-0016 int6 D1d. Emptied at each run's start and end, so no model
+  ## (nor the context it holds) outlives its run (RFC-0016 S8cj).
+
+proc modelHolds(ctx: Z3Context; m: Z3Model; root: Z3Bool): bool =
+  ## RFC-0016 int6 D1d. `root` is true in `m`, completed (`holdsIn`), charged
+  ## a visit per distinct term of it (Z3's evaluator visits each once).
+  chargeWalkerTerms(queryTermCount(ctx, [root]))
+  holdsIn(m, root)
+
+proc satByModel(ctx: Z3Context; query: openArray[Z3Bool]): bool =
+  ## RFC-0016 int6 D1d. Some kept model satisfies every root of `query`: the
+  ## query is SAT, with no search. The roots the model's own query lacked (a
+  ## fork's arm, the facts a step added) are evaluated first, newest first,
+  ## so a model that does not fit costs only those. The rest are evaluated
+  ## once per model, the first time it fits: a step may have searched a
+  ## rewritten query (`checkExact`'s, each with the same models by its own
+  ## argument, or a recursive value's definition substituted away), and the
+  ## evaluation makes the reuse rest on the model alone. A model that fails
+  ## its own query's roots is dropped.
+  var left = satModelVisits
+  var i = satModels.high
+  while i >= 0:
+    if satModels[i].m.ctx.raw != ctx.raw:
+      dec i
+      continue
+    var ok = true
+    for j in countdown(query.high, 0):
+      if astId(ctx, query[j].raw) in satModels[i].ids: continue
+      let n = queryTermCount(ctx, [query[j]])
+      if n > left:
+        return false
+      left -= n
+      chargeWalkerTerms(n)
+      if not holdsIn(satModels[i].m, query[j]):
+        ok = false
+        break
+    if ok and not satModels[i].checked:
+      for r in satModels[i].held:
+        if not modelHolds(ctx, satModels[i].m, r):
+          ok = false
+          break
+      if ok: satModels[i].checked = true
+      else:
+        satModels.delete(i)
+        dec i
+        continue
+    if ok:
+      return true
+    dec i
+  false
+
+proc keepSatModel(ctx: Z3Context; m: Z3Model; query: openArray[Z3Bool]) =
+  ## RFC-0016 int6 D1d. Keeps `m`, the model `checkCapped` found for
+  ## `query`, the oldest kept dropped past `satModelsKept`.
+  if m == nil: return
+  var kept = SatModel(m: m, held: @query)
+  for r in query: kept.ids.incl astId(ctx, r.raw)
+  if satModels.len >= satModelsKept: satModels.delete(0)
+  satModels.add kept
+
+proc refuteStatus(ctx: Z3Context; query: openArray[Z3Bool];
+                  settings: SymexSettings; rlimit0: uint): Z3Status =
+  ## RFC-0016 int6 D1d. `checkCapped(..).status` for a caller that acts only
+  ## on `zsUnsat` (a pruning check: `loopArmInfeasible`, `pathInfeasible`,
+  ## `pruneFactsHold`, `decideUndefined`, a variant field outside its
+  ## branch). A query a kept model satisfies is SAT without a search
+  ## (`satByModel`); a SAT search's model is kept for the next.
+  ##
+  ## Why: a check's fixed cost is a fresh Z3 context (`ownContextSolver`),
+  ## the default solver's set-up and the per-query passes, about 5 ms
+  ## whatever the query (`walkerContextUnits`), and a fresh
+  ## context is what makes a search a function of its query alone (RFC-0005
+  ## S8bm: the walk's context moved B1-1's target query from 172,215 units
+  ## to 3,365,417 and 11,771,578; a reused context recycles the ids of freed
+  ## terms, so it carries the same history). So the cost is not cut by
+  ## sharing a context but by not searching: at a fork the parent's model
+  ## satisfies one arm, and only the other is searched. Every search that
+  ## does run is the one it was. A satisfying model is a model, so the
+  ## verdict is the search's or the search's `zsUnknown`, and these callers
+  ## read both alike (not refuted); only the units and the wall time move.
+  if satByModel(ctx, query): return zsSat
+  let r = checkCapped(ctx, query, settings, rlimit0)
+  if r.status == zsSat: keepSatModel(ctx, r.m, query)
+  r.status
+
 proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   ## The run-wide pools every walker query asserts beside its path's own
   ## facts. Each is definitional or true of every real input, so asserting
@@ -13691,8 +13845,8 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   of glFalse: return true
   of glTrue: return false
   of glOpen: discard
-  result = checkCapped(ctx, pathRoots(path, [arm]), settings,
-                       loopPruneRLimit(settings)).status == zsUnsat
+  result = refuteStatus(ctx, pathRoots(path, [arm]), settings,
+                        loopPruneRLimit(settings)) == zsUnsat
   if result: logPrune(path, [arm])   # RFC-0005 S8as/S8ax
 
 proc pathInfeasible(ctx: Z3Context; path: Path;
@@ -13700,8 +13854,8 @@ proc pathInfeasible(ctx: Z3Context; path: Path;
   ## RFC-0005 S8an. True only when `path`'s full query (`pathRoots`) is
   ## UNSAT: no real execution reaches it. Bounded and sound for pruning
   ## exactly as `loopArmInfeasible` is (an undecided query keeps the path).
-  result = checkCapped(ctx, pathRoots(path), settings,
-                       loopPruneRLimit(settings)).status == zsUnsat
+  result = refuteStatus(ctx, pathRoots(path), settings,
+                        loopPruneRLimit(settings)) == zsUnsat
   if result: logPrune(path, [])   # RFC-0005 S8as/S8ax
 
 var symexIfArmsPruned* {.threadvar.}: int
@@ -15989,8 +16143,8 @@ proc pruneFactsHold(ctx: Z3Context; p: Path; facts: seq[seq[Z3Bool]];
   ## is itself a drop decided against `p`'s context, logged for an
   ## enclosing call's summary (`logPrune`).
   for d in facts:
-    if checkCapped(ctx, pathRoots(p, d), settings,
-                   loopPruneRLimit(settings)).status != zsUnsat:
+    if refuteStatus(ctx, pathRoots(p, d), settings,
+                    loopPruneRLimit(settings)) != zsUnsat:
       return false
   for d in facts: logPrune(p, d)
   true
@@ -16695,10 +16849,10 @@ proc decideUndefined(cur: Path; ub: UbKind; cond: Z3Bool; site: string;
   if guardLiteral(cond) != glTrue:
     let roots = pathRoots(cur, [cond])
     let pruneLimit = loopPruneRLimit(w.settings)
-    var st = checkCapped(w.z3, roots, w.settings, pruneLimit).status
+    var st = refuteStatus(w.z3, roots, w.settings, pruneLimit)
     let q = w.settings.budget.queryRLimit
     if st == zsUnknown and (q == 0 or q > pruneLimit):
-      st = checkCapped(w.z3, roots, w.settings, q).status
+      st = refuteStatus(w.z3, roots, w.settings, q)
     unsat = st == zsUnsat
   if unsat:
     logPrune(cur, [cond])
@@ -17948,8 +18102,8 @@ proc inactiveFieldSide(cp: Path; outOfArm: Z3Bool; env: Env; loc: string;
              "member, no check emitted)", loc), w)
     return
   let unsat = guardLiteral(outOfArm) != glTrue and
-    checkCapped(w.z3, pathRoots(cp, [outOfArm]), w.settings,
-                loopPruneRLimit(w.settings)).status == zsUnsat
+    refuteStatus(w.z3, pathRoots(cp, [outOfArm]), w.settings,
+                 loopPruneRLimit(w.settings)) == zsUnsat
   if unsat:
     logPrune(cp, [outOfArm])
     return
@@ -27757,6 +27911,7 @@ proc runSymex*(prog: SymexProgram,
   # past the run (`tsymex_0016_s8cj_runctx`).
   currentCallerPc = @[]
   closureBodyCallerPc = @[]
+  satModels = @[]
   setCurrentContext(prevCtx)
   # RFC-0005 S8m: a run whose Z3 API error never reached the `Z3Error` arm
   # (the C backend loses a raise unwinding through the walk) has no verdict.
@@ -27872,6 +28027,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   nativeStackCutFlag = false                           ## RFC-0005 S8ca
   walkUnitsBase = ownContextUnits                      ## RFC-0016 K7
   walkerWorkBase = walkerWorkUnits
+  satModels = @[]
   walkRLimitCur = settings.budget.walkRLimit
   walkWorkExhausted = false
   walkStalled = false                                  ## RFC-0016 INT-57
@@ -29282,7 +29438,9 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # `runSymex` does (this entry has no nested `try`, so CR-13's caveat about
   # a `finally` on the raise path does not apply).
   let prevCtx = currentContext()
-  defer: setCurrentContext(prevCtx)
+  defer:
+    satModels = @[]
+    setCurrentContext(prevCtx)
   let prevStall = beginStallDeadline(settings.budget.queryTimeoutMs)  ## RFC-0016 INT-57
   defer: endStallDeadline(prevStall)
   let ctx = resetSymexRunState(settings)
@@ -31007,7 +31165,7 @@ proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
     glUnwrittenCtx, glUnwritten, glPartHavoc, glWatched, glVarGlobal,
     glUnwrittenAsts, lowerAsReceiver, globalEntryVals, noinitSerial,
     callGuardedNames, extractionErrors, unknownExnWarnings, ptrLeafAims,
-    symexTargetSolveStats, ownContextUnits, symexZ3CallCount,
+    symexTargetSolveStats, ownContextUnits, symexZ3CallCount, satModels,
     seqCapDeclKinds, byteDomainKinds, deepTermsLeftAlone,
     theoryFreeNeedsSimple, queryTimeoutMsCur, nativeStackCutFlag,
     queryTimedOutFlag, walkerWorkBase, walkUnitsBase, walkRLimitCur,

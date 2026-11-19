@@ -19,6 +19,11 @@
 ## to the 600 s stall backstop instead. The 0.254 us rate puts unroll 3's
 ## 3.0 s at about 12M units; the query charge (`walkerContextUnits`, 25,000
 ## per own-context solver) charges it 3.4M + 426 * 25,000 = 14.0M.
+##
+## RFC-0016 int6 D1d: a pruning check a kept model satisfies is no longer
+## searched (`refuteStatus`) and the charge is re-measured at 20,000, so
+## unroll 3 is 270 solvers, 170,863 visits and 338,515 Z3 units: 338,515 +
+## 170,863 * 15 + 270 * 20,000 = 8.30M, still twice the cut below.
 import std/[unittest, strutils, sequtils]
 import nelli
 import nelli/symex
@@ -40,7 +45,8 @@ proc mkUnwind3(limit: uint): SymexSettings =
 ## costs in wall. Before the query charge the walk was charged 3.39M and
 ## ended in a trusted `sxSat` under it; charged for its 426 contexts it is
 ## 14.0M, so a limit between the two (here 4M, with room on both sides)
-## ends it on the budget.
+## ends it on the budget. Since D1d: 2.90M without its 270 contexts, 8.30M
+## with them.
 const cut = mkUnwind3(4_000_000)
 ## The default budget: the same walk's answer stands.
 const whole = mkUnwind3(defaultSymexSettings().budget.walkRLimit)

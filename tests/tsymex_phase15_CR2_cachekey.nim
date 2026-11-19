@@ -1421,7 +1421,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## position; 459 reserved): 458->460.
     ## RFC-0016 int6 D1b (the walk budget charges each query's own-context
     ## solver; 461-463 reserved): 460->464.
-    check symexWalkerVersion == "464"
+    ## RFC-0016 int6 D1d (a pruning check a kept model satisfies is not
+    ## searched; 465 reserved): 464->466.
+    check symexWalkerVersion == "466"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

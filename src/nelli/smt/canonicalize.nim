@@ -1352,8 +1352,15 @@ const renderAsChoicesVersion* = "12"
   ##   it and the walk ran to the stall backstop; it now ends on the budget
   ##   (`ckWalkWork`, `beBudgetExhaustedPrune`). A walk the budget cut
   ##   before is cut sooner, so verdicts move. No key bytes change.
+  ## - RFC-0016 int6 D1d (464->466; 465 is reserved on another branch): a
+  ##   pruning check that a model kept from an earlier SAT search satisfies
+  ##   is SAT without a search (`refuteStatus`), `mergeMemberships` returns a
+  ##   query with no membership literal at once, and `walkerContextUnits` is
+  ##   re-measured at 20,000. A walk the budget cut before spends less and
+  ##   may now decide (the k9cg FilterIt shape's unroll 4: 141.4M units to
+  ##   86.0M), so verdicts move. No key bytes change.
 
-const symexWalkerVersion* = "464"
+const symexWalkerVersion* = "466"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

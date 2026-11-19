@@ -2102,6 +2102,10 @@ task test, "Run the test suite":
             "tsymex_0016_int93_localaddr",
             # RFC-0016 int6 D1: a command-syntax call (`move result`, `f x`, `symexTarget "t"`) is a call in expression and statement position.
             "tsymex_0016_int6_d1_command",
+            # RFC-0016 int6 D1b: the walk budget charges each query's own-context solver, so a k-unroll of small queries ends on it.
+            "tsymex_0016_int6_d1b_walkbudget",
+            # RFC-0016 int6 D1d: a pruning check a model kept from an earlier SAT search satisfies is not searched.
+            "tsymex_0016_int6_d1d_modelreuse",
             # RFC-0016 INT-87: a cstring parameter is held by value, whether it is nil and its bytes up to the NUL.
             "tsymex_0016_int87_cstringparam",
             "tsymex_0016_d3b_walklog",

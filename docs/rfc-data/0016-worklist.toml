@@ -2502,15 +2502,16 @@ id = "INT-87"
 table = "5.8c"
 title = "K9d-12: the walker declines a `cstring` parameter (`feUnsupportedParamType`), where a `string` one is modelled, so every `cstring` call is `sxUnknown` and pinned by nothing. `pinFind` has had a `cstring` domain since K9d-6 (the string domain minus the values with a NUL) for the day the walker takes one"
 class = "precision"
-state = "open"
-note = ": open. The bar: a `cstring` parameter is an input (nil, or the bytes up to its first NUL), so a byte test, a nil test and a refutation over it are definite verdicts, each pinned natively by `pinFind`. Recorded because the K9d plan asked K9d-12 to file it if the decline was still present on its base (it is, at walker 444)"
+state = "closed"
+note = "fixed in the walker (448, provisional; 9e37524b): a `cstring` is held by value, `tCString()` (types.nim), a `(nonNil: bool, bytes: string)` tuple whose zero is nil, so every zero-initialised path is nil; a parameter's bytes are in `(\\x01..\\xff)*` (no NUL) and empty when nil (`allocateSym`). Modelled (`parseCStringExpr`, dsl_parser.nim): `nil` and a literal (its bytes up to the first NUL), `isNil` and `== nil` (the pointer only, no content read), `==` (content, nil equal only to nil), `len` (0 for nil), `high`, `$` (`\"\"` for nil), `c[i]` (nil a nil dereference; `i == len` the NUL terminator; past it undefined, `depositUndefinedOob`), and a cstring passed to a callee. Declined by name (`feUnsupportedOp`): a write through a cstring, a cast to cstring, `cstring(s)` of a string the routine holds (it aliases the buffer), any conversion of a cstring to another type (its address), and a content read beside a `var` or address-holding parameter or a write the body may make (`cstrAliasHazard`: the caller's buffer may be that memory). `<`, `<=` and `cmp` decline as an address: natively they are not a content order (below). The witness renders `cstring` through `readCString`, its buffers kept alive for the run. `c[i] == 'q'` reads `str.at(bytes ++ \"\\x00\", i)`: `seqLenCaps`' byte-test rewrite now takes a `cstring`'s bytes as a byte leaf and looks through `str.++` of byte terms (`byteBuilt`, runtime.nim), without which `s.high == 2 and s[0] == 'q'` ran out of units (unknown) where the string form decides in 6.7k. `magic:CStrToStr` is modelled in the universe; the type-class row admits `cstring` at `tcClassify`"
+sha = "9e37524b"
 slice = "K9d"
 home = "K9d-12 (`wip/k9d12`)"
 source = "K9d-12 triage (the plan's walker-decline list)"
-evidence = "red reproducer `tests/tsymex_0016_int87_cstringparam.nim`: a first-byte target, a nil target and a negative-length refutation are each `sxUnknown` (`feUnsupportedParamType`); natively the first two are reached"
+evidence = "red at 761ce70c (before 9e37524b): a first-byte target, a nil target and a negative-length refutation were each `sxUnknown` (`feUnsupportedParamType`); natively the first two are reached. Native evidence (pinned toolchain, c and cpp): `len(nil) == 0`, `$nil == \"\"`, `==` compares content and nil equals only nil, `c[len(c)] == '\\0'`, a high byte is a byte; `<` and `<=` on cstring are Nim's `LtPtr`/`LePtr` over the two converted to `pointer` (an address compare, not `strcmp`), and `cmp` is the generic `cmp[T]` (`==` content, `<` address): buffers \"zz\" at the lower address and \"ab\" give `\"zz\" < \"ab\"` true and `cmp` -1. Green after the fix: `tsymex_0016_int87_cstringparam` 16 OK on c and cpp, every definite verdict pinned natively by `pinFind` over the `cstring` domain; `k9d_pinfind` (`sutCstr` re-pinned `sxUnsat`), `k2c_typeclass` (`pcstr` exact `sxSat`), `p6_nillit` (the cstring nil arms re-pinned exact by `pinExact`, floor 448), `admir` (its uninterp zero-value SUT moved off `cstring`), `int88_crossptralias`, `int83_pointerparam`, CR2, `universe`, `r6_nulwitness`, `r6_b5_chained` green on c; `k4b_cells` (`sCStrToStr` an exact cell) green but for `GCref`, red at 761ce70c as well"
 aliases = []
 cells = []
-pins = []
+pins = ["tsymex_0016_int87_cstringparam", "tsymex_0016_k2c_typeclass", "tsymex_0016_k9d_pinfind"]
 
 [[row]]
 id = "INT-88"
@@ -2518,7 +2519,7 @@ table = "5.8c"
 title = "K9d-12: two `ptr` parameters of different pointee types that the target needs at one address (`cast[pointer](a) == cast[pointer](b)` over `ptr int` and `ptr float`) are a trusted `sxSat`, which is right natively (`addr x` and `cast[ptr float](addr x)`), but the walker's witness builds one cell for each, at two addresses, so it replays without reaching the target and the pin fails. Found verifying the plan's entry for a non-nil pointer compare across types, thought closed under INT-83 (which made `pointer` an address of its own sort)"
 class = "witness fidelity (the verdict is sound)"
 state = "closed"
-note = "fixed in the witness builder (the walk is unchanged, so no walker version bump; 6ea48e98): addresses are global across pointee sorts. The snapshot keys a typed address the run cast into the `pointer` space by its `pointer` address (`addrSpaceKey`, through INT-83's `pointerViews`), so two typed positions the model puts at one `pointer` address are one cell, owned by a `ref`, else by a position of a sort the walk read or wrote (`heapSortObserved`), else by name. The witness builds that cell once, as its owner's type, sized for the largest pointee any position holding it has (`registerPtrSize`, emitted per `ptr` sort by `emitWitnessTuple`; `cellAlloc`), and every position at another sort is a typed view of the one allocation (`cellForeignView`, `cast[ptr T](base)`), whichever is built first. Where the shared bytes cannot be rendered as the model's, the witness is recorded lossy (`feExtractionFailed`, `crossSortCellFidelity`) and the replay settles it: a `ref` holding the cell at another sort (its object is sized by its own type), the walk constraining two of its sorts (each sort's heap is a separate array, so one location may hold two values no bytes do), or a constrained sort that is not the owner's. Left: `crossPtrBoth` (`a[] == 5 and b[] > 1.0` at one address, natively unreachable) is an untrusted `sxSat`, not `sxUnsat`: the walk does not relate two sorts' heaps at one address (INT-83 declines a location read at two types only through a `pointer` cast)"
+note = "fixed in the witness builder (the walk is unchanged, so no walker version bump; 6ea48e98): addresses are global across pointee sorts. The snapshot keys a typed address the run cast into the `pointer` space by its `pointer` address (`addrSpaceKey`, through INT-83's `pointerViews`), so two typed positions the model puts at one `pointer` address are one cell, owned by a `ref`, else by a position of a sort the walk read or wrote (`heapSortObserved`), else by name. The witness builds that cell once, as its owner's type, sized for the largest pointee any position holding it has (`registerPtrSize`, emitted per `ptr` sort by `emitWitnessTuple`; `cellAlloc`), and every position at another sort is a typed view of the one allocation (`cellForeignView`, `cast[ptr T](base)`), whichever is built first. Where the shared bytes cannot be rendered as the model's, the witness is recorded lossy (`feExtractionFailed`, `crossSortCellFidelity`) and the replay settles it: a `ref` holding the cell at another sort (its object is sized by its own type), the walk constraining two of its sorts (each sort's heap is a separate array, so one location may hold two values no bytes do), or a constrained sort that is not the owner's. Left: `crossPtrBoth` (`a[] == 5 and b[] > 1.0` at one address, natively unreachable) is an untrusted `sxSat`, not `sxUnsat`: the walk does not relate two sorts' heaps at one address (INT-83 declines a location read at two types only through a `pointer` cast), filed as INT-90"
 sha = "6ea48e98"
 slice = "K9d"
 home = "K9d-12 (`wip/k9d12`)"
@@ -2527,3 +2528,18 @@ evidence = "red at e4c0ae7a (before 6ea48e98): the walker's witness for `crossPt
 aliases = []
 cells = []
 pins = ["tsymex_0016_int88_crossptralias"]
+
+[[row]]
+id = "INT-90"
+table = "5.8c"
+title = "K9d-12: two `ptr` parameters of different pointee types at one address (`a: ptr int`, `b: ptr float`, `cast[pointer](a) == cast[pointer](b)`) share one cell's bytes, but the walk keeps a separate heap array per pointee sort and does not relate them at a shared address. `a[] == 5 and b[] > 1.0` is natively unreachable (the int 5's bits read as a float are a subnormal below 1.0), yet the walker answers an untrusted, lossy `sxSat` (INT-88's witness marks the doubly constrained cell lossy and the replay settles it) instead of `sxUnsat`. Left by INT-88"
+class = "precision"
+state = "open"
+note = ": open. The bar: a value written or constrained at one sort determines the read at another sort at the same address, so the cross-sort target is `sxUnsat`, pinned natively by `pinFind` over the `ptr` domains. INT-83 declines a location read at two types only through a `pointer` cast; two typed `ptr` parameters the model aliases are not covered"
+slice = "K9d"
+home = "K9d-12 (`wip/k9d12`)"
+source = "INT-88's left gap (`crossPtrBoth`)"
+evidence = "red reproducer `tests/tsymex_0016_int90_crosssortheap.nim` (unregistered): natively one address passed as both parameters with `a[] == 5` gives `b[] > 1.0` false; the walker's verdict for the target is an untrusted `sxSat`, not `sxUnsat`; the alias-only control is `sxSat`, pinned"
+aliases = []
+cells = []
+pins = []

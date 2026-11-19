@@ -1928,6 +1928,8 @@ task test, "Run the test suite":
             "tsymex_0016_int83_pointerparam",
             # RFC-0016 INT-84: a holey enum input ranges over its declared ordinals; a hole the program makes stays a value.
             "tsymex_0016_int84_holeyenum",
+            # RFC-0016 INT-88: one witness allocation per address-space address; a typed position at another sort is a view of it.
+            "tsymex_0016_int88_crossptralias",
             "tsymex_0016_k9cg_unbacked",
             "tsymex_0016_k9cg_unbacked_np",
             "tsymex_0016_k9cg_unbacked_table",

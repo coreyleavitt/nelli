@@ -7979,6 +7979,7 @@ type
     name:    string
     addrAst: Z3AnyAst
     pointee: IRType
+    isRef:   bool   ## RFC-0016 INT-88: a `ref` (a managed object), not a `ptr`
 
 proc registerNominalIfFull(ty: IRType) =
   ## Learn `ty`'s field structure under its `nominalId`, but only if `ty` is a
@@ -8075,7 +8076,8 @@ proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
   case sv.kind
   of svRef:
     if sv.refPointee != nil:
-      acc.add RefPos(name: path, addrAst: sv.refAst, pointee: sv.refPointee)
+      acc.add RefPos(name: path, addrAst: sv.refAst, pointee: sv.refPointee,
+                     isRef: true)
   of svPtr:
     if sv.ptrPointee != nil and
        refPointeeTypeId(sv.ptrPointee) == pointerTypeId:
@@ -8114,7 +8116,8 @@ proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
         let raw = checkedSelect(ctx, sv.seqDataRaw.raw, # [placeholder-audited]
                                             mkInt(i).raw)
         acc.add RefPos(name: path & "[" & $i & "]",
-                       addrAst: wrap[Z3AnyAst](ctx, raw), pointee: pointee)
+                       addrAst: wrap[Z3AnyAst](ctx, raw), pointee: pointee,
+                       isRef: not isPtr)
   of svVariant:
     for i, f in sv.vPlainFields:
       collectRefPositions(m, path & "." & sv.vPlainFieldNames[i], f, acc)
@@ -8244,16 +8247,34 @@ proc ptrFamilyKey(key: string): bool =
   rest.len > 0 and (rest[0] in {'0'..'9'} or rest.startsWith("-1__")) and
     "__" in rest
 
+proc addrSpaceKey(m: Z3Model; typeId, rendering: string): string =
+  ## RFC-0016 INT-88. The address-space key of the non-nil typed address
+  ## `rendering` of the sort `typeId`. Addresses are global across sorts:
+  ## INT-83's `@toAddr_T` maps each typed address the run cast into the
+  ## `pointer` space, so two typed positions (a `ptr int` and a `ptr float`)
+  ## the model puts at one `pointer` address are one allocation, keyed
+  ## `pointer|<address>`. A typed address no cast relates to the `pointer`
+  ## space keeps its own sort's key (two such addresses of different sorts
+  ## are unrelated in the model, so apart), as does a `pointer` itself.
+  if typeId == pointerTypeId: return pointerTypeId & "|" & rendering
+  for view in pointerViews:
+    if refPointeeTypeId(view.pointee) == typeId and
+       $m.eval(view.typedAst) == rendering:
+      return pointerTypeId & "|" & $m.eval(view.addrAst)
+  typeId & "|" & rendering
+
 proc refAddrOf(m: Z3Model, addrAst: Z3AnyAst, pointee: IRType): string =
   ## RFC-0005 S8h. The model address of a ref, "" for nil. Prefixed with the
-  ## pointee's type id: addresses of different `Ref_T` sorts never alias.
+  ## pointee's type id: addresses of different `Ref_T` sorts never alias,
+  ## unless the run related them through the `pointer` space (RFC-0016
+  ## INT-88, `addrSpaceKey`).
   let typeId = refPointeeTypeId(pointee)
   let rendering = $m.eval(addrAst)
   if currentNilConsts.hasKey(typeId) and
      $m.eval(currentNilConsts[typeId]) == rendering:
     ""
   else:
-    typeId & "|" & rendering
+    addrSpaceKey(m, typeId, rendering)
 
 type
   SnapshotBuild = object
@@ -8268,6 +8289,64 @@ type
     seenPos: HashSet[string]         ## RFC-0016 INT-81: positions recorded
     renderedLvls: Table[string, seq[int64]]  ## RFC-0016 INT-81: the tags a
                                              ## cell was rendered for
+    refPos: HashSet[string]          ## RFC-0016 INT-88: the positions that
+                                     ## are a `ref` (not a `ptr`)
+
+proc heapSortObserved(typeId: string): bool =
+  ## RFC-0016 INT-88. The walk materialised a heap of the sort `typeId` (its
+  ## whole-pointee heap, a field's, or a model array of its own), so a cell
+  ## of the sort may hold a value the path constrains.
+  for key in currentVariantHeaps.keys:
+    if key == typeId or key.startsWith(typeId & "__"): return true
+  false
+
+proc crossSortCellFidelity(b: SnapshotBuild) =
+  ## RFC-0016 INT-88. A cell held at two sorts (a `ptr int` and a `ptr float`
+  ## at one address) is one allocation, which the witness builds as its
+  ## owner's type and hands every other position as a typed view of it
+  ## (`resolveRef`). That is the model's input only when the bytes the views
+  ## share say one thing: no `ref` holds it (its object is sized by its own
+  ## type, which a larger view would overrun), the walk constrained the
+  ## content of at most one of its sorts (each sort's heap is a separate
+  ## array, so two constrained sorts may give one location two values no
+  ## bytes hold), and that sort is the owner's (whose leaves the cell is
+  ## filled from). Otherwise the rendered witness is not the model's, and it
+  ## is recorded lossy (`feExtractionFailed`): the replay settles it.
+  var sorts: Table[string, seq[int]]   # cell -> entry indexes
+  for k, e in b.entries:
+    if e.value == "nil": continue
+    let cell = if e.aliasRef.isSome: e.aliasRef.get else: e.name
+    if not b.entryOf.hasKey(cell): continue   # a field's address, an aim
+    sorts.mgetOrPut(cell, @[]).add k
+  for cell, idxs in sorts:
+    var held: seq[string]
+    var anyRef = false
+    for k in idxs:
+      let e = b.entries[k]
+      if e.sort notin held: held.add e.sort
+      if e.name in b.refPos: anyRef = true
+    if held.len < 2: continue
+    var observed: seq[string]
+    for srt in held:
+      if heapSortObserved(srt["Ref_".len .. ^1]): observed.add srt
+    let ownerSort = b.entries[b.entryOf[cell]].sort
+    let why =
+      if anyRef: "a `ref` shares it"
+      elif observed.len > 1: "the walk constrained " & $observed.len &
+                             " of its sorts (" & observed.join(", ") & ")"
+      elif observed.len == 1 and observed[0] != ownerSort:
+        "its constrained sort " & observed[0] & " is not its owner's (" &
+        ownerSort & ")"
+      else: ""
+    if why.len == 0: continue
+    let err = SymexErrorInfo(kind: feExtractionFailed,
+      severity: severity(feExtractionFailed),
+      msg: "witness cell '" & cell & "' is one address held at " &
+           held.join(", ") & ", and " & why &
+           ": the rendered cell is not the model's (RFC-0016 INT-88)",
+      scope: walkSite())
+    extractionErrors.add err     # threadvar: fallback
+    syncExtractionError(err)     # CR-9 Stage 5: LIVE WalkCtx field
 
 proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
                  inlineNil: bool): string =
@@ -8284,6 +8363,7 @@ proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
   # RFC-0016 INT-81: a cell rendered again (`buildHeapSnapshot`) meets its
   # positions again; each is recorded once.
   if b.seenPos.containsOrIncl(pos.name): return "@" & pos.name
+  if pos.isRef: b.refPos.incl pos.name   # RFC-0016 INT-88
   # RFC-0016 INT-81: the cell's floor, the deepest static type holding it.
   block:
     let cname = b.cellOf.getOrDefault(address, pos.name)
@@ -8388,7 +8468,8 @@ proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
       if sv.kind == svRef: (sv.refAst, sv.refPointee)
       else: (sv.ptrAst, sv.ptrPointee)
     return addPosition(b, m, RefPos(name: leafPath, addrAst: childAddr,
-                                    pointee: childPointee), inlineNil = true)
+                                    pointee: childPointee,
+                                    isRef: sv.kind == svRef), inlineNil = true)
   of itTuple, itArray:
     var parts: seq[string]
     for i, part in heapParts(valTy):
@@ -8456,7 +8537,8 @@ proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
         let elem = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
           sv.seqDataRaw.raw, mkInt(i).raw)) # [placeholder-audited]
         parts.add addPosition(b, m, RefPos(name: leafPath & "[" & $i & "]",
-                                           addrAst: elem, pointee: pointee),
+                                           addrAst: elem, pointee: pointee,
+                                           isRef: not isPtr),
                               inlineNil = true)
     of itString:
       let typed = wrap[Z3Array[Z3Int, Z3String]](
@@ -8511,7 +8593,8 @@ proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
       if sv.kind == svRef: (sv.refAst, sv.refPointee)
       else: (sv.ptrAst, sv.ptrPointee)
     addPosition(b, m, RefPos(name: cell.name & "." & fname,
-                             addrAst: childAddr, pointee: childPointee),
+                             addrAst: childAddr, pointee: childPointee,
+                             isRef: sv.kind == svRef),
                 inlineNil = true)
   of itString, itSeq, itTable, itSet, itTuple, itArray, itDistinct,
      itVariant, itMultiVariant:   ## RFC-0005 S8at: + a by-value case object
@@ -8716,12 +8799,22 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
   # name is the cell.
   var paramNames: seq[string]
   for p in params: paramNames.add p.name
+  # RFC-0016 INT-88: one address held at two sorts (`addrSpaceKey`) is
+  # owned by a `ref` (a managed object no raw allocation can stand in for),
+  # else by a position of a sort the walk read or wrote (whose leaves the
+  # cell is rendered from), and only then by name.
+  var ownerRank: Table[string, int]
   for pos in top:
     if pos.name notin paramNames: continue
     let address = refAddrOf(m, pos.addrAst, pos.pointee)
-    if address.len > 0 and
-       (not b.cellOf.hasKey(address) or pos.name < b.cellOf[address]):
+    if address.len == 0: continue
+    let rank = if pos.isRef: 0
+               elif heapSortObserved(refPointeeTypeId(pos.pointee)): 1
+               else: 2
+    if not b.cellOf.hasKey(address) or rank < ownerRank[address] or
+       (rank == ownerRank[address] and pos.name < b.cellOf[address]):
       b.cellOf[address] = pos.name
+      ownerRank[address] = rank
   for pos in top:
     discard addPosition(b, m, pos, inlineNil = false)
   var i = 0
@@ -8745,6 +8838,7 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
         b.entries[b.entryOf[cell.name]].pointsTo = renderCell(b, m, w, cell)
         again = true
     if not again and i >= b.queue.len: break
+  crossSortCellFidelity(b)   # RFC-0016 INT-88
   # RFC-0005 S8bh (item 2). A `ptr` cell whose input target (`sel`, see
   # `ptrTargets`) is a field of an object the snapshot holds as a cell
   # aliases that field: `aliasRef = "&<cell>.<field>"`, which the typed
@@ -8793,7 +8887,7 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
       var oid = ""
       for tid, srt in currentRefSorts:
         if srt == objSort: oid = tid
-      let address = oid & "|" & $m.eval(objAddr)
+      let address = addrSpaceKey(m, oid, $m.eval(objAddr))   # RFC-0016 INT-88
       # RFC-0005 S8bz (item 1): a by-value part's leaf heap
       # (`<O>__<f>__@.<part>`) is the field, then its parts.
       let leafAt = fam.find("__@.")
@@ -28480,6 +28574,11 @@ type
     cellOf: Table[string, string]   ## position -> its cell's name ("" = nil)
     cells: Table[string, pointer]   ## cell name -> the object built for it
     types: seq[WitnessCellType]     ## RFC-0016 INT-81: `registerCellType`
+    sortOf: Table[string, string]   ## RFC-0016 INT-88: position -> its sort
+    sortSize: Table[string, int]    ## RFC-0016 INT-88: `registerPtrSize`
+    rawCells: Table[string, pointer]  ## RFC-0016 INT-88: a cross-sort cell's
+                                      ## allocation, made by a view of it
+                                      ## before its owner filled it
 
 proc newRefWitness*(w: RawWitness): RefWitness =
   ## RFC-0005 S8h. A position absent from the snapshot is nil: a nil field is
@@ -28487,6 +28586,7 @@ proc newRefWitness*(w: RawWitness): RefWitness =
   ## path never materialised was never observed.
   result = RefWitness(w: w)
   for e in w.heapSnapshot:
+    result.sortOf[e.name] = e.sort   # RFC-0016 INT-88
     result.cellOf[e.name] =
       if e.value == "nil": ""
       elif e.aliasRef.isSome: e.aliasRef.get
@@ -28535,6 +28635,41 @@ proc cellSetMembers(c: RefWitness; path: string): seq[int64] =
   c.w.setMembers.getOrDefault(path)
 proc cellBuilt(c: RefWitness; cell: string): pointer = c.cells.getOrDefault(cell, nil)
 proc cellRecord(c: RefWitness; cell: string; p: pointer) = c.cells[cell] = p
+
+proc registerPtrSize*(c: RefWitness; sort: string; size: int) =
+  ## RFC-0016 INT-88. The byte size of the pointee of the `ptr` sort `sort`
+  ## (`Ref_<type id>`); the witness tuple registers every `ptr` type its
+  ## positions may hold (`emitWitnessTuple`), so a cell held at two sorts is
+  ## allocated for the larger.
+  c.sortSize[sort] = max(size, c.sortSize.getOrDefault(sort, 0))
+
+proc cellBytes(c: RefWitness; cell: string; own: int): int =
+  ## RFC-0016 INT-88. The bytes the `ptr` cell `cell` is allocated with: its
+  ## position's own pointee size `own`, or the largest registered pointee
+  ## of any position holding it.
+  result = own
+  for pos, cl in c.cellOf:
+    if cl == cell:
+      result = max(result, c.sortSize.getOrDefault(c.sortOf.getOrDefault(pos), 0))
+
+proc cellForeignView(c: RefWitness; pos, cell: string): bool =
+  ## RFC-0016 INT-88. The position `pos` holds the cell `cell` at another
+  ## sort than the cell's owner does (`cast[ptr float](addr x)` beside
+  ## `addr x`): it is a typed view of the owner's allocation, which the
+  ## owner fills.
+  let ps = c.sortOf.getOrDefault(pos)
+  let cs = c.sortOf.getOrDefault(cell)
+  pos != cell and ps.len > 0 and cs.len > 0 and ps != cs
+
+proc cellAlloc(c: RefWitness; cell: string; own: int): pointer =
+  ## RFC-0016 INT-88. The allocation of the `ptr` cell `cell`: the one a
+  ## view made before its owner was built, or a fresh zeroed one of
+  ## `cellBytes`. Unmanaged memory the witness owns for the rest of the
+  ## process (nothing frees what a SUT is handed as a raw pointer).
+  result = c.rawCells.getOrDefault(cell, nil)
+  if result == nil:
+    result = alloc0(cellBytes(c, cell, own))
+    c.rawCells[cell] = result
 
 proc registerCellType*(c: RefWitness; chain: seq[int64];
                        build: WitnessCellBuild) =
@@ -28723,6 +28858,12 @@ proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
     leaves = pos
   elif cell.startsWith(ptrAimPrefix):
     leaves = pos
+  when T is ptr:
+    # RFC-0016 INT-88. A position holding the cell at another sort than its
+    # owner is a typed view of the owner's one allocation, not a cell of its
+    # own: `cast[ptr float](addr x)` beside `addr x`.
+    if cellForeignView(c, pos, cell):
+      return cast[T](cellAlloc(c, cell, sizeof(result[])))
   when T is ref:
     # RFC-0016 INT-81. A cell is built ONCE, as the dynamic type the model
     # gave its address (its run-type tags), not as the static type of the
@@ -28753,7 +28894,9 @@ proc fillCell[T: ref | ptr](c: RefWitness; cell, leaves: string; x: var T) =
   else:
     # A `ptr` witness cell is unmanaged memory the witness owns for the rest
     # of the process: nothing frees what a SUT is handed as a raw pointer.
-    x = cast[T](alloc0(sizeof(x[])))
+    # RFC-0016 INT-88: one allocation per address, sized for the largest
+    # pointee any position holding it has (`cellAlloc`).
+    x = cast[T](cellAlloc(c, cell, sizeof(x[])))
     ptrAimRecord(cell, cast[pointer](x))
   cellRecord(c, cell, cast[pointer](x))
   when x[] is object:

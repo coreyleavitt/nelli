@@ -5028,6 +5028,14 @@ const viewCheckMaxLen = 256
   ## spells over a stand-in array (`termWalkMaxDepth`: a longer one's access
   ## at a symbolic index declines anyway).
 
+proc parseIndexOperand(ctx: ParseCtx; idx: NimNode;
+                       preamble: var seq[IRStmt]): IRExpr =
+  ## RFC-0005 S8i. An index operand, parsed as Nim checks it: as an index,
+  ## not as a conversion to the index type (`indexConvPending`).
+  ctx.indexConvPending = idx.kind in {nnkHiddenStdConv, nnkHiddenSubConv}
+  result = parseExpr(idx, preamble, ctx)
+  ctx.indexConvPending = false
+
 proc indexCheckLower(ctx: ParseCtx; checks: seq[NimNode];
                      preamble: var seq[IRStmt]) =
   ## RFC-0016 INT-89. The index checks `cPure` collected, in Nim's order, with
@@ -5053,9 +5061,7 @@ proc indexCheckLower(ctx: ParseCtx; checks: seq[NimNode];
         "an index check on an array the walker does not spell over a " &
         "stand-in (RFC-0016 INT-89; feUnsupportedOp)")
       return
-    ctx.indexConvPending = b[1].kind in {nnkHiddenStdConv, nnkHiddenSubConv}
-    let idxIR = parseExpr(b[1], preamble, ctx)
-    ctx.indexConvPending = false
+    let idxIR = ctx.parseIndexOperand(b[1], preamble)
     var zeros: seq[IRExpr]
     for _ in 0 ..< aty.size: zeros.add mkIntLit(0)
     let stand = freshSynth(ctx, "viewArr")
@@ -5323,15 +5329,20 @@ proc deadResultCall(call: NimNode; live: seq[string] = @[]): bool =
 
 proc deadResultExpr(ctx: ParseCtx; call: NimNode;
                     preamble: var seq[IRStmt];
-                    live: seq[string] = @[]): IRExpr =
-  ## RFC-0016 INT-92. `call`, of whose value nothing (or only the fields
-  ## `live`) is read, its callee registered under `#resultdead`.
+                    liveFromResult = false): IRExpr =
+  ## RFC-0016 INT-92. `call`, of whose value nothing (or, `liveFromResult`,
+  ## only the fields of the enclosing result its own caller reads,
+  ## `resultLiveFields`) is read, its callee registered under `#resultdead`.
+  ## The live list is read from `ctx` here, never taken as a value
+  ## parameter: in the compile-time VM such a parameter aliases the
+  ## caller's `ctx` field this body writes (RFC-0005 S8x).
   let saved = ctx.deadResultCallNode
   # A `var`, not a `let`: in the compile-time VM a `let` of a seq field
   # aliases it (RFC-0005 S8x); the restore below must see the old value.
   var savedLive = ctx.deadResultLive
   ctx.deadResultCallNode = call
-  ctx.deadResultLive = live
+  ctx.deadResultLive = if liveFromResult: ctx.resultLiveFields
+                       else: newSeq[string]()
   result = parseExpr(call, preamble, ctx)
   ctx.deadResultCallNode = saved
   ctx.deadResultLive = savedLive
@@ -5365,7 +5376,7 @@ proc deadResultLower(rhs: NimNode; preamble: var seq[IRStmt];
   if not ctx.resultValueDead: return nil
   if (lhs == nil or isResultName(lhs)) and
      deadResultCall(rhs, ctx.resultLiveFields):
-    return ctx.deadResultExpr(rhs, preamble, ctx.resultLiveFields)
+    return ctx.deadResultExpr(rhs, preamble, liveFromResult = true)
   if not ctx.resultSlotDead(lhs): return nil
   let dead = deadReadOf(rhs, ctx, discarded = false)
   if dead.kind != drOptimiser or not derefsTestable(dead.derefs): return nil
@@ -14593,9 +14604,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # and cpp). `isIndex` forks that; the conversion's range check must
       # not fire as well.
       let arrIR = liftIndexContainer(objIR, lhsCls.ty, preamble, ctx)
-      ctx.indexConvPending = n[1].kind in {nnkHiddenStdConv, nnkHiddenSubConv}
-      let idxIR = parseExpr(n[1], preamble, ctx)
-      ctx.indexConvPending = false
+      let idxIR = ctx.parseIndexOperand(n[1], preamble)
       let synth = freshSynth(ctx, "idx")
       # RFC-0005 S8z: the array's first index (`array[1..3, T]`: 1). It was
       # dropped, so `a[1]` read position 1 -- the second element.
@@ -20671,6 +20680,27 @@ proc letCursorDecline(c: NimNode; rest: seq[NimNode]; ctx: ParseCtx): IRStmt =
             why & "): not modelled (RFC-0016) (feUnsupportedOp)"),
     "a `let` holding memory that may be written")
 
+proc noteDeadLocal(ctx: ParseCtx; def: NimNode; rest: NimNode) =
+  ## RFC-0016 INT-86. `def`, the one `nnkIdentDefs` of a let/var section,
+  ## declares a local that `rest` (the statements after it in its list, its
+  ## scope) never names: dead (`deadLocals`). RFC-0016 INT-92: or whose
+  ## every later use is dead (`onlyDeadUses`: `discard v`, `result = v` of a
+  ## result the caller drops), bound to a zero those uses read
+  ## (`deadLocalsBound`). The list arrives as a node, not a `seq` value: in
+  ## the compile-time VM a `seq` parameter aliases the caller's location,
+  ## and this body writes `ctx`'s own `seq[NimNode]` fields (RFC-0005 S8x).
+  var named = false
+  if def[0].kind == nnkSym:
+    for st in rest:
+      if namesSym(st, def[0]): named = true; break
+  if named and def[2].kind != nnkEmpty:
+    if onlyDeadUses(rest, def[0].strVal,
+                    ResultUse(dead: ctx.resultValueDead,
+                              live: ctx.resultLiveFields)):
+      named = false
+      ctx.deadLocalsBound.add def[0]
+  if not named: ctx.deadLocals.add def[0]
+
 proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8l. Parse the statements `items[start ..^ 1]` of one statement
   ## list, lowering `defer:` the way Nim does: a `defer: D` guards the REST of
@@ -20691,22 +20721,9 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
        c[0].kind == nnkIdentDefs and c[0].len == 3 and
        (c[0][0].kind == nnkSym or c[0][0].kind == nnkIdent and
         c[0][0].strVal == "_"):
-      var named = false
-      if c[0][0].kind == nnkSym:
-        for j in k + 1 ..< items.len:
-          if namesSym(items[j], c[0][0]): named = true; break
-      # RFC-0016 INT-92: or whose every later use is dead (`onlyDeadUses`:
-      # `discard v`, `result = v` of a result the caller drops), bound to
-      # a zero those uses read.
-      if named and c[0][2].kind != nnkEmpty:
-        var rest = newNimNode(nnkStmtList)
-        for j in k + 1 ..< items.len: rest.add items[j]
-        if onlyDeadUses(rest, c[0][0].strVal,
-                        ResultUse(dead: ctx.resultValueDead,
-                                  live: ctx.resultLiveFields)):
-          named = false
-          ctx.deadLocalsBound.add c[0][0]
-      if not named: ctx.deadLocals.add c[0][0]
+      var rest = newNimNode(nnkStmtList)
+      for j in k + 1 ..< items.len: rest.add items[j]
+      ctx.noteDeadLocal(c[0], rest)
     if c.kind == nnkDefer:
       let fin = parseStmt(c[c.len - 1], ctx)   # lexically first
       stmts.add mkTry(parseDeferList(items, k + 1, ctx), @[], fin)
@@ -21304,9 +21321,7 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
       # as an index, not as a conversion to the index type).
       let tmp = freshSynth(ctx, "aw")
       preamble.add mkLet(tmp, step.recvTy, recvIR)
-      ctx.indexConvPending = step.idx.kind in {nnkHiddenStdConv, nnkHiddenSubConv}
-      let idxIR = parseExpr(step.idx, preamble, ctx)
-      ctx.indexConvPending = false
+      let idxIR = ctx.parseIndexOperand(step.idx, preamble)
       preamble.add mkIndexAssignStmt(tmp, idxIR, newVal, siteLoc(step.recv),
                                      step.lo,
                                      unchecked = step.recvTy.kind == itArray and

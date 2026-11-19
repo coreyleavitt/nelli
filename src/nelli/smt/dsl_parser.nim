@@ -13285,8 +13285,14 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           "seq `&` of an unbacked element (seNestedSeqUnsupported)")
         let dummy = zeroValueForType(rty)
         return (if dummy != nil: dummy else: mkSeqLit(@[], et))
-      let lSeq = classifyType(n[1]).ty.kind == itSeq
-      let rSeq = classifyType(n[2]).ty.kind == itSeq
+      # A whole-seq operand has the result's element type; with a seq of
+      # seqs (S8cp-r backs one) an element operand is itself a seq, so
+      # `itSeq` alone does not tell `seq & T` from `seq & seq`.
+      let wholeSeq = proc (x: NimNode): bool =
+        let t = classifyType(x).ty
+        t != nil and t.kind == itSeq and $t.seqElemTy == $et
+      let lSeq = wholeSeq(n[1])
+      let rSeq = wholeSeq(n[2])
       let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
       return mkSeqConcat((if lSeq: l else: mkSeqLit(@[l], et)),
                          (if rSeq: r else: mkSeqLit(@[r], et)))

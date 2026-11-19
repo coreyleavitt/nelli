@@ -27,6 +27,7 @@ import std/[unittest, strutils, os]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/check_options
 import nelli/smt/errorkind
 import ./s8cu_helpers
 import ./int6tlib/s0016_int6t_pushers
@@ -105,16 +106,14 @@ template untrusted(fn: untyped) =
   check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
 
 template keepsVerdict(fn: untyped) =
-  ## int6-m6's verdict (base 986e77ab, walker 479): sxSat, untrusted by the
-  ## loop's own bound and index checks (the witness's undefined kinds), never
-  ## by an unreadable tail.
+  ## int6-m6's verdict, recorded on its commit (986e77ab, walker 479): sxSat,
+  ## untrusted, the run's undefined kinds exactly `{ubSignedOverflow}` (the
+  ## scan's reading of the loop's own `inc`), never an unreadable tail.
   let r = pinFind(fn, tLabel("hit"), pinSettingsConst)
   checkpoint $r.status & " " & show(r.errors) & " " & $r.soundness
-  echo "  ", astToStr(fn), ": ", r.status, " trusted=", r.trusted,
-    " undefinedKinds=", r.soundness.undefinedKinds,
-    " witnessUndefined=", r.soundness.witnessUndefined
   check r.status == sxSat
-  check UbKind(ubTailUnverified) notin r.soundness.undefinedKinds
+  check not r.trusted
+  check r.soundness.undefinedKinds == {UbKind(ubSignedOverflow)}
 
 suite "int6-t: a push the typed body holds makes an opaque body unreadable":
   test "the build checks overflow":
@@ -149,6 +148,22 @@ suite "int6-t: the stdlib loop counter stays readable":
     check native(sutArrLoop(5)) == "hit"
     keepsVerdict(sutArrLoop)
 
+suite "int6-t: the exemption allowlist":
+  test "the scan's exemptions are the audited allowlist's":
+    let path = currentSourcePath().parentDir() / "0016-allowlist" /
+               "pushexempt.txt"
+    var listed: seq[string]
+    for l in readFile(path).splitLines():
+      let t = l.strip()
+      if t.len == 0 or t.startsWith("#"): continue
+      let f = t.split('\t')
+      check f.len == 3
+      check f[2].len > 0   # the justification
+      listed.add f[0]
+    var known: seq[string]
+    for e in loopIncExemptions: known.add e.file & ":" & e.name
+    check listed == known
+
 suite "int6-t: walker version":
-  test "walker version floor >= 480":
-    check parseInt(symexWalkerVersion) >= 480
+  test "walker version floor >= 481":
+    check parseInt(symexWalkerVersion) >= 481

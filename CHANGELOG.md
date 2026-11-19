@@ -118,6 +118,23 @@ where that note does not yet cover it.
   No stdlib routine of 2.2.10 is reached so (`system/seqs_v2.nim`'s
   `setLen[T]`, the only one, is reached through its magic alone); the pin
   is a module classified as the stdlib by its path.
+- **A push from a template or a macro, under the opaque scan** (int6-t;
+  walker 481). int6-a5 and int6-m6 found a body's check push in the
+  routine's definition text, which a push a template expands or a macro emits
+  is not in: an `{.symexOpaque.}` callee that used a user's
+  `template unchecked(body) = {.push overflowChecks: off.}; body; {.pop.}`
+  was read as one scope, so a label past it was a trusted `sxSat` over an
+  undefined signed overflow, and in a `--boundChecks:off` build a handler for
+  the `IndexDefect` of a template's `boundChecks: on` region was a trusted
+  false `sxUnsat`. The scan now reads the routine's typed body, which keeps
+  every push and pop (text, template or macro) as a pragma statement; the
+  text trigger is gone. One region is read through, from an audited
+  allowlist (`tests/0016-allowlist/pushexempt.txt`): the toolchain's
+  `system/iterators.nim` `unCheckedInc` (`push overflowChecks: off`, one
+  `inc` of a loop counter its loop has bounded, `pop`) inside that module's
+  own iterators, so an opaque `for x in s` keeps its verdicts. `sequtils`'s
+  own `unCheckedInc` is not on it: a callee that reaches one of its routines
+  may raise any `Defect` and may be undefined.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

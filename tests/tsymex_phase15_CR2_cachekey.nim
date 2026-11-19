@@ -1463,7 +1463,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## unreadable to the opaque defect scan, as a user one is): 478->479.
     ## RFC-0016 int6-r2 (an integer converted into a float range is
     ## converted to the range's base before the check): 479->480.
-    check symexWalkerVersion == "480"
+    ## RFC-0016 int6-t (the opaque defect scan finds a check push in the typed
+    ## body, so a template's or a macro's push counts; the stdlib's audited
+    ## loop-counter step is read through): 480->481.
+    check symexWalkerVersion == "481"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

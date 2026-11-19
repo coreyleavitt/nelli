@@ -598,11 +598,6 @@ type RoutineChecks* = object
     ## as a region of its own (the parser's `nnkPragma` arm, grouped by
     ## `withCheckDeclines`). A stdlib or own-runtime routine's in-body push
     ## stays the unsupported statement it was.
-  bodyPragmas*: bool
-    ## RFC-0016 int6-a5. The routine's definition, in the text the scan read,
-    ## holds a check pragma inside it: its body is not one scope. The walker
-    ## models it per region; a reader of the routine as one scope (the opaque
-    ## defect scan) reads it unreadable instead.
 
 const fourChecks = {coRange, coBound, coField, coObj}
 const scopedChecks = fourChecks + {coOverflow}
@@ -699,23 +694,63 @@ proc bodyAstOf(file: string): NimNode =
     bodyAsts[file] = ast
   bodyAsts[file]
 
-var stdlibPushFiles {.compileTime.}: Table[string, bool]
+const loopIncExemptions* = [
+  (file: "system/iterators.nim", name: "unCheckedInc")]
+  ## RFC-0016 int6-t. The push regions the opaque defect scan reads through
+  ## (`dsl_parser.bodyCheckPragma`): a template of the toolchain's `lib/` file,
+  ## whose body is exactly `{.push overflowChecks: off.}` `inc(x)` `{.pop.}`,
+  ## as expanded inside a routine of that same file. Each entry is audited, use
+  ## site by use site, in `tests/0016-allowlist/pushexempt.txt`, which must
+  ## list exactly these (`tsymex_0016_int6t_typedpush`).
 
-proc stdlibBodyPushes(file: string): bool =
-  ## RFC-0016 int6-m6. May a routine body in the stdlib file `file` push a
-  ## check option? Its text holds a check pragma off its line's start
-  ## (`innerCheckPragma`), or it cannot be read. Once per file: the parse and
-  ## the definition search are paid only where it holds.
-  if file notin stdlibPushFiles:
-    var text: string
-    stdlibPushFiles[file] =
-      readSource(compileTimeEnv(), file, text).len > 0 or
-      innerCheckPragma(text)
-  stdlibPushFiles[file]
+proc isLoopIncTemplate(t: NimNode; name: string): bool =
+  ## The parsed `template <name>(x) = {.push overflowChecks: off.}; inc(x);
+  ## {.pop.}`, and nothing else.
+  if t.kind != nnkTemplateDef or t.len < 7 or routineNameOf(t[0]) != name:
+    return false
+  let ps = t[3]
+  if ps.kind != nnkFormalParams or ps.len != 2 or ps[1].kind != nnkIdentDefs or
+     ps[1].len != 3: return false
+  let x = nameOf(ps[1][0])
+  let b = t[6]
+  if b.kind != nnkStmtList or b.len != 3: return false
+  let push = b[0]
+  if push.kind != nnkPragma or push.len != 2 or nameOf(push[0]) != "push" or
+     push[1].kind != nnkExprColonExpr or push[1].len != 2 or
+     checksNamed(nameOf(push[1][0])) != {coOverflow} or
+     turnsOn(push[1][1]) != 0: return false
+  let step = b[1]
+  if step.kind notin {nnkCall, nnkCommand} or step.len != 2 or
+     nameOf(step[0]) != "inc" or nameOf(step[1]) != x or x.len == 0:
+    return false
+  b[2].kind == nnkPragma and b[2].len == 1 and nameOf(b[2][0]) == "pop"
+
+proc loopIncExempt*(owner, push: NimNode): bool =
+  ## RFC-0016 int6-t. Is the pragma statement `push`, in the typed body of the
+  ## routine definition `owner`, the push of a `loopIncExemptions` template as
+  ## that template's own module expands it? Identified by position, never by a
+  ## name alone: `push` stands at the push of the template's body in the
+  ## toolchain's own file (a template expansion carries its definition's
+  ## positions), that file's text there is the template's exact shape
+  ## (`isLoopIncTemplate`), and `owner` is a routine of the same file (the
+  ## template is not exported, so only that module expands it). The caller
+  ## checks the expanded region's own shape.
+  if owner == nil or owner.kind notin RoutineNodes or push == nil: return false
+  let pli = push.lineInfoObj
+  let rel = libRelPath(pli.filename, configuredLibDir)
+  if rel.len == 0 or
+     libRelPath(owner.lineInfoObj.filename, configuredLibDir) != rel:
+    return false
+  for e in loopIncExemptions:
+    if e.file != rel: continue
+    let ast = bodyAstOf(pli.filename)
+    if ast == nil: return false
+    for t in ast:
+      if isLoopIncTemplate(t, e.name) and t[6][0].lineInfoObj.line == pli.line:
+        return true
 
 proc positionUnreadable(impl: NimNode; file: string; line: int;
-                        st: CheckState; m: ModuleScan;
-                        bodyPragmas: var bool): string =
+                        st: CheckState; m: ModuleScan): string =
   ## RFC-0016 PRC-07. Why the routine's check state at the four checks cannot be
   ## taken as one answer: "" when it can. The walker models a routine compiled
   ## with such an option off as unchecked and one compiled with it on as
@@ -725,25 +760,12 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   ## In a build with the option on, an ambiguous position is a deviation
   ## already (`checks` keeps it, and the routine declines).
   ##
-  ## RFC-0016 int6-a5: a check pragma inside the routine's own definition is a
-  ## push among its statements (one on the definition does not compile): it
-  ## sets `bodyPragmas`, and the parser walks each pair as a region. A routine
-  ## declared inside a body that pushes is unreadable here: its position is
-  ## that push's.
+  ## RFC-0016 int6-a5: a routine declared inside a body that pushes is
+  ## unreadable here: its position is that push's. (A push among the
+  ## routine's own statements is the parser's: it walks each pair as a
+  ## region, and the opaque defect scan finds it in the typed body, int6-t.)
   let off = scopedChecks - buildSemantics.checks
   let both = off * st.maybeOn * st.maybeOff
-  if isStdlibFile(file):
-    # RFC-0016 int6-m6: a stdlib routine's body may push too (`seqs_v2`'s
-    # `setLen`), and the opaque defect scan, which reads a body as one
-    # scope, reads it unreadable, as it does a user routine's. Only a file
-    # whose text holds a check pragma off its line's start is parsed for it.
-    if stdlibBodyPushes(file):
-      var ast = scannedAst(m, file)
-      if ast == nil: ast = bodyAstOf(file)
-      if ast != nil:
-        let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
-        if def != nil and inRoutineChecks(def, allChecks, allChecks).len > 0:
-          bodyPragmas = true
   if both != {}:
     return "its position is both pushed on and off for " & $both
   if not isStdlibFile(file):
@@ -754,8 +776,6 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
     if ast == nil: ast = bodyAstOf(file)
     if ast != nil:
       let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
-      if def != nil and inRoutineChecks(def, allChecks, allChecks).len > 0:
-        bodyPragmas = true
       let host = pushingHost(file, ast, def, line)
       if host.len > 0:
         return "it is declared inside " & host & ", whose body pushes " &
@@ -893,8 +913,7 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
     result.checks.excl coInf
   result.overflowOn = coOverflow notin result.checks
   result.bodyRegions = not isStdlibFile(file)
-  let unreadable = positionUnreadable(impl, file, li.line, st, scan,
-                                      result.bodyPragmas)
+  let unreadable = positionUnreadable(impl, file, li.line, st, scan)
   if unreadable.len > 0:
     result.why = "the routine's range, bound, field, object or overflow checks differ " &
       "within it, not modelled as one setting: " & unreadable

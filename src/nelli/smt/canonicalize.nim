@@ -1502,8 +1502,18 @@ const renderAsChoicesVersion* = "12"
   ##   a float", sxUnknown). An operand of any other kind declines at parse
   ##   time. Verdicts move (sxUnknown -> a definite verdict). Key bytes
   ##   change: such a body's IR.
+  ## - RFC-0016 int6-t (480->481): the opaque defect scan finds a check push
+  ##   in a routine's typed body (`dsl_parser.bodyCheckPragma`), not its
+  ##   definition text, so a push a template expands or a macro emits makes
+  ##   the body unreadable too; the text trigger is gone. The toolchain's
+  ##   `system/iterators.nim` `unCheckedInc` step inside that module's own
+  ##   iterators is read through (audited allowlist,
+  ##   `tests/0016-allowlist/pushexempt.txt`). Verdicts move (a trusted label
+  ##   or a trusted sxUnsat past such a callee no longer is; a callee reaching
+  ##   a `sequtils` routine's own `unCheckedInc` is unreadable). No key bytes
+  ##   change.
 
-const symexWalkerVersion* = "480"
+const symexWalkerVersion* = "481"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

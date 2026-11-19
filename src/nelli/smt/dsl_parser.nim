@@ -5859,6 +5859,48 @@ proc namesSym(n, sym: NimNode): bool =
 func isRoutineDefNode(n: NimNode): bool =
   n.kind in RoutineNodes
 
+proc loopIncRegion(s, owner: NimNode): bool =
+  ## RFC-0016 int6-t. Is the statement list `s`, in the typed body of the
+  ## routine definition `owner`, exactly an audited loop-counter step: `{.push
+  ## overflowChecks: off.}` (no other option), `inc` (`system.inc`, by its
+  ## magic) of a local variable by one, `{.pop.}`, whose push is a
+  ## `check_options.loopIncExemptions` template's as its own module expands it
+  ## (`loopIncExempt`)? Its counter's loop bounds it (the allowlist's audit),
+  ## so it neither overflows nor leaves its range: reading the routine as one
+  ## scope loses nothing there.
+  if s.kind != nnkStmtList or s.len != 3: return false
+  let push = s[0]
+  if not isPushPragma(push) or push.len != 2: return false
+  let it = push[1]
+  if it.kind != nnkExprColonExpr or it.len != 2 or
+     checksNamed(nameOf(it[0])) != {coOverflow} or literalOn(it[1]) != 0:
+    return false
+  let step = s[1]
+  if step.kind notin {nnkCall, nnkCommand} or step.len notin 2 .. 3 or
+     not magicIs(routineMagic(step[0]), "Inc"): return false
+  if step[1].kind != nnkSym or step[1].symKind != nskVar: return false
+  if step.len == 3 and
+     (step[2].kind notin {nnkIntLit .. nnkInt64Lit} or step[2].intVal != 1):
+    return false
+  isPopPragma(s[2]) and loopIncExempt(owner, push)
+
+proc bodyCheckPragma(n, owner: NimNode): NimNode =
+  ## RFC-0016 int6-t. The first pragma statement naming a check option in the
+  ## typed body `n` of the routine definition `owner` (a routine declared in
+  ## it aside: it is not run here), or nil. The typed body keeps every push
+  ## and pop as a pragma statement, whether the definition's text wrote it, a
+  ## template expanded it or a macro emitted it; int6-a5 and int6-m6 read the
+  ## text, which holds the first only. An audited loop-counter step
+  ## (`loopIncRegion`) is not one.
+  if n == nil or isRoutineDefNode(n): return nil
+  if loopIncRegion(n, owner): return nil
+  if n.kind == nnkPragma:
+    for it in n:
+      if namesCheck(it): return n
+  for c in n:
+    result = bodyCheckPragma(c, owner)
+    if result != nil: return
+
 proc runRoutineDef(sym: NimNode): NimNode =
   ## RFC-0005 S8be. The definition of the routine a call to `sym` runs (a
   ## proc, func, converter, iterator or method; not a template or macro,
@@ -6070,9 +6112,11 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # A converter's or iterator's body is scanned like a proc's.
         if fDef.len > 6 and fDef[6].kind != nnkEmpty:
           if depth >= maxDefectScanDepth: addUnreadable()
-          elif routineChecks(fDef).bodyPragmas:
+          elif bodyCheckPragma(fDef[6], fDef) != nil:
             # RFC-0016 int6-a5: its body pushes check options, so it is not
             # one scope; this scan reads a body under its owner's options.
+            # RFC-0016 int6-t: found in the typed body, so a template's or a
+            # macro's push counts as one written there.
             addUnreadable()
           else: scanOpaqueDefects(fDef[6], scan, seen, depth + 1, ctx,
                                   fDef, memo)
@@ -6151,12 +6195,14 @@ proc opaqueDefectScan(calleeSym: NimNode; ctx: ParseCtx): OpaqueScan =
   if impl == nil or impl.len <= 6 or impl[6].kind == nnkEmpty:
     result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
     return
-  if routineChecks(impl).bodyPragmas:
+  if bodyCheckPragma(impl[6], impl) != nil:
     # RFC-0016 int6-a5: a body that pushes check options is not one scope,
     # and the scan reads each node under its owner's options (`ownerChecked`):
     # a region checked against the build's reading lost its Defect (a handler
     # around the call was a false sxUnsat), one unchecked lost its undefined
     # behaviour. Unreadable, as a closure or a method is.
+    # RFC-0016 int6-t: the push is found in the typed body (template, macro
+    # or text), not the definition's text (`bodyCheckPragma`).
     result.noteDefect anyDefect
     result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
     return

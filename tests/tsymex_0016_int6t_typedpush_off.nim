@@ -58,5 +58,5 @@ suite "int6-t (off build): a pushed-on region from a template or macro":
     reachable(sutMacro)
 
 suite "int6-t (off build): walker version":
-  test "walker version floor >= 480":
-    check parseInt(symexWalkerVersion) >= 480
+  test "walker version floor >= 481":
+    check parseInt(symexWalkerVersion) >= 481

@@ -19,6 +19,7 @@ nightly-cpp-known-red.txt	1
 nightly-msvc-known-red.txt	0
 nightly-z3-4.13.4-known-red.txt	0
 pragma.txt	166
+pushexempt.txt	1
 rawhold.txt	316
 rawlife.txt	69
 stdlib.txt	0

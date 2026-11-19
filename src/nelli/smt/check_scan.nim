@@ -1033,20 +1033,6 @@ proc moduleDefs*(env: SourceEnv; path: string): ModuleDefs =
       else:
         result.exportedNames.add nimIdentNormalize(sym)
 
-proc innerCheckPragma*(text: string): bool =
-  ## RFC-0016 int6-m6. Does `text` hold a pragma that does not start its line
-  ## and whose text names a check (`checks`, `rangeChecks`, ...)? A push in a
-  ## routine body is indented; a module's own push need not be. A cheap
-  ## filter: it may hold where no body pushes (a routine's own pragma list,
-  ## `styleChecks`), never the other way.
-  var i = text.find("{.")
-  while i >= 0:
-    if i > 0 and text[i - 1] != '\n':
-      let e = text.find(".}", i + 2)
-      let h = text.find("hecks", i + 2)
-      if h >= 0 and (e < 0 or h < e): return true
-    i = text.find("{.", i + 2)
-
 proc stateAt*(m: ModuleScan; file: string; line, col: int): CheckState =
   ## The options at a position. A position inside a template or a macro is where
   ## the routine was written, not where it was expanded (the module's union); so

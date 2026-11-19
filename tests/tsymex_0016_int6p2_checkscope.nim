@@ -21,9 +21,10 @@
 ##     halting there as in a `--boundChecks:off` build
 ##     (`tsymex_0016_boundoff`);
 ##   * a `push rangeChecks: off` inside a routine body leaves the routine
-##     unchecked at one position only (`R(300)` keeps 300 there): neither
-##     setting, so it declines `feCheckOption` (it was walked checked, a
-##     false `sxUnsat` for the label).
+##     unchecked at one position only (`R(300)` keeps 300 there): RFC-0016
+##     int6-a5 walks that region under its own scope (it declined
+##     `feCheckOption`, and before that was walked checked, a false `sxUnsat`
+##     for the label).
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -134,9 +135,9 @@ suite "int6 check scopes: a pushed-off region in a checked build":
     checkpoint show(r.errors)
     check r.status == sxSat
     pinDecline(idxOffOob, ik, ubArrayOutOfBounds, excluding = {feCheckOption})
-  test "a push inside a routine body declines, it is not read as checked":
+  test "a push inside a routine body is walked unchecked there (int6-a5)":
     check native(innerOff(300)) == "hit"
-    pinDecline(innerOff, cellKey(faGeneric, "int6p2_checkscope"), feCheckOption)
+    keeps(innerOff)
 
 suite "int6 check scopes: walker version":
   test "walker version floor >= 465":

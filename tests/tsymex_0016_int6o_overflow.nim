@@ -21,8 +21,9 @@
 ##     still raises `OverflowDefect`; `+=` is the `Inc` magic, expanded under
 ##     the caller's options, and wraps (`low(int)`);
 ##   * a push inside a routine body leaves it unchecked at some positions only
-##     (`innerOff(high(int))` is `-1`, no raise): neither setting, so it
-##     declines `feCheckOption` (it was walked checked).
+##     (`innerOff(high(int))` is `-1`, no raise): RFC-0016 int6-a5 walks that
+##     region unchecked, so its signed overflow halts as undefined (it declined
+##     `feCheckOption`, and before that was walked checked).
 ## Each was a whole-routine `feOverflowCheckOption` decline before (but the
 ## last, walked checked).
 
@@ -169,10 +170,11 @@ suite "int6-o: an overflow-off region in a checked build":
     checkpoint show(x.errors)
     check x.status != sxRaised
 
-  test "a push inside a routine body declines, it is not read as checked":
+  test "a push inside a routine body is walked unchecked there (int6-a5)":
     check native(sutInnerOff(id(high(int)))) == "hit"
-    pinDecline(sutInnerOff, cellKey(faGeneric, "int6o_overflow/inner"),
-               feCheckOption)
+    pinDecline(sutInnerOff, cellKey(axDefinedness, "add/signed/pushOff/inner"),
+               ubSignedOverflow, excluding = {feOverflowCheckOption,
+                                              feCheckOption})
 
 suite "int6-o: walker version":
   test "walker version floor >= 467":

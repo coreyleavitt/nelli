@@ -11,7 +11,9 @@
 ##     `v *= k` stores 30 into a `range[0..10]` without a raise;
 ##   * a routine declared outside the push keeps the build's (unchecked) when
 ##     called from inside it, and one declared under it keeps the push when
-##     called from outside.
+##     called from outside;
+##   * a `push boundChecks: on` inside a routine body checks its region:
+##     `s[5]` there raises `IndexDefect` (RFC-0016 int6-a5).
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -47,6 +49,14 @@ proc idxOn(v: int) =
   if s[v] == 30: symexTarget("hit")
 {.pop.}
 
+proc innerBoundOn(v: int) =
+  ## RFC-0016 int6-a5: a push inside the body, its region checked.
+  let s = @[10, 20, 30]
+  {.push boundChecks: on.}
+  let x = s[v]
+  {.pop.}
+  if x == 30: symexTarget("hit")
+
 template keeps(fn: untyped) =
   let r = pinFind(fn, tLabel("hit"))
   checkpoint show(r.errors)
@@ -75,6 +85,14 @@ suite "int6 check scopes: a pushed-on region in an unchecked build":
   test "boundChecks on: s[i] raises IndexDefect":
     raises(idxOn, "IndexDefect")
     let r = pinFind(idxOn, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+
+  test "a push boundChecks: on inside a body raises there (int6-a5)":
+    check native(innerBoundOn(5)) == "IndexDefect"
+    check native(innerBoundOn(2)) == "hit"
+    raises(innerBoundOn, "IndexDefect")
+    let r = pinFind(innerBoundOn, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
 

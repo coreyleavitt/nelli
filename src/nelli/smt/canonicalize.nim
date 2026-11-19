@@ -891,8 +891,16 @@ const renderAsChoicesVersion* = "12"
   ##   `sxRaised(NilAccessDefect)`); an unused local copying a view's
   ##   location is the optimiser's (`#viewdead`: a nil on it declines; it
   ##   was a nil-access claim, `-O2` returns). No key bytes change.
+  ## - RFC-0016 INT-92 (450->452, provisional; 451 is reserved): INT-86's
+  ##   optimiser class across a call. A call whose value nothing reads (a
+  ##   discard, a dead local) registers its callee under `#resultdead`; if
+  ##   the body never reads `result`, a pure read through a `ref`/`ptr` only
+  ##   `result` takes is dead, and a nil on it declines (`discard rd(nil)`
+  ##   was a false `sxRaised(NilAccessDefect)`: `-O0` faults, `-O2`
+  ##   returns). A by-value actual whose formal the callee never names is
+  ##   dead the same way (`noReadL(p.n)`). No key bytes change.
 
-const symexWalkerVersion* = "450"
+const symexWalkerVersion* = "452"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

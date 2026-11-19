@@ -1568,6 +1568,16 @@ type
                                    ## parsed is such a callee (`#viewdead`):
                                    ## a nil pointer the location is offset
                                    ## from declines as well.
+    deadResultCallNode*: NimNode
+                                   ## RFC-0016 INT-92. The call whose value
+                                   ## nothing reads (a discard, a dead
+                                   ## local), while its lowering registers
+                                   ## the callee (`#resultdead`).
+    resultValueDead*: bool
+                                   ## RFC-0016 INT-92. The routine being
+                                   ## parsed is such a callee: a pure read
+                                   ## only `result` takes is dead
+                                   ## (`deadResultLower`).
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ## `procScoped`'s fields (`ProcScopedCollectors`, round-6 R4: `seq[NimNode]`
@@ -4965,6 +4975,129 @@ proc viewResultLower(rhs: NimNode; preamble: var seq[IRStmt];
   if not viewAddrLower(rhs[0], pre, ctx): return nil
   preamble.add pre
   zero
+
+# ---- RFC-0016 INT-92: a nil read a call leaves dead -------------------------
+#
+# INT-86's optimiser class across a call. A read whose value reaches nothing
+# observable is loaded at `-O0` and dropped at `-O2`, where the call is
+# inlined (pinned toolchain, gcc and g++, c and cpp, the default build and
+# `-d:release`; `tsymex_0016_int92_deadcallnil`): `discard rd(nil)` and an
+# unused `let x = rd(nil)` with `rd(p: ref B): int = p.n` (the result is
+# dead), `noReadL(p.n)` (the callee never names its formal). A nil on such a
+# read declines, never a claim. The analysis is a proof of deadness, never a
+# guess: a callee whose body reads `result` (`if result > 5: ...`), declares
+# a routine, or assigns `result` anything but a pure read keeps the ordinary
+# lowering, as does a formal the body names at all (a branch on it, a
+# store of it: live under every build). The callee of a call whose result is
+# dead is registered under `#resultdead` (`ensureProcRegistered`), parsed
+# with `resultValueDead` (`deadResultLower`).
+
+proc resultReadIn(n: NimNode): bool =
+  ## RFC-0016 INT-92. `n` reads `result`, or declares a routine (whose own
+  ## `result` this does not tell apart): anything but the bare left-hand
+  ## side of an assignment counts.
+  case n.kind
+  of nnkSym, nnkIdent:
+    return n.strVal == "result"
+  of nnkAsgn, nnkFastAsgn:
+    if n.len == 2 and n[0].kind in {nnkSym, nnkIdent} and
+       n[0].strVal == "result":
+      return resultReadIn(n[1])
+  of RoutineNodes:
+    return true
+  else: discard
+  for c in n:
+    if resultReadIn(c): return true
+  false
+
+proc hasPointerDeref(n: NimNode): bool =
+  ## RFC-0016 INT-92. `n` dereferences a `ref`/`ptr` somewhere.
+  if n.kind in {nnkDerefExpr, nnkHiddenDeref} and n.len == 1 and
+     n[0].typeKind in {ntyRef, ntyPtr}:
+    return true
+  for c in n:
+    if hasPointerDeref(c): return true
+  false
+
+proc deadResultCandidate(impl: NimNode): bool =
+  ## RFC-0016 INT-92. A callee whose result, once its caller drops it, is
+  ## provably dead in its own body too: it never reads `result`, and some
+  ## dereference in it may be a read only `result` takes.
+  impl != nil and impl.kind == nnkProcDef and impl.len > 6 and
+    impl[6].kind != nnkEmpty and not resultReadIn(impl[6]) and
+    hasPointerDeref(impl[6])
+
+proc deadResultCall(call: NimNode): bool =
+  ## RFC-0016 INT-92. `call` is a call to a routine with a body, returning a
+  ## value (not a view), that `deadResultCandidate` admits: its result, when
+  ## nothing reads it, is the `#resultdead` registration's.
+  if call.kind notin {nnkCall, nnkCommand, nnkInfix, nnkPrefix} or
+     call.len == 0 or call[0].kind != nnkSym or
+     symKind(call[0]) notin {nskProc, nskFunc} or
+     routineMagic(call[0]).len > 0 or isViewCall(call) or
+     call.typeKind in {ntyNone, ntyEmpty}:
+    return false
+  deadResultCandidate(resolveRoutineImpl(call[0]))
+
+proc deadResultExpr(ctx: ParseCtx; call: NimNode;
+                    preamble: var seq[IRStmt]): IRExpr =
+  ## RFC-0016 INT-92. `call`, whose value nothing reads, its callee
+  ## registered under `#resultdead`.
+  let saved = ctx.deadResultCallNode
+  ctx.deadResultCallNode = call
+  result = parseExpr(call, preamble, ctx)
+  ctx.deadResultCallNode = saved
+
+proc derefsTestable(derefs: seq[NimNode]): bool =
+  ## RFC-0016 INT-92. Every pointer a dead read goes through is one the walk
+  ## tests for nil (`mkNilGuard`): otherwise the ordinary lowering stands,
+  ## rather than a decline the read did not need.
+  for d in derefs:
+    if classifyType(d).ty.kind notin {itRef, itPtr}: return false
+  true
+
+proc deadResultLower(rhs: NimNode; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): IRExpr =
+  ## RFC-0016 INT-92. `result = rhs` in a callee registered for a call whose
+  ## value nothing reads (`resultValueDead`): a pure read through a
+  ## `ref`/`ptr` is dead (`deadReadOf`'s `drOptimiser`), so its index checks
+  ## run, a nil pointer on it declines, and the value is a zero no caller
+  ## reads. Nil where the ordinary lowering stands.
+  if not ctx.resultValueDead: return nil
+  let dead = deadReadOf(rhs, ctx, discarded = false)
+  if dead.kind != drOptimiser or not derefsTestable(dead.derefs): return nil
+  let zero = zeroValueForType(classifyType(rhs).ty)
+  if zero == nil: return nil
+  ctx.indexCheckLower(dead.checks, preamble)
+  preamble.add ctx.deadReadDecline(dead.derefs)
+  zero
+
+proc formalNeverNamed(calleeSym: NimNode; k: int): bool =
+  ## RFC-0016 INT-92. The callee's body never names its `k`th formal (by
+  ## name, so a capture, a shadowing local or a template's use counts as
+  ## named): the actual's value is dead once the call is inlined.
+  let impl = resolveRoutineImpl(calleeSym)
+  if impl == nil or impl.kind != nnkProcDef or impl.len < 7 or
+     impl[3].kind != nnkFormalParams or impl[6].kind == nnkEmpty:
+    return false
+  var name = ""
+  var pos = 0
+  for j in 1 ..< impl[3].len:
+    let d = impl[3][j]
+    if d.kind != nnkIdentDefs: return false
+    for x in 0 ..< d.len - 2:
+      if pos == k:
+        if d[^2].kind == nnkVarTy or d[x].kind notin {nnkSym, nnkIdent}:
+          return false
+        name = d[x].strVal
+      inc pos
+  if name.len == 0 or name == "_": return false
+  proc names(n: NimNode): bool =
+    if n.kind in {nnkSym, nnkIdent} and eqIdent(n, name): return true
+    for c in n:
+      if names(c): return true
+    false
+  not names(impl[6])
 
 proc mkNilGuard(ctx: ParseCtx; bases: seq[NimNode]; i: int): seq[IRStmt] =
   if i >= bases.len: return @[]
@@ -10405,7 +10538,22 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     # loads nothing natively); the write-back decline below follows.
     let viewActual = n[i].kind in {nnkCall, nnkCommand} and
                      isViewCall(n[i]) and formalIsVar(calleeSym, i - 1)
-    var ir = if viewActual: ctx.viewAddrExpr(n[i], preamble)
+    # RFC-0016 INT-92: a by-value actual whose formal the callee never names
+    # is dead once the call is inlined: a pure read through a `ref`/`ptr`
+    # in it is the optimiser's (`noReadL(p.n)`: `-O0` faults, `-O2` does
+    # not), so its index checks run and a nil on it declines; the formal
+    # gets a zero nothing reads.
+    var deadArg: IRExpr = nil
+    if not viewActual and n[i].kind != nnkHiddenAddr and arrayLv == nil and
+       argTys[^1] != nil and formalNeverNamed(calleeSym, i - 1):
+      let dead = deadReadOf(n[i], ctx, discarded = false)
+      if dead.kind == drOptimiser and derefsTestable(dead.derefs):
+        deadArg = zeroValueForType(argTys[^1])
+        if deadArg != nil:
+          ctx.indexCheckLower(dead.checks, preamble)
+          preamble.add ctx.deadReadDecline(dead.derefs)
+    var ir = if deadArg != nil: deadArg
+             elif viewActual: ctx.viewAddrExpr(n[i], preamble)
              else: parseExpr(n[i], preamble, ctx)
     let irHi = preamble.len
     # RFC-0005 S8bz (item 3): a `var` actual's copy-in observes nothing; the
@@ -21339,6 +21487,9 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
      symKind(n[0]) == nskResult:
     let z = viewResultLower(n[1], preamble, ctx)
     if z != nil: return parseAsgn(n, z, preamble, ctx)
+    # RFC-0016 INT-92: a dead result's pure read (`deadResultLower`).
+    let d = deadResultLower(n[1], preamble, ctx)
+    if d != nil: return parseAsgn(n, d, preamble, ctx)
   # RFC-0005 S8cp (item 2): the heap model's discriminator store checks its
   # branch and keeps its one array per tag (S8l); unchecked, it declines.
   if ctx.procScoped.uncheckedAssign > 0 and isHeapDiscriminator(n[0]):
@@ -22851,7 +23002,9 @@ proc parseStmtInner(n: NimNode,
     elif inner.kind == nnkAsgn and inner[0].kind == nnkSym and
          inner[0].strVal == "result":
       # RFC-0016 INT-89: a view callee's address only (`viewResultLower`).
-      let z = viewResultLower(inner[1], preamble, ctx)
+      var z = viewResultLower(inner[1], preamble, ctx)
+      # RFC-0016 INT-92: a dead result's pure read (`deadResultLower`).
+      if z == nil: z = deadResultLower(inner[1], preamble, ctx)
       mkReturnVal(if z != nil: z else: parseExpr(inner[1], preamble, ctx))
     else:
       mkReturnVal(parseExpr(inner, preamble, ctx))
@@ -22876,6 +23029,12 @@ proc parseStmtInner(n: NimNode,
         ctx.viewCallLower(ini, pre, dead = true)
         preamble.add pre
         return mkBlock(@[])
+      # RFC-0016 INT-92: a call whose value lands in it is a call whose
+      # value nothing reads (`#resultdead`).
+      if deadResultCall(ini):
+        let v = ctx.deadResultExpr(ini, preamble)
+        if v == nil: return mkBlock(@[])
+        return mkLet(freshSynth(ctx, "deadSink"), classifyType(ini).ty, v)
     var stmts: seq[IRStmt]
     for id0 in n:
       id0.expectKind nnkIdentDefs
@@ -23547,7 +23706,10 @@ proc parseStmtInner(n: NimNode,
          isViewCall(n[0][0]):
         ctx.viewCallLower(n[0], preamble)
         return mkBlock(@[])
-      let sinkIR = parseExpr(n[0], preamble, ctx)
+      # RFC-0016 INT-92: a call whose value nothing reads; its callee's
+      # pure read only `result` takes is dead (`#resultdead`).
+      let sinkIR = if deadResultCall(n[0]): ctx.deadResultExpr(n[0], preamble)
+                   else: parseExpr(n[0], preamble, ctx)
       if sinkIR == nil:
         mkBlock(@[])
       elif sinkIR.kind in {iekLambda, iekClosureCall}:
@@ -24542,6 +24704,12 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
                  callSite == ctx.viewAddrCall
   let viewDead = viewAddr and ctx.viewDeadCall
   if viewAddr: key.add(if viewDead: "#viewdead" else: "#viewaddr")
+  # RFC-0016 INT-92: the callee of a call whose value nothing reads, when its
+  # body never reads `result` either (`deadResultLower`).
+  let deadRes = not viewAddr and ctx.deadResultCallNode != nil and
+                callSite != nil and callSite == ctx.deadResultCallNode and
+                deadResultCandidate(impl)
+  if deadRes: key.add "#resultdead"
   if key in ctx.procs or key in ctx.parsing:
     return key  ## already known, or actively being parsed (mutual-recursion)
   # Phase 15 G6 / RFC-0005 S8 (§2.5 point 3). A stdlib-concept violation is
@@ -24661,9 +24829,15 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   ctx.viewDeadCall = false
   ctx.resultAddrOnly = viewAddr
   ctx.resultDead = viewDead
+  let savedDeadResNode = ctx.deadResultCallNode
+  let savedValueDead = ctx.resultValueDead
+  ctx.deadResultCallNode = nil
+  ctx.resultValueDead = deadRes
   var sig = parseCalleeImpl(impl, ctx, typeSubst,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
     else: nil, byRef)
+  ctx.deadResultCallNode = savedDeadResNode
+  ctx.resultValueDead = savedValueDead
   ctx.viewAddrCall = savedViewCall
   ctx.resultAddrOnly = savedAddrOnly
   ctx.resultDead = savedDead
@@ -24900,7 +25074,9 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
       # `proc f(...): T = expr` shape: rewrite as `return expr`.
       var preamble: seq[IRStmt]
       # RFC-0016 INT-89: a view callee's address only (`viewResultLower`).
-      let viewIR = viewResultLower(rhs, preamble, ctx)
+      var viewIR = viewResultLower(rhs, preamble, ctx)
+      # RFC-0016 INT-92: a dead result's pure read (`deadResultLower`).
+      if viewIR == nil: viewIR = deadResultLower(rhs, preamble, ctx)
       let valIR = if viewIR != nil: viewIR else: parseExpr(rhs, preamble, ctx)
       if preamble.len == 0:
         mkReturnVal(valIR)

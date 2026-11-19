@@ -1932,6 +1932,8 @@ task test, "Run the test suite":
             "tsymex_0016_int86_discardnil",
             # RFC-0016 INT-89: a discarded view computes an address, not a read; a discarded array element at a variable index runs only its bound check.
             "tsymex_0016_int89_varretnil",
+            # RFC-0016 INT-92: a nil read a call leaves dead (a dropped result, an unnamed by-value formal) is the optimiser's (declines).
+            "tsymex_0016_int92_deadcallnil",
             "tsymex_0016_k9cg_unbacked",
             "tsymex_0016_k9cg_unbacked_np",
             "tsymex_0016_k9cg_unbacked_table",

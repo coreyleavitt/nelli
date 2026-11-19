@@ -1288,7 +1288,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## runs without the read; 448 reserved; provisional): 447->449.
     ## RFC-0016 INT-89 remnants (a view handed on without the address
     ## wrapper, a discarded `lent`; provisional): 449->450.
-    check symexWalkerVersion == "450"
+    ## RFC-0016 INT-92 (a nil read a call leaves dead is the optimiser's; 451
+    ## reserved; provisional): 450->452.
+    check symexWalkerVersion == "452"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -33,10 +33,12 @@ proc bvSV(ctx: Z3Context; v: Z3AnyAst; w: int; signed: bool): SymVal =
   else: SymVal(kind: svBV64, bv64: wrap[Z3BitVec[64]](ctx, v.raw), signed: signed)
 
 proc renderingOf(ctx: Z3Context; v: Z3AnyAst; w: int; signed: bool): Z3String =
-  ## The walker's `iekIntToStr` term over `v` (`lowerIntToStr`), registered
+  ## The walker's `iekIntToStr` term over `v` (`lowerStrArm`'s arm), registered
   ## as the walker registers it.
   setCurrentContext(ctx)
-  lowerIntToStr(bvSV(ctx, v, w, signed)).str
+  var env: Env
+  env["v"] = bvSV(ctx, v, w, signed)
+  lowerStrArm(env, mkStrOp(iekIntToStr, "$", @[mkVar("v")])).str
 
 proc proveUnsat(ctx: Z3Context; fs: openArray[Z3Bool]): Z3Status =
   let s = newSolver(ctx)

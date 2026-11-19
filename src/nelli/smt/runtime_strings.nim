@@ -647,11 +647,12 @@ proc replaceAtPointsPlain(sp: RegexSpec; pr: PcreParse;
   regexPointSite(sp, pr, recv, by, mkInt(0), r, @[], declined = true)
   SymVal(kind: svString, str: r)
 
-proc lowerIntToStr*(operand: SymVal): SymVal =
+proc lowerIntToStr(operand: SymVal): SymVal =
   ## `$n` of an int-typed `operand`: the walker's `iekIntToStr` term, and the
   ## rendering registered for `strLenOf`, `renderCmp` and `strByteAt`.
-  ## Exported so the proofs (`tsymex_0016_int74_renderslice`,
-  ## `tsymex_0016_int57_orderproof`) state their claims over this term.
+  ## Private (the module's one entry is `lowerStrArm`): the proofs
+  ## (`tsymex_0016_int74_renderslice`, `tsymex_0016_int57_orderproof`) reach
+  ## it as the walker does, through an `iekIntToStr` over a bound variable.
   # Phase 15 S10a. `$n` (system.`$` on an int) → Z3 `(str.from-int n)`
   # (`Z3_mk_int_to_str`), exposed by nim-z3 as `toStr` on `Z3Int`. Result is a
   # decimal-string svString. (Z3's `int.to.str` is the empty string for a

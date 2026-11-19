@@ -335,6 +335,10 @@ proc fieldwiseEq(a, b: IRExpr): bool =
   of iekSeqSplice:   # RFC-0005 S8bu
     fieldwiseEq(a.spBase, b.spBase) and fieldwiseEq(a.spAt, b.spAt) and
       fieldwiseEq(a.spPart, b.spPart)
+  of iekSeqConcat:   # RFC-0016 INT-80
+    fieldwiseEq(a.scLeft, b.scLeft) and fieldwiseEq(a.scRight, b.scRight)
+  of iekPtrCast:     # RFC-0016 INT-83
+    fieldwiseEq(a.pcArg, b.pcArg) and fieldwiseEq(a.pcTy, b.pcTy)
   of iekStrLit: a.sval == b.sval
   of iekContains: fieldwiseEq(a.container, b.container) and fieldwiseEq(a.key, b.key)
   of iekTabRemovedSince:   # RFC-0005 S8bx
@@ -679,6 +683,8 @@ proc sSeqSliceView(): IRExpr =
   mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4), view = true)
 proc sSeqSplice(): IRExpr =
   mkSeqSplice(mkVar("data"), mkIntLit(2), mkVar("part"))
+proc sSeqConcat(): IRExpr = mkSeqConcat(mkVar("left"), mkVar("right"))
+proc sPtrCast(): IRExpr = mkPtrCast(mkVar("p"), tPtr(tInt(16, false)))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
 proc sContains(): IRExpr = mkContains(mkVar("s"), mkVar("k"))
 proc sSeqAdd(): IRExpr = mkSeqAdd(mkVar("s"), mkIntLit(9))
@@ -783,6 +789,15 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check reconstructed.ssView
   test "iekSeqSplice":
     check fieldwiseEq(sSeqSplice(), roundtripExpr(sSeqSplice()))
+  test "iekSeqConcat (RFC-0016 INT-80)":
+    let reconstructed = roundtripExpr(sSeqConcat())
+    check fieldwiseEq(sSeqConcat(), reconstructed)
+    check reconstructed.scRight.vname == "right"
+  test "iekPtrCast (RFC-0016 INT-83)":
+    let reconstructed = roundtripExpr(sPtrCast())
+    check fieldwiseEq(sPtrCast(), reconstructed)
+    check reconstructed.pcTy.kind == itPtr
+    check reconstructed.pcTy.ptrPointeeTy.width == 16
   test "iekStrLit":
     check fieldwiseEq(sStrLit(), roundtripExpr(sStrLit()))
   test "iekContains":
@@ -867,6 +882,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekSeqLen: discard                      ## "iekSeqLen"
       of iekSeqSlice: discard                    ## "iekSeqSlice" (2 tests: plain + view)
       of iekSeqSplice: discard                   ## "iekSeqSplice" (RFC-0005 S8bu)
+      of iekSeqConcat: discard                   ## "iekSeqConcat (RFC-0016 INT-80)"
+      of iekPtrCast: discard                     ## "iekPtrCast (RFC-0016 INT-83)"
       of iekStrLit: discard                      ## "iekStrLit"
       of iekContains: discard                    ## "iekContains"
       of iekTabRemovedSince: discard             ## "iekTabRemovedSince (RFC-0005 S8bx)"

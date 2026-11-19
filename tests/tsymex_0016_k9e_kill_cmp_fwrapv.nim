@@ -44,8 +44,12 @@ else:
     ## `low(int8) div -1` is 128 in C's `int` and narrows back to -128.
     symexAssume(x >= -128 and x <= 127)
     symexAssume(y >= -128 and y <= 127)
-    if y == -1 and x < 0 and x div y < 0:
-      symexTarget("hit")
+    # Nested, not `and`: a boolean `and` is a bit-twiddling operand, which
+    # bans `x` and `y` from the Int sort (the arm under test).
+    if y == -1:
+      if x < 0:
+        if x div y < 0:
+          symexTarget("hit")
 
   suite "K9e cmp fwrapv: the unchecked arithmetic of an Int-sorted value":
     test "version floor":

@@ -14,7 +14,7 @@
 ## suite bounds with a leading `symexAssume` (`collectAssertRanges`), or an
 ## `uint8(x)` / `s.len.uint` conversion of one; plain parameters are
 ## bit-vectors and reach the `lowerCmp` / `binBV` lines instead.
-import std/[unittest, strutils]
+import std/[unittest, strutils, math]
 import nelli/symex
 import ./s8cu_helpers
 
@@ -37,7 +37,9 @@ proc sutIntGtLe(x, y: int) =
 proc sutIntMul(x, y: int) =
   symexAssume(x >= 0 and x <= 20)
   symexAssume(y >= 0 and y <= 20)
-  if x * y == 35 and x < y: symexTarget("hit")
+  # `5 * 7 == 35` and `5 + 7 == 12`: a product encoded as a sum has no
+  # solution to both (`x + y` cannot be 35 and 12).
+  if x * y == 35 and x + y == 12: symexTarget("hit")
 
 # ---- the width bounds (`intBounds`, width 8) -------------------------------
 
@@ -67,12 +69,50 @@ proc sutU8WrapOne(x: int) =
   let u = uint8(x)
   if u + 2'u8 == 1'u8: symexTarget("hit")
 
-proc sutU8WrapRange(x: int) =
-  ## `uint8(254) + 1` is 255, outside `range[0 .. 254]`: a RangeDefect.
-  symexAssume(x >= 0 and x <= 1000)
+proc sutU8WrapTop(x: int, b: int16) =
+  ## `uint8(254) + 1` is 255, the window's top. Widened to `int16` and added
+  ## to `32513`, it is `32768`: an OverflowDefect, which a window claimed to
+  ## end at 254 (`intWindow`'s interval) would discharge statically.
+  symexAssume(x >= 0 and x <= 255)
+  symexAssume(b >= 0 and b <= 32513)
   let u = uint8(x) + 1'u8
-  var r: range[0 .. 254] = int(u)
-  if r == 3: symexTarget("hit")
+  let s = int16(u) + b
+  if s == 3: symexTarget("hit")
+
+# ---- the `ceilDiv` and `succ` internal comparisons (`>`, `>=` of the IR) ----
+# Nim rewrites a source `x > y` to `y < x`, so `bGt` / `bGe` reach the walker
+# only from the IR the parser itself builds: `ceilDiv`'s precondition
+# (`x >= 0 and y > 0`) and the ordinal step's `v > high` bound check.
+
+proc sutCeilInt(x, y: int) =
+  ## `ceilDiv(0, y) == 0`: `x >= 0` must admit 0 (Int-sorted operands).
+  symexAssume(x >= 0 and x <= 10)
+  symexAssume(y >= 1 and y <= 5)
+  if ceilDiv(x, y) == 0: symexTarget("hit")
+
+proc sutCeilBv(x, y: int) =
+  ## The same on bit-vector operands (`lowerCmp`'s `sge`).
+  if y == 1:
+    if ceilDiv(x, y) == 0: symexTarget("hit")
+
+proc sutCeilIntY(x, y: int) =
+  ## `y > 0` is strict: `y == 0` is outside the precondition and declines
+  ## (`feCheckOption`); were it `>=`, `y == 0` would run the division.
+  symexAssume(x >= 0 and x <= 5)
+  symexAssume(y >= 0 and y <= 5)
+  if ceilDiv(x, y) > 100: symexTarget("hit")
+
+proc sutCeilU0(x, y: uint) =
+  ## The same on unsigned operands (`ugt`); `x == 0` keeps `x + y - 1 >= x`
+  ## true at `y == 0`, so only `y > 0` rejects it.
+  if x == 0:
+    if ceilDiv(x, y) > 100: symexTarget("hit")
+
+proc sutSuccChar(c: char) =
+  ## `succ('\xfe')` is `'\xff'`, `high(char)`: the bound check `v > 255` is
+  ## strict (`sgt`).
+  let d = succ(c)
+  if d == '\xff': symexTarget("hit")
 
 proc sutLenMinusOne(s: string) =
   ## `0'u - 1` wraps to `high(uint)`, far above 2^33.
@@ -133,10 +173,8 @@ suite "K9e cmp: the unsigned window":
                      domain = sampled([255, 0, 1, 300]))
     check r.status == sxSat
 
-  test "a wrapped uint8 result is up to 255":
-    let r = pinExact(sutU8WrapRange, cellKey(faGeneric, "k9e/cmp/u8range"),
-                     target = tRaisedExn("RangeDefect"),
-                     domain = sampled([254, 0, 5]))
+  test "a wrapped uint8 result reaches 255":
+    let r = pinFind(sutU8WrapTop, tRaisedExn("OverflowDefect"))
     check r.status == sxRaised
 
   test "uint64 wraps at 2^64":
@@ -162,4 +200,25 @@ suite "K9e cmp: the BV compare and subtraction":
 
   test "subtraction subtracts":
     let r = pinFind(sutBvSub, tLabel("hit"))
+    check r.status == sxSat
+
+suite "K9e cmp: the IR's own `>` and `>=`":
+  test "ceilDiv admits x == 0 (Int)":
+    let r = pinFind(sutCeilInt, tLabel("hit"))
+    check r.status == sxSat
+
+  test "ceilDiv admits x == 0 (bit-vector)":
+    let r = pinFind(sutCeilBv, tLabel("hit"))
+    check r.status == sxSat
+
+  test "ceilDiv rejects y == 0 (Int)":
+    pinDecline(sutCeilIntY, cellKey(faGeneric, "k9e/cmp/ceilIntY"),
+               feCheckOption, needle = "outside its precondition")
+
+  test "ceilDiv rejects y == 0 (unsigned)":
+    pinDecline(sutCeilU0, cellKey(faGeneric, "k9e/cmp/ceilU0"),
+               feCheckOption, needle = "outside its precondition")
+
+  test "succ stops at high(char) exactly":
+    let r = pinFind(sutSuccChar, tLabel("hit"))
     check r.status == sxSat

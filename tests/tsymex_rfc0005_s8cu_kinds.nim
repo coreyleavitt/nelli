@@ -5,9 +5,9 @@
 ##
 ## RFC-0016 int6: a routine whose position reads `fieldChecks: off` on every
 ## reading is walked unchecked (`RoutineChecks.offModelled`) instead of
-## declining whole with `feCheckOption`; its wrong-branch write declines on
-## its own path (`inactiveFieldSide`, `feUnsupportedOp`). Natively it reaches
-## the label, so the decline is sound.
+## declining whole with `feCheckOption`. int6-f: its wrong-branch write is
+## the off build's (the union's bytes on c, the member made active on cpp),
+## exact and judged against the native run.
 ##
 ## RFC-0016 int6-o: a routine under `overflowChecks: off` in a checked build is
 ## walked as an off build walks it, so a signed overflow in it is an
@@ -32,6 +32,20 @@ template raisesFloat(fn: untyped; name: string) =
     check r.raisedTypeId == name
 
 const declKey = cellKey(faGeneric, "s8cu_kinds")
+
+template writesExact(fn: untyped) =
+  ## RFC-0016 int6-f: a wrong-branch write under a pushed-off `fieldChecks`
+  ## is the off build's: a store into the union's bytes (c), the member it
+  ## makes active (cpp). Exact, its witness run natively; no `FieldDefect`
+  ## on any input of the domain.
+  block:
+    let r = pinExact(fn, declKey)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    let d = pinFind(fn, tFieldDefect())
+    checkpoint show(d.errors)
+    check d.status == sxUnsat
 
 type K = enum kA, kB, kC, kD
 type P = object
@@ -180,7 +194,7 @@ suite "S8cu: a forward declaration":
     check native(fwdUnder(4)) == "FieldDefect"
     decides(fwdUnder, sxRaised)
     check native(fwdClean(4)) == "hit"
-    pinDecline(fwdClean, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(fwdClean)
 
 suite "S8cu: routines of other kinds":
 
@@ -236,7 +250,7 @@ suite "S8cu: a callee":
 
   test "a callee under a push":
     check native(viaCallee(4)) == "hit"
-    pinDecline(viaCallee, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(viaCallee)
 
   test "one no input reaches does not decline the rest":
     check native(calleeNotReached(7)) == "hit"

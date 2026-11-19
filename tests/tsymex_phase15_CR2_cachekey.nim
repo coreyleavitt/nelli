@@ -1434,8 +1434,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## system's integer `*=` is the build's; 466 reserved): 465->467.
     ## RFC-0016 int6-w (a routine whose module text on disk disagrees with
     ## the position the compiler parsed declines `feCheckOption`): 467->468.
+    ## RFC-0016 int6-f (a wrong-branch variant field access under a
+    ## pushed-off `fieldChecks` is walked as the off build walks it; a
+    ## program with such a region carries the union image): 468->469.
     ## RFC-0016 int6 D1 (a command-syntax call is a call in expression
-    ## position; 469 reserved): 468->470.
+    ## position): 468->470.
     ## RFC-0016 int6 D1b (the walk budget charges each query's own-context
     ## solver): 470->471.
     ## RFC-0016 int6 D1d (a pruning check a kept model satisfies is not

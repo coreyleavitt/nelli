@@ -2094,6 +2094,8 @@ task test, "Run the test suite":
             "tsymex_0016_int6p2_checkscope",
             # RFC-0016 int6: the same scopes under --rangeChecks:off --boundChecks:off (push on raises).
             "tsymex_0016_int6p2_checkscope_off",
+            # RFC-0016 int6-f: fieldChecks belongs to its region (push off in a checked build reads the union as the off build does; a checked caller keeps FieldDefect).
+            "tsymex_0016_int6f_fieldscope",
             # RFC-0016 int6-o: overflowChecks belongs to its region too (push off in a checked build is walked unchecked; system *= keeps the build's).
             "tsymex_0016_int6o_overflow",
             # RFC-0016 int6-o: the same regions under -d:nelliFwrapv (the region's wrap is exact).

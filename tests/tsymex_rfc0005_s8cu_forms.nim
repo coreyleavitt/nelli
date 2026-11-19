@@ -4,10 +4,9 @@
 ##
 ## RFC-0016 int6: a position read as `fieldChecks: off` on every reading is
 ## walked unchecked (`RoutineChecks.offModelled`), no longer declined whole
-## with `feCheckOption`. The wrong-branch write then declines on its own path
-## (`inactiveFieldSide`, `feUnsupportedOp`): the union image and the
-## active-member state follow the build's bit, which checks. Natively the
-## routine reaches the label, so the decline is sound. Under `checks: off`
+## with `feCheckOption`. int6-f: its wrong-branch write is the off build's
+## (a store into the union's bytes on c, the member made active on cpp),
+## exact and judged against the native run. Under `checks: off`
 ## the overflow push is modelled off too (int6-o), so the routine whose
 ## inner push turns the four back on raises as native does. A value that
 ## is no literal and an undecided `when` still decline `feCheckOption`.
@@ -17,6 +16,20 @@ import nelli/symex
 import ./s8cu_helpers
 
 const declKey = cellKey(faGeneric, "s8cu_forms")
+
+template writesExact(fn: untyped) =
+  ## RFC-0016 int6-f: a wrong-branch write under a pushed-off `fieldChecks`
+  ## is the off build's: a store into the union's bytes (c), the member it
+  ## makes active (cpp). Exact, its witness run natively; no `FieldDefect`
+  ## on any input of the domain.
+  block:
+    let r = pinExact(fn, declKey)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    let d = pinFind(fn, tFieldDefect())
+    checkpoint show(d.errors)
+    check d.status == sxUnsat
 
 type K = enum kA, kB, kC, kD
 type P = object
@@ -131,13 +144,13 @@ suite "S8cu: statements":
 
   test "a bare statement under a push, and the pop":
     check native(bareOff(4)) == "hit"
-    pinDecline(bareOff, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(bareOff)
     check native(barePopped(4)) == "FieldDefect"
     decides(barePopped, sxRaised)
 
   test "a bare statement with no push, and turned back on":
     check native(bareNoPush(4)) == "hit"
-    pinDecline(bareNoPush, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(bareNoPush)
     check native(bareBackOn(4)) == "FieldDefect"
     decides(bareBackOn, sxRaised)
 
@@ -145,9 +158,9 @@ suite "S8cu: user pragmas":
 
   test "a user pragma as a statement, with and without its own push":
     check native(userStmt(4)) == "hit"
-    pinDecline(userStmt, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(userStmt)
     check native(userPush(4)) == "hit"
-    pinDecline(userPush, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(userPush)
     check native(afterUser(4)) == "FieldDefect"
     decides(afterUser, sxRaised)
 
@@ -162,7 +175,7 @@ suite "S8cu: nesting":
     check native(innerOn(4)) == "FieldDefect"
     decides(innerOn, sxRaised)
     check native(innerPopped(4)) == "hit"
-    pinDecline(innerPopped, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(innerPopped)
 
   test "under `checks: off` the others stay off":
     check native(umbrellaInnerOn(4)) == "FieldDefect"
@@ -174,9 +187,9 @@ suite "S8cu: spelling":
 
   test "`false` and an underscore":
     check native(litFalse(4)) == "hit"
-    pinDecline(litFalse, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(litFalse)
     check native(underscored(4)) == "hit"
-    pinDecline(underscored, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(underscored)
 
   test "a value that is no literal is not read, either way":
     check native(constOff(4)) == "hit"
@@ -188,7 +201,7 @@ suite "S8cu: when":
 
   test "decided branches":
     check native(whenTrue(4)) == "hit"
-    pinDecline(whenTrue, declKey, feUnsupportedOp, excluding = {feCheckOption})
+    writesExact(whenTrue)
     check native(whenFalse(4)) == "FieldDefect"
     decides(whenFalse, sxRaised)
 

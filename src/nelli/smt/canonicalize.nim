@@ -1403,7 +1403,20 @@ const renderAsChoicesVersion* = "12"
   ##   binary never raises. A user routine whose text on disk ends before
   ##   its position, or defines its name but not starting there
   ##   (`textDisagrees`), now declines `feCheckOption`. No key bytes change.
-  ## - RFC-0016 int6 D1 (468->470; 469 is reserved on another branch): a
+  ## - RFC-0016 int6-f field regions (468->469): a variant field accessed
+  ##   on the wrong branch inside a routine pushed `fieldChecks: off` in a
+  ##   checked build is walked as a `--fieldChecks:off` build walks it (the
+  ##   union's bytes on c, `ubInactiveVariantField` on cpp) instead of
+  ##   declining `feUnsupportedOp` on its path. The variant's memory is one C
+  ##   struct in every region, so a program with any such region
+  ##   (`SymexProgram.fieldImage`) carries the off build's union image (c)
+  ##   and active member (cpp) through its checked regions too, which keep
+  ##   their `FieldDefect` on the discriminator; on cpp a checked read of a
+  ##   member an unchecked write left inactive is `ubInactiveVariantField`.
+  ##   A checked access in a `--fieldChecks:off` cpp build no longer tests
+  ##   the active member for its `FieldDefect`. No key bytes change (the
+  ##   flag follows the bodies' `@on{...}` scopes).
+  ## - RFC-0016 int6 D1 (468->470): a
   ##   command (`f x`) is a call in expression position too (`parseExpr`),
   ##   as it always was in statement position, and the call-shape
   ##   recognisers (`isMarkerCall`, the `addr` and `low`/`high` shapes, the

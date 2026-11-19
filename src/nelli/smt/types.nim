@@ -2311,6 +2311,19 @@ type
                                      ## variable's target); "" when every
                                      ## one is. A claim a replay settled is
                                      ## then not cached.
+    fieldImage*: bool
+                                     ## RFC-0016 int6-f. Some region of the
+                                     ## program accesses a variant field
+                                     ## with `fieldChecks` off (the build's,
+                                     ## or a routine's pushed-off scope).
+                                     ## The C struct is one in every region,
+                                     ## so the walk carries the off build's
+                                     ## representation of a variant (the
+                                     ## union image on c, the active member
+                                     ## on cpp) everywhere
+                                     ## (`heap_model.unionImageProgram`).
+                                     ## Derived from the bodies' `@on{...}`
+                                     ## scopes, so the key holds it already.
 
   CallStat* = object
     name*:      string

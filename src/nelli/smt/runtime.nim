@@ -21380,8 +21380,9 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
       armFieldNamesTbl = recv.vArmFieldNames
       # RFC-0016 PRC-07 slice B (cpp, `--fieldChecks:off`): the arm an access
       # is defined through is the union's active member, the arm last
-      # written, not the discriminator's.
-      if recv.vActive != nil: disc = recv.vActive[]
+      # written, not the discriminator's. int6-f: only where the access is
+      # unchecked; a checked one tests the discriminator (below).
+      if recv.vActive != nil and fieldsUnchecked(): disc = recv.vActive[]
     of svMultiVariant:
       var found = false
       for ax in recv.mvAxes:
@@ -21465,6 +21466,7 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
     var exactCond: Option[Z3Bool]   # the out-of-arm side the bytes answer
     var exactVal: SymVal
     var cppWrite = false
+    var activeOk: Option[Z3Bool]   # int6-f: a checked read's active member
     if fieldsUnchecked():
       # RFC-0016 PRC-07: no `FieldDefect`; the side is a union access.
       if recv.kind == svVariant and recv.vActive != nil and stmt.vfWrite:
@@ -21515,6 +21517,31 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
                                            stmt.vfWrite)
     else:
       maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
+      # RFC-0016 int6-f (cpp): a checked read the discriminator admits is
+      # still a read of a union member; where an unchecked region wrote
+      # another arm's member (`vActive`), it is not the active one, which is
+      # undefined. A write makes its member active (`lowerVariantFieldSet`).
+      if recv.kind == svVariant and recv.vActive != nil and not stmt.vfWrite:
+        var actIn: Z3Bool
+        var seeded = false
+        for tag in stmt.vfMatchingTags:
+          if armFieldNamesTbl[tag].find(stmt.vfFieldName) < 0: continue
+          let c =
+            if tag == -1:
+              var conj = mkBool(true)
+              for otherTag in armFieldsTbl.keys:
+                if otherTag != -1:
+                  conj = conj and not variantDiscEq(recv.vActive[], int64(otherTag))
+              conj
+            else: variantDiscEq(recv.vActive[], int64(tag))
+          actIn = (if seeded: actIn or c else: c)
+          seeded = true
+        if seeded:
+          let inactive = inArmCond and not actIn
+          decideUndefined(p, inactiveFieldUb(), inactive,
+            opSite("a checked variant field read through a member an " &
+                   "unchecked write left inactive", stmt.vfLoc), w)
+          activeOk = some(not inactive)
     if w.shouldStop: return exact(@[])
     survivors.add declinedSide
     # In-arm path — bind retName to the ite-chain over arms.
@@ -21538,7 +21565,9 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
     if cppWrite:
       survivors.add forkPath(pM, pM.pc, newEnv)
     else:
-      var inArm = forkPath(pM, pM.pc & @[inArmCond], newEnv)
+      var inArm = forkPath(pM, pM.pc & @[inArmCond] &
+                             (if activeOk.isSome: @[activeOk.get] else: @[]),
+                           newEnv)
       survivors.add (if stmt.vfWrite: inArm else: observed(inArm, bound, w))
     if exactCond.isSome:
       var envX = pM.env
@@ -28128,6 +28157,7 @@ proc runSymexImpl(prog: SymexProgram,
                   settings: SymexSettings;
                   replay: CandidateReplay): RawResult =
   let ctx = resetSymexRunState(settings)
+  setUnionImageProgram(prog.fieldImage)   ## RFC-0016 int6-f, before any allocation
   # RFC-0005 S8as/S8ax: the signed `int` heaps are Int-sorted whenever the
   # run's ints are not exact (`intHeapIsInt`). S8as also required every
   # plain `int` parameter to be an Int: a bit-vector stored into an Int heap
@@ -29225,6 +29255,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   let prevStall = beginStallDeadline(settings.budget.queryTimeoutMs)  ## RFC-0016 INT-57
   defer: endStallDeadline(prevStall)
   let ctx = resetSymexRunState(settings)
+  setUnionImageProgram(prog.fieldImage)   ## RFC-0016 int6-f, before any allocation
   var counters: ConcolicYieldCounters
   let cappedLen = min(trace.len, maxDraws)
   if trace.len > maxDraws:

@@ -1415,7 +1415,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## INT-80's seq & T element fix): 454->455.
     ## RFC-0016 INT-90d (a view's fact and splice at the program's own
     ## alias; a splice's bit-vector recorded): 455->456.
-    check symexWalkerVersion == "456"
+    ## RFC-0016 int6 R2-08 (a heap write drains its allocations' taint onto
+    ## its own path; 457 reserved): 456->458.
+    check symexWalkerVersion == "458"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

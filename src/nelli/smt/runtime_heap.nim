@@ -4636,6 +4636,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           # mirrors the plain-field write path (svInt↔BV reconciliation).
           var scratchPC: seq[Z3Bool]
           let proto = allocateSym(stmt.dwElemTy, "__armWriteProto", scratchPC)
+          # RFC-0016 R2-08: an arm field type the allocator declines queues
+          # its taint here; drain it onto this path before the RHS lowers.
+          cpChild = drainPendingLowerEffects(cpChild)
           let (valSVRaw, cpInArmLowered) = lowerInExpr(cpChild, stmt.dwValue, w, some(proto))
           # RFC-0005 S8g: the RHS's scalar raise / conversion forks (this site
           # dropped them: an overflowing `p.f = a + b` never raised, and a
@@ -4771,7 +4774,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           # no FieldDefect.
           var scratchW: seq[Z3Bool]
           let protoW = allocateSym(stmt.dwElemTy, "__derefWriteProto", scratchW)
-          let (valW, cpLoweredW) = lowerInExpr(cp, stmt.dwValue, w, some(protoW))
+          # RFC-0016 R2-08: a pointee type the allocator declines queues its
+          # taint here; it belongs to this path, drained before the RHS's
+          # own lowering opens (`claimStrayPendingTaint`).
+          let cpProtoW = drainPendingLowerEffects(cp)
+          let (valW, cpLoweredW) = lowerInExpr(cpProtoW, stmt.dwValue, w,
+                                               some(protoW))
           for cpL in drainScalarRaiseForks(cpLoweredW, w):
             var child = forkPath(cpL, cpL.pc, cpL.env)
             if svFitsHeapTy(valW, stmt.dwElemTy):
@@ -4813,8 +4821,16 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
         # BEFORE calling lowerInExpr so the wrapper's reset does not interfere.
         var scratchPC: seq[Z3Bool]
         let proto = allocateSym(stmt.dwElemTy, "__derefWriteProto", scratchPC)
+        # RFC-0016 R2-08: the cell materialisation and the prototype each
+        # allocate the pointee type, and an allocation the type declines
+        # (a `Table` with an unsupported key, an ownership wrapper) queues
+        # its taint with no drain of its own. It is this path's: drain it
+        # here, as the read arm does after `heapCellArrays`, so the RHS's
+        # lowering opens on an empty queue (`claimStrayPendingTaint`).
+        let cpProto = drainPendingLowerEffects(cp)
         ## Encapsulate seed→reset→lower→drain via wrapper.
-        let (valSVRaw, cpLoweredRaw) = lowerInExpr(cp, stmt.dwValue, w, some(proto))
+        let (valSVRaw, cpLoweredRaw) = lowerInExpr(cpProto, stmt.dwValue, w,
+                                                   some(proto))
         # RFC-0005 S8g: the RHS's scalar raise / conversion forks (this site
         # dropped them: an overflowing `p[] = a + b` never raised, and a
         # float -> int conversion's out-of-range continuation was lost).

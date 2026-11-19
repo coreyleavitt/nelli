@@ -1326,8 +1326,15 @@ const renderAsChoicesVersion* = "12"
   ##   read back through the other is ground bit-vector terms, not an array
   ##   alias under `int2bv(bv2int(..))` (a padded object's store-then-read
   ##   was 143-198 s and `sxUnknown`). No key bytes change.
+  ## - RFC-0016 int6 R2-08 (456->458; 457 is reserved on another branch): a
+  ##   heap write through a ref drains the taint its cell and prototype
+  ##   allocations queue (a pointee type the allocator declines: a `Table`
+  ##   with an unsupported key, an ownership wrapper) onto its own path
+  ##   before the RHS is lowered. The INT-37 entry check stopped such a walk
+  ##   with `weInternalWalkerFault`; the decline's own kind is now reported
+  ##   on its path. No key bytes change.
 
-const symexWalkerVersion* = "456"
+const symexWalkerVersion* = "458"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -1,5 +1,6 @@
 ## RFC-0016 K8b (INT-56, section 12 item 4) -- the admission-axis fuzzer
-## suite for the stdlib-body axis: generated programs, one exact row's
+## suite for the stdlib-body axis, part a of 2 with `tsymex_0016_k8b_axes_stdlib_a`
+## and `_b` (the stream's rows split in halves; INT-51 ceiling headroom): generated programs, one exact row's
 ## fragment each (tests/s0016_k8b_snippets.nim, `per` = 1: packing several
 ## rows into one query multiplies the solve cost), run through `symexFind`
 ## and the native differential with one rotating metamorphic relation (dead
@@ -19,6 +20,6 @@ import ./s0016_k8b_suite
 
 const k8bSeed {.intdefine.} = 20261117
 
-axisBatch(axStdlibBody, "stb", runBatch_stb, "tsymex_0016_k8b_axes_stdlib.nim",
-          k8bSeed, 0,
-          streamRows(axStdlibBody), 1)
+axisBatch(axStdlibBody, "sta", runBatch_sta, "tsymex_0016_k8b_axes_stdlib_a.nim",
+          k8bSeed, streamRows(axStdlibBody) * 0 div 2,
+          streamRows(axStdlibBody) * 1 div 2 - streamRows(axStdlibBody) * 0 div 2, 1)

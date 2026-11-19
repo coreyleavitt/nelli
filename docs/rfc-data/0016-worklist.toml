@@ -961,7 +961,7 @@ note = ""
 source = "sort S13"
 evidence = "the `sort` stop this row first named is gone at 83c1d304: `s.sort()` and `s.sort(system.cmp[int], Descending)` compile and decline (C-06), now precision row W-36. K2c re-probe (2026-11-09): HRV-44 is gone at head (generic procs using `.len`/`.add`/index on their generic param run and are `sxSat`, pinned). The `splitLines` stop was `classifyType` on an inline-iterator formal declared by its default alone (`keepEol = false`, empty type slot); fixed (type read from the iterator's signature), and over a bounded string it declines `seUnsupportedStringOp`, pinned. RESIDUE CLOSED by K7 (2026-11-09): `for l in s.splitLines` over an UNBOUNDED symbolic string no longer runs unbounded; `budget.walkRLimit` (default 1_000_000_000 units, measured over the corpus at d5d1d563: largest decided walk 175,310,967, `label:prod12`) halts the walk as `ckWalkWork`, pinned in `tests/tsymex_0016_k7_splitlines_unbounded.nim` under an explicit 20M limit (at the default the walk was still running at the 900 s kill, so the pin keeps the override); `prod12` still decides under the default (`tests/tsymex_augmented_assign.nim`, no override). Also fixed and pinned: `openArray` parameter (replay splat bound a `var` of it), object with a `pointer` or `UncheckedArray` field. One `classifyType` row; mechanism K2a/K2c. K2c (2026-11-09): a top-level `Atomic[T]` or `owned T` parameter was a further compile stop (`emitTyAndReader` raised on the `__ownership:` placeholder); it now declines `heUnsupportedOwnership`, pinned in `tests/tsymex_0016_k2c_typeclass.nim`."
 slice = "K2c"
-pins = ["tsymex_0016_k7_splitlines_unbounded", "tsymex_augmented_assign", "tsymex_0016_k2c_typeclass"]
+pins = ["tsymex_0016_k7_splitlines_unbounded", "tsymex_augmented_assign", "tsymex_0016_k2c_typeclass_a", "tsymex_0016_k2c_typeclass_b", "tsymex_0016_k2c_typeclass_c"]
 cells = []
 
 [[row]]
@@ -2555,7 +2555,7 @@ note = "Two modelled exact stdlib rows, `math.round` and `math.floor`. Not yet p
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
 cells = []
-pins = ["tsymex_0016_int58_roundunsat", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib"]
+pins = ["tsymex_0016_int58_roundunsat", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib_a", "tsymex_0016_k8b_axes_stdlib_b"]
 
 [[row]]
 id = "INT-59"
@@ -2567,7 +2567,7 @@ note = "Classified as an expected cost (FP division and rounding bit-blast), not
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
 cells = []
-pins = ["tsymex_0016_int59_fpinterval", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib"]
+pins = ["tsymex_0016_int59_fpinterval", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib_a", "tsymex_0016_k8b_axes_stdlib_b"]
 
 [[row]]
 id = "INT-60"
@@ -2860,7 +2860,7 @@ source = "K9d-10 pinFind conversion"
 evidence = "red at 0692c8e0 (before e8b48a20): each reproducer target `sxUnknown` with `feUnsupportedParamType`, and `tsymex_0016_k2c_typeclass` pinned the same decline for `ppointer` and `pptrobj`; green after the fix, `tsymex_0016_int83_pointerparam` 19 OK on c and cpp, every definite verdict pinned natively by pinFind over the `pointer` domain; `k2c_typeclass` re-pinned (`ppointer`, `pptrobj` exact sxSat by pinFind; the type-class row admits `pointer` at `tcClassify`), `p6_nillit` re-pinned (the pointer nil arm exact, pinExact); `k9d_pinfind`, `h_verification`, `int82_paramfresh` green on c"
 aliases = []
 cells = []
-pins = ["tsymex_0016_int83_pointerparam", "tsymex_0016_k2c_typeclass", "tsymex_0016_p6_nillit"]
+pins = ["tsymex_0016_int83_pointerparam", "tsymex_0016_k2c_typeclass_a", "tsymex_0016_k2c_typeclass_b", "tsymex_0016_k2c_typeclass_c", "tsymex_0016_p6_nillit"]
 
 [[row]]
 id = "INT-81"
@@ -2940,7 +2940,7 @@ source = "K9d-12 triage (the plan's walker-decline list)"
 evidence = "red at 761ce70c (before 9e37524b): a first-byte target, a nil target and a negative-length refutation were each `sxUnknown` (`feUnsupportedParamType`); natively the first two are reached. Native evidence (pinned toolchain, c and cpp): `len(nil) == 0`, `$nil == \"\"`, `==` compares content and nil equals only nil, `c[len(c)] == '\\0'`, a high byte is a byte; `<` and `<=` on cstring are Nim's `LtPtr`/`LePtr` over the two converted to `pointer` (an address compare, not `strcmp`), and `cmp` is the generic `cmp[T]` (`==` content, `<` address): buffers \"zz\" at the lower address and \"ab\" give `\"zz\" < \"ab\"` true and `cmp` -1. Green after the fix: `tsymex_0016_int87_cstringparam` 16 OK on c and cpp, every definite verdict pinned natively by `pinFind` over the `cstring` domain; `k9d_pinfind` (`sutCstr` re-pinned `sxUnsat`), `k2c_typeclass` (`pcstr` exact `sxSat`), `p6_nillit` (the cstring nil arms re-pinned exact by `pinExact`, floor 448), `admir` (its uninterp zero-value SUT moved off `cstring`), `int88_crossptralias`, `int83_pointerparam`, CR2, `universe`, `r6_nulwitness`, `r6_b5_chained` green on c; `k4b_cells` (`sCStrToStr` an exact cell) green but for `GCref`, red at 761ce70c as well. `tsymex_CR2b_paramtype_catchall` and `tsymex_r6_n43_parity` named `cstring` as their unsupported parameter (sxSat now); re-pinned on `c_longdouble`, which `classifyType` declines by name to the same `__unsupported:` placeholder (sxUnknown, `feUnsupportedParamType`): CR2b 4 OK, n43 25 OK on c. That move found a harness defect: `pinFind` built a `c_longdouble` parameter's domain before reading the verdict, and Nim sizes `clongdouble` as a float64 while C stores a `long double`, so the domain's seq overran its heap block (SIGSEGV in `dealloc`). `pinFind` now builds no domain for a verdict it does not judge (`pinFindJudges`), and a parameter holding a `clongdouble` anywhere (`unsizedNative`) is never given one (a definite verdict over it fails the pin); self-test in `k9d_pinfind`"
 aliases = []
 cells = []
-pins = ["tsymex_0016_int87_cstringparam", "tsymex_0016_k2c_typeclass", "tsymex_0016_k9d_pinfind", "tsymex_CR2b_paramtype_catchall", "tsymex_r6_n43_parity"]
+pins = ["tsymex_0016_int87_cstringparam", "tsymex_0016_k2c_typeclass_a", "tsymex_0016_k2c_typeclass_b", "tsymex_0016_k2c_typeclass_c", "tsymex_0016_k9d_pinfind", "tsymex_CR2b_paramtype_catchall", "tsymex_r6_n43_parity"]
 
 [[row]]
 id = "INT-88"

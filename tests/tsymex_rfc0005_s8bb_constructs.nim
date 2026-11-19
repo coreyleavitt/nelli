@@ -449,7 +449,11 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
             inc checked
             let sol = newSolver(ctx)
             let prm = newParams(ctx)
-            prm.set("timeout", 10000)
+            # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
+            # the host's load. Worst check measured 262,042 units (Z3 5.1) and 632,841
+            # (Z3 4.13.4, the Windows legs' pin), budget 6.5M.
+            prm.set("rlimit", 6_500_000'u)
+            prm.set("random_seed", 0'u)
             sol.setParams(prm)
             for d in r.defs: sol.add d
             if name in ["endsWith", "match", "startsWith"]:

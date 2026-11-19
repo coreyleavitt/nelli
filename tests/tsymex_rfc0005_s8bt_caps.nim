@@ -115,7 +115,11 @@ suite "S8bt: UTF mode's plain patterns, lazily (item 6)":
             inc checked
             let sol = newSolver(ctx)
             let prm = newParams(ctx)
-            prm.set("timeout", 10000)
+            # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
+            # the host's load. Worst check measured 68,980 units (Z3 5.1) and 137,892
+            # (Z3 4.13.4, the Windows legs' pin), budget 1.4M.
+            prm.set("rlimit", 1_400_000'u)
+            prm.set("random_seed", 0'u)
             sol.setParams(prm)
             for d in r.defs: sol.add d
             if name in ["endsWith", "match", "startsWith", "contains"]:

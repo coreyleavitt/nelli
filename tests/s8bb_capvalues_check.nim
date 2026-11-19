@@ -86,7 +86,11 @@ proc capValues*(p: string): tuple[checked, declined: int; bad: seq[string]] =
               inc result.checked
               let sol = newSolver(ctx)
               let prm = newParams(ctx)
-              prm.set("timeout", 10000)
+              # rlimit, not a wall `timeout`: a wall limit made the verdict depend on
+              # the host's load. Worst check measured 212,053 units (Z3 5.1) and 518,006
+              # (Z3 4.13.4, the Windows legs' pin), budget 5.5M.
+              prm.set("rlimit", 5_500_000'u)
+              prm.set("random_seed", 0'u)
               sol.setParams(prm)
               for d in r.defs: sol.add d
               case k

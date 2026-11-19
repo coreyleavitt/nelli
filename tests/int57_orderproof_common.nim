@@ -65,7 +65,11 @@ proc keySizes*(): seq[int] =
 proc prove*(ctx: Z3Context; fs: openArray[Z3Bool]): Z3Status =
   let s = newSolver(ctx)
   let p = newParams(ctx)
-  p.set("timeout", 120_000'u)
+  # rlimit, not a wall `timeout`: a wall limit made the verdict depend on the
+  # host's load. Worst check measured 60,616,685 units (Z3 5.1; s20) and
+  # 47,815,794 (Z3 4.13.4, the Windows legs' pin; s20), so budget 650M.
+  p.set("rlimit", 650_000_000'u)
+  p.set("random_seed", 0'u)
   s.setParams(p)
   for f in fs: s.add f
   s.check()

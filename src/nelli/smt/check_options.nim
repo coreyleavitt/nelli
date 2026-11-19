@@ -80,12 +80,47 @@ proc diskRead(p: string): string = staticRead(p)
 const configuredLibDir* = querySetting(libPath)
   ## RFC-0016 PRC-43. The compiler's `lib/`, under whatever name `--lib:` gave it.
 
+var resolvedDefines {.compileTime.}: Table[string, bool]
+  ## RFC-0016 int6-a2. `defined(x)` by name, as an entry macro's call site
+  ## evaluated it (`symexResolveDefine`): the scan's `SourceEnv.defines`.
+var askedDefines {.compileTime.}: seq[string]
+  ## Names a position the walk read was undecided on (`noteUndecided`), for
+  ## the entry macro to have its call site decide (`undecidedDefines`).
+var emittedDefines {.compileTime.}: seq[string]
+  ## Names an entry macro has already asked its call site for: never twice, so
+  ## a name the re-expansion did not resolve cannot re-enter forever.
+
 proc compileTimeEnv(): SourceEnv =
   ## The compiler's own view: the project's directories and search paths, and
   ## the compiler's file reader.
   SourceEnv(exists: diskExists, read: diskRead, anchor: anchored,
             searchPaths: querySettingSeq(searchPaths),
-            libDir: configuredLibDir)
+            libDir: configuredLibDir, defines: resolvedDefines)
+
+macro symexResolveDefine*(name: static string; value: static bool): untyped =
+  ## RFC-0016 int6-a2. Records `defined(name)` as the call site evaluated it
+  ## (`value`), before an entry macro expands again (`entry_parse`). The
+  ## scan reads a `when defined(name)` around a check pragma by it.
+  resolvedDefines[name] = value
+  newEmptyNode()
+
+proc undecidedDefines*(): seq[string] =
+  ## RFC-0016 int6-a2. The names an entry macro asks its call site to decide
+  ## before it expands again: undecided at a position the walk read, and not
+  ## asked before. Each is marked asked.
+  for a in askedDefines:
+    if a notin resolvedDefines and a notin emittedDefines:
+      result.add a
+      emittedDefines.add a
+
+proc noteUndecided(m: ModuleScan) =
+  for a in m.undecidedDefines:
+    if a notin resolvedDefines and a notin askedDefines: askedDefines.add a
+
+proc stale(m: ModuleScan): bool =
+  ## A scan read before a name it was undecided on was resolved.
+  for a in m.undecidedDefines:
+    if a in resolvedDefines: return true
 
 proc scanModuleText*(path, text: string): ModuleScan =
   ## The scan of a module whose text is at hand; an `include` is read from disk.
@@ -186,6 +221,13 @@ proc touchesFloat(n: NimNode): bool =
   touchesFloat(n, seen)
 
 var moduleScans {.compileTime.}: Table[string, ModuleScan]
+
+proc scanOf(key, raw: string): ModuleScan =
+  ## The scan of the module at `key`, read once, and again once a `defined`
+  ## it was undecided on is resolved (RFC-0016 int6-a2).
+  if key notin moduleScans or stale(moduleScans[key]):
+    moduleScans[key] = scanModule(raw)
+  moduleScans[key]
 var runLeaks {.compileTime.}: seq[tuple[root, name: string; opts: set[CheckOption]]]
 var runReach {.compileTime.}: Table[string, seq[string]]
   ## Per user importer and name: the modules the named one reaches by import,
@@ -208,8 +250,7 @@ proc reachOf(start: string): seq[string] =
     let key = normalPath(raw)
     if key in result: continue
     result.add key
-    if key notin moduleScans: moduleScans[key] = scanModule(raw)
-    for i in moduleScans[key].imports: queue.add i
+    for i in scanOf(key, raw).imports: queue.add i
 
 proc enterGraph(startRaw: string) =
   ## Every user module the import graph from `startRaw` reaches hands on what it
@@ -221,8 +262,7 @@ proc enterGraph(startRaw: string) =
     let key = normalPath(raw)
     if key in runSeen or isOwnRuntime(key) or isOwnSource(key): continue
     runSeen.add key
-    if key notin moduleScans: moduleScans[key] = scanModule(raw)
-    let m = moduleScans[key]
+    let m = scanOf(key, raw)
     if m.unknown.len > 0:
       if runUnknown.len == 0:
         runUnknown = "`" & raw.extractFilename & "`, which the program imports: " & m.unknown
@@ -433,7 +473,7 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   let rootRaw = if rootAt.len > 0: rootAt else: moduleFileOf(impl[0], li.filename)
   let root = normalPath(rootRaw)
   if isOwnRuntime(root): return
-  if root notin moduleScans: moduleScans[root] = scanModule(rootRaw)
+  discard scanOf(root, rootRaw)
   if moduleScans[root].unknown.len > 0:
     return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
                          why: moduleScans[root].unknown)
@@ -449,6 +489,10 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
         why: "the module's text on disk is not the text the compiler parsed: " &
              stale)
   let st = stateAt(moduleScans[root], file, li.line, li.column)
+  # RFC-0016 int6-a2: a position read both ways may be decided by a
+  # `defined(x)` the scan could not evaluate; the entry macro asks its call
+  # site (`undecidedDefines`) and expands again.
+  if st.maybeOn * st.maybeOff != {}: noteUndecided(moduleScans[root])
   result.checks = deviation(st)
   result.assertsMaybeOff = coAssert in st.maybeOff or
     coAssert in moduleScans[root].everything.maybeOff

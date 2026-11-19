@@ -133,9 +133,10 @@ when defined(rangeoffPushed):
   {.push rangeChecks: on.}
 proc sutAmbiguous(v: int) =
   ## `rangeoffPushed` is set by this file's `.cfg`, so natively the routine is
-  ## checked and `R(v)` raises at 300. The scan cannot decide `defined(...)`:
-  ## the position reads as both pushed on and off, and was taken as the
-  ## build's setting (unchecked), which keeps 300 and never raises.
+  ## checked and `R(v)` raises at 300. The scan cannot decide `defined(...)`
+  ## from text: the entry macro has its call site evaluate it and expands
+  ## again (RFC-0016 int6-a2). It was read both ways and declined, and before
+  ## that taken as the build's setting (unchecked), which never raises.
   discard R(v)
   if v == 300: symexTarget("hit")
 when defined(rangeoffPushed):
@@ -149,10 +150,13 @@ suite "PRC-07: range checks that differ within a routine (never the build's)":
     check native(sutPartlyChecked(300)) == "RangeDefect"
     pinDecline(sutPartlyChecked, sk, feCheckOption,
                target = tRaisedExn("RangeDefect"), needle = "sutPartlyChecked")
-  test "a position that is both pushed on and off declines, it is not read as unchecked":
+  test "a push under a defined() condition is walked as compiled (int6-a2)":
     check native(sutAmbiguous(300)) == "RangeDefect"
-    pinDecline(sutAmbiguous, sk, feCheckOption,
-               target = tRaisedExn("RangeDefect"), needle = "sutAmbiguous")
+    check native(sutAmbiguous(5)) == "ran"
+    let x = pinFind(sutAmbiguous, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+    check not x.errors.named(feCheckOption)
   test "an unchecked head before a checked tail declines whole":
     check native(sutUncheckedPart(300)) == "RangeDefect"
     check native(sutUncheckedPart(5)) == "ran"

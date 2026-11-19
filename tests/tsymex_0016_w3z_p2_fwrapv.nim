@@ -194,13 +194,16 @@ else:
   # pinned decline uses a position the scan cannot decide (an undecided
   # `when`, both pushed and not), which still declines `feCheckOption`; the
   # definite push is pinned as its native verdict (`sutIdxOff*`).
-  when not defined(w3zNoSuchSymbol):
+  # RFC-0016 int6-a2: a `when` on `defined(x)` is decided at the entry's
+  # call site now; a `const` is not.
+  const w3zUndecided = not defined(w3zNoSuchSymbol)
+  when w3zUndecided:
     {.push boundChecks: off.}
   proc mkIndexer(): proc (a, b: var int) =
     result = proc (a, b: var int) =
       let tab = [10, 20, 30, 40]
       a = tab[b and 3]
-  when not defined(w3zNoSuchSymbol):
+  when w3zUndecided:
     {.pop.}
 
   {.push boundChecks: off.}

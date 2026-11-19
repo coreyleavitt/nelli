@@ -10,6 +10,7 @@ import std/[macros, strutils]
 import ./dsl
 import ./impl_digest
 import ./replay_emit
+import ./check_options   ## RFC-0016 int6-a2: `symexResolveDefine`
 
 
 # ---- The driver macro -------------------------------------------------------
@@ -143,6 +144,21 @@ proc entryParse*(fn: NimNode; apiName: string; settings: SymexSettings;
   let peExpr = p.parseErrorsNimNode
   let avExpr = p.annotationViolationsNimNode
   let ik = implKey(fn)
+  # RFC-0016 int6-a2: a check pragma under `when defined(x)` at a position
+  # the parse read (the scan cannot evaluate `defined` on a name it holds as
+  # text): the call site evaluates each such `x`, as the compiler does for
+  # every module of this compile, and the macro expands again with them
+  # decided. A routine `fn` only: a typed lambda would be checked twice.
+  # Without the re-expansion the position stays read both ways and declines.
+  if fn.kind == nnkSym:
+    let names = undecidedDefines()
+    if names.len > 0:
+      var pre = newStmtList()
+      for nm in names:
+        pre.add newCall(bindSym"symexResolveDefine", newLit(nm),
+                        newCall(bindSym"defined", ident(nm)))
+      result.again = newTree(nnkStmtListExpr, pre, again)
+      return
   let digest = newLit(ik.digest)
   let open = newLit(ik.open)
   let fieldImage = newLit(p.fieldImage)   ## RFC-0016 int6-f

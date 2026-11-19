@@ -89,6 +89,14 @@ where that note does not yet cover it.
   row are walked `asPushedOff`. A stdlib routine with a check pragma inside
   its own definition, or at a position the scan reads both ways, still
   declines.
+- **`when defined(x)` around a check push** (migration 5b, int6-a2; walker
+  474). A check pragma under `when defined(x)` (or `not`, `and`, `or` of such)
+  at a position the walk reads is decided as it was compiled: the entry macro
+  has its call site evaluate each `x` and expands once more, where the
+  position was read both ways and declined `feCheckOption`. This covers the
+  float checks as well (`nanChecks`, `infChecks`). A `when` on a `const`,
+  `declared(...)` or any other name still declines, as does an entry whose
+  `fn` is a lambda rather than a named routine.
 - **Scanner text guard** (migration 1, int6-w, walker 468). The region reads
   place a routine in its module's text, read from disk during the compile. A
   routine whose text on disk ends before its position, or defines its name but

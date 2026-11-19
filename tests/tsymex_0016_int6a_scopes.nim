@@ -9,13 +9,17 @@
 ##     off`. `delete` still raises `IndexDefect` by its own explicit test, and
 ##     the caller's `Natural(i)` raises `RangeDefect`;
 ##   * ambiguous: a routine under `when defined(int6aPushed): {.push
-##     rangeChecks: off.}` keeps `R(300)`; the scan cannot evaluate
-##     `defined`, so the position reads both pushed and not;
+##     rangeChecks: off.}` keeps `R(300)`, and one under `when
+##     defined(int6aNotDefined)` raises `RangeDefect`. int6-a2: the entry
+##     macro has its call site evaluate each `defined(x)` and expands again,
+##     so both are walked exactly; a `when` on a `const` still declines
+##     (`ambConst` keeps 300);
 ##   * leaked: in `tsymex_0016_int6a_leak` (its own file: a user import
 ##     under a push is read as reaching every stdlib module, which would
 ##     taint the stdlib rows here);
 ##   * float: a routine under `when defined(int6aPushed): {.push nanChecks:
-##     on.}` raises `FloatInvalidOpDefect` on `inf - inf`.
+##     on.}` raises `FloatInvalidOpDefect` on `inf - inf`; decided as class 1
+##     is (int6-a2), it is walked checked.
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -47,6 +51,31 @@ proc ambOff(v: int) =
 when defined(int6aPushed):
   {.pop.}
 
+when defined(int6aNotDefined):
+  {.push rangeChecks: off.}
+proc ambNotOff(v: int) =
+  let r = R(v)
+  if int(r) == 300: symexTarget("hit")
+when defined(int6aNotDefined):
+  {.pop.}
+
+when not defined(int6aNotDefined) and (defined(int6aPushed) or false):
+  {.push rangeChecks: off.}
+proc ambCompound(v: int) =
+  let r = R(v)
+  if int(r) == 300: symexTarget("hit")
+when not defined(int6aNotDefined) and (defined(int6aPushed) or false):
+  {.pop.}
+
+const int6aConst = true
+when int6aConst:
+  {.push rangeChecks: off.}
+proc ambConst(v: int) =
+  let r = R(v)
+  if int(r) == 300: symexTarget("hit")
+when int6aConst:
+  {.pop.}
+
 # ---- class 4: float checks maybe on and off --------------------------------
 
 when defined(int6aPushed):
@@ -76,14 +105,43 @@ suite "int6-a stdlib positions: a stdlib body under its module's push":
     check r.status == sxSat
     check not r.errors.named(feCheckOption)
 
-suite "int6-a ambiguous and float positions":
-  test "a when-guarded push the scan cannot decide still declines":
-    check native(ambOff(300)) == "hit"
-    pinDecline(ambOff, gk, feCheckOption, needle = "ambOff")
-  test "nanChecks maybe on and off still declines":
+template keeps(fn: untyped) =
+  ## Natively `fn(300)` reaches the label and never raises `RangeDefect`.
+  check native(fn(300)) == "hit"
+  let r = pinFind(fn, tLabel("hit"))
+  checkpoint show(r.errors)
+  check r.status == sxSat
+  check not r.errors.named(feCheckOption)
+  let x = pinFind(fn, tRaisedExn("RangeDefect"))
+  checkpoint show(x.errors)
+  check x.status == sxUnsat
+
+suite "int6-a2 ambiguous positions: defined() decided at the call site":
+  test "a push under a defined name is walked pushed":
+    keeps(ambOff)
+    keeps(ambCompound)
+  test "a push under an undefined name is walked checked":
+    check native(ambNotOff(300)) == "RangeDefect"
+    check native(ambNotOff(5)) == "ran"
+    let x = pinFind(ambNotOff, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+    check not x.errors.named(feCheckOption)
+    let r = pinFind(ambNotOff, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxRaised
+  test "a when on a const is not decided and still declines":
+    check native(ambConst(300)) == "hit"
+    pinDecline(ambConst, gk, feCheckOption, needle = "ambConst")
+
+suite "int6-a float positions":
+  test "nanChecks pushed on under a defined name is walked checked":
     check native(ambNan(Inf)) == "FloatInvalidOpDefect"
-    pinDecline(ambNan, gk, feCheckOption, needle = "ambNan")
+    let x = pinFind(ambNan, tRaisedExn("FloatInvalidOpDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+    check not x.errors.named(feCheckOption)
 
 suite "int6-a: walker version":
-  test "walker version floor >= 473":
-    check parseInt(symexWalkerVersion) >= 473
+  test "walker version floor >= 474":
+    check parseInt(symexWalkerVersion) >= 474

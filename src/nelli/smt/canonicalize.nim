@@ -1450,8 +1450,14 @@ const renderAsChoicesVersion* = "12"
   ##   `feCheckOption`; its `overflowChecks` turned off so and modelled by no
   ##   stdlib row are walked `asPushedOff`. Key bytes change: such a body's
   ##   `@on{...}` scope and stamp, and its digest's `om=`.
+  ## - RFC-0016 int6-a2 (473->474): a check pragma under `when defined(x)`
+  ##   (`not`, `and`, `or` of such) at a position the walk reads is decided
+  ##   as compiled: the entry macro has its call site evaluate each `x` and
+  ##   expands again, where the position was read both ways and declined
+  ##   `feCheckOption` (float checks included). Key bytes change: such a
+  ##   body's scope, stamp and digest.
 
-const symexWalkerVersion* = "473"
+const symexWalkerVersion* = "474"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -77,11 +77,21 @@ proc s1cTaintedRareRaise(a, b, c, d: int) =
     raise newException(ValueError, "s1c rare")
 
 # (b) a tainted raise caught by a handler whose body holds a Class-B
-# `isUnsupported` (an augmented assign with an operator outside the
-# modelled set) -- recorded only where a path actually reaches it, so its
-# kind appears iff the handler is walked.
+# `isUnsupported` -- recorded only where a path actually reaches it, so its
+# kind appears iff the handler is walked. The handler's statement was a
+# nested seq element's augmented assignment (`qq[0][b and 1] += b`), which
+# RFC-0016 S8cp-r (walker 400) models; it is now a discriminator written
+# through a ref under `{.cast(uncheckedAssign).}` (`parseAsgn`'s marker;
+# PRC-37 owns modelling it), the Class-B exhibit
+# `tsymex_rfc0005_s8_scope.nim` uses.
 type S1cPoint = object
   x, y: int
+type
+  S1cDisc = object
+    case k: bool
+    of true: a: int
+    of false: b: int
+  S1cDiscRef = ref S1cDisc
 
 proc s1cTaintedCaught(p: S1cPoint, b: int) =
   let s = s1cSensor()
@@ -89,14 +99,10 @@ proc s1cTaintedCaught(p: S1cPoint, b: int) =
     if b + s > 0:
       raise newException(ValueError, "s1c tainted raise")
   except ValueError:
-    var qq = @[@[p.x, p.y]]
-    qq[0][b and 1] += b  # a nested-seq element LHS: `unwrapHidden(lhs[0])`
-                         # is itself an `nnkBracketExpr` (`qq[0]`), not an
-                         # `nnkSym`, so it never matches the seq-element
-                         # arm and always declines (feUnsupportedStmtKind)
-                         # -- unlike the single-level `q[b and 1] += b`
-                         # this test used before, which RFC-0005 S8am went
-                         # on to model, closing that decline.
+    let q = S1cDiscRef(k: true, a: p.x)
+    {.cast(uncheckedAssign).}:
+      q.k = false  # a discriminator written through a ref: always declines
+                   # (feUnsupportedStmtKind)
   symexTarget("s1c_after_catch")
 
 # (c) witness monotonicity, tainted arm FIRST: the `if` arm is walked before

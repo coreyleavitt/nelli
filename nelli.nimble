@@ -2070,6 +2070,8 @@ task test, "Run the test suite":
             # RFC-0016 K9d: no verdict suite without a native pin (the census of tsymex_* files asserting sxSat/sxUnsat/sxRaised with no native idiom), ratcheted at its ceiling; pinFind, the generator that pins a suite's own symexFind call.
             "tsymex_0016_k9d_census",
             "tsymex_0016_k9d_pinfind",
+            # RFC-0016 K9e: the pin-strength figure (scripts/pin-strength.sh, a mutation run over runtime.nim's arithmetic and raise arms) is at or above tests/0016-pinstrength.floor.
+            "tsymex_0016_k9e_pinstrength",
             # RFC-0016 INT-72: a free Rune ranges over int32; $r, toUTF8, size and Rune(n) follow std/unicode out of range; decoded runes are the decoder's.
             "tsymex_0016_int72_runedomain",
             # RFC-0016 INT-77: a float range is the closed IEEE interval in its width, NaN excluded.

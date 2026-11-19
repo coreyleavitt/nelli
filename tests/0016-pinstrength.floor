@@ -1,0 +1,6 @@
+# RFC-0016 K9e: the pin-strength floor, a percentage (killed / (killed +
+# survived), tests/0016-pinstrength.tsv). It only rises: after a full run of
+# scripts/pin-strength.sh, raise it to the new figure in the commit that lands
+# that run's TSV. Zero until the first full run is committed (the committed
+# TSV is the harness's 6-mutant sample, which certifies nothing).
+0.0

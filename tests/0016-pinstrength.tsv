@@ -1,0 +1,11 @@
+# RFC-0016 K9e pin strength (scripts/pin-strength.sh; see docs/rfc-data/0016-k9e.md).
+# sha: 90792961  backend: c  mutants: 116  run: 6  suites: 11
+# killed: 3 (by a pin: 2)  survived: 3  timeout: 0  stillborn/equivalent: 0
+# figure: killed / (killed + survived) = 3 / 6 = 50.0
+id	kind	site	status	suite	by	secs
+m248f2f17f4	defect:Overflow>DivByZero	drain.Overflow:15636	killed	tsymex_phase16_R16_4_overflow	pin	136
+m7494aca7e0	drop:branch	lowerExpr.uNeg:6848	survived	-	-	778
+mc532db2980	sign:slt>ult	lowerCmp:5260	killed	tsymex_phase15_A1_arithmetic	assert	104
+mc9adbbb16d	arith:*>+	intWindow:4898	survived	-	-	961
+me095e34396	arith:+>-	arithInt:4343	killed	tsymex_r6_b2_intwidth	pin	341
+mf9a40f8296	cmp:<=><	cmpInt:4356	survived	-	-	930

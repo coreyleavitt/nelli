@@ -1,0 +1,30 @@
+# RFC-0016 K9e: the pin suites the pin-strength measurement runs against each
+# mutant of the walker's arithmetic and raise arms (scripts/pin-strength.sh;
+# docs/rfc-data/0016-k9e.md). In order: the runner stops at the first suite
+# that fails, so the broadest killers come first. Each is registered, green on
+# its base, and pins its verdicts natively (pinFind / pinExact / pinCrash).
+# Changing the list changes what the figure measures: rerun the measurement
+# and recommit tests/0016-pinstrength.tsv with it.
+
+# + - * div mod as compound operands of an assertion, int and its widths
+tsymex_phase15_A1_arithmetic
+# signed add/sub/mul OverflowDefect at each width, checks on
+tsymex_phase16_R16_4_overflow
+# div/mod DivByZeroDefect, signed and unsigned
+tsymex_phase16_R16_3_divzero
+# int8..int64 / uint widening conversions, signed vs unsigned compare
+tsymex_r6_b2_intwidth
+# RangeDefect on a range assignment and conversion
+tsymex_phase16_R16_2_rangedefect
+# low(T) div/mod -1 at 32 and 64 bits
+tsymex_0016_w1d1a_intminmod
+# unsigned div/mod by zero
+tsymex_0016_w1d1b_udivzero
+# a width-typed svInt keeps its OverflowDefect fork
+tsymex_r6_r3_svint_overflow
+# checks off: wrap, and the C traps of div/mod
+tsymex_rfc0005_s8aa_remainder_checksoff
+# a range subtype's base width (int32 range) bounds its arithmetic
+tsymex_162_range_base_width
+# a promoted value keeps its overflow obligation (the discharge log)
+tsymex_161_overflow_obligation

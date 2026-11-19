@@ -1,0 +1,13 @@
+# LeakSanitizer suppressions for scripts/asan-slice.sh (RFC-0016 S8ck-r, INF-04).
+#
+# Rules. Every entry names a frame outside nelli (nim-z3, libz3). A frame
+# under src/nelli is never suppressed; a leak there is fixed at its root
+# (nelli's per-thread state included: releaseSymexThreadState,
+# src/nelli/thread_state.nim). Each entry carries its source and the
+# condition that retires it. LSan treats what a suppressed object references
+# as suppressed too, so an entry for a leaked context also covers the libz3
+# memory the context owns.
+#
+# No entries. The last one, `leak:context::newContext` (nim-z3's FuncDecl,
+# FuncInterp and RcfNum hooks never released their `ctx`, INF-04 item 2),
+# retired with the milpa.lock bump to nim-z3 d86efda, which releases it.

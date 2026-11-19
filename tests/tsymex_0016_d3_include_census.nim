@@ -49,7 +49,8 @@ const
   ## and the sort-checked Z3 term builders it rests on.
   hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
                "./types", "./abstraction", "./symval", "./walk_state", "./z3check",
-               "./variant_layout"]   ## R2-4: the union byte image of the moved allocator
+               "./variant_layout",   ## R2-4: the union byte image of the moved allocator
+               "../thread_state"]  ## S8ck-r: the Z3-free per-thread release leaf
   zcAllowed = ["z3", "./types", "./symval"]
 
   ## The decl-kind caches of the linked Z3: the same in every run, read in a
@@ -87,7 +88,8 @@ const
   ## The imports `symval.nim` may have: stdlib, `z3`, and the existing leaves.
   symvalAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
                    "std/strutils", "std/algorithm", "std/math", "z3",
-                   "./types", "./abstraction"]
+                   "./types", "./abstraction",
+                   "../thread_state"]  ## S8ck-r: the Z3-free per-thread release leaf
 
   ## What slice D3c-1 moved out of `runtime.nim`.
   movedNames = [
@@ -121,6 +123,12 @@ proc enumMembers(s: string): seq[string] =
   for w in s.split(','):
     let n = leadIdent(w.split('=')[0].strip())
     if n.len > 0: result.add n
+
+const perModuleNames = ["releaseThreadState"]
+  ## RFC-0016 S8ck-r: names every module with threadvars defines privately,
+  ## by convention (its `registerThreadStateRelease` argument). Two modules
+  ## defining one is the convention, not code left behind by a move, so the
+  ## moved-name checks below skip them.
 
 proc definedNames(text: string): HashSet[string] =
   ## Top-level definitions: `proc|func|template|macro|iterator|converter|
@@ -520,6 +528,7 @@ suite "RFC-0016 D3: the include surface":
     let rtDefs = definedNames(rt)
     for f in ["heap_model.nim", "z3check.nim"]:
       for n in definedNames(readSmt(f)):
+        if n in perModuleNames: continue
         # a field or parameter line of a block may share a name; only a
         # top-level proc/func/template/iterator declaration is a forward decl
         for kw in ["proc ", "func ", "template ", "iterator "]:
@@ -575,7 +584,8 @@ suite "RFC-0016 D3c-1: the symval leaf":
 const
   ## What slice D3c-2 moved into `walk_state.nim`.
   wsAllowed = ["std/tables", "std/options", "z3", "./types", "./symval",
-               "./definedness", "./errorkind", "./pcre_syntax"]
+               "./definedness", "./errorkind", "./pcre_syntax",
+               "../thread_state"]  ## S8ck-r: the Z3-free per-thread release leaf
 
   wsMoved = [
     "currentWalkCtxPtr", "currentRefSorts", "currentNilConsts",
@@ -782,6 +792,7 @@ suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
     let hp = definedNames(readSmt("runtime_heap.nim"))
     for f in ["heap_model.nim", "z3check.nim"]:
       for n in definedNames(readSmt(f)):
+        if n in perModuleNames: continue
         checkpoint f & " " & n
         check n notin rtDefs
         check n notin hp
@@ -820,12 +831,14 @@ const
   ## D3c-7: what `string_lower_support.nim` may import, and the names that
   ## moved into it, `symval.nim` and `z3check.nim`.
   slsAllowed = ["std/tables", "std/options", "std/sets", "std/algorithm",
-                "std/strutils", "z3", "./types"]
+                "std/strutils", "z3", "./types",
+                "../thread_state"]  ## S8ck-r: the Z3-free per-thread release leaf
   strAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
                 "./types", "./abstraction", "./symval", "./walk_state",
                 "./z3check", "./heap_model", "./string_lower_support",
                 "./regex_parser", "./pcre_select", "./pcre_engine",
-                "./pcre_syntax", "./errorkind", "./stdlib_rows"]
+                "./pcre_syntax", "./errorkind", "./stdlib_rows",
+                "../thread_state"]  ## S8ck-r: the Z3-free per-thread release leaf
   d3c7Moved = ["literalStringBytes", "IndexSplit", "indexSplits",
                "indexSplitOf", "indexSplitCounter", "splitNeedle",
                "literalLen", "NotInForm", "notInForm", "NotIn",
@@ -860,6 +873,7 @@ suite "RFC-0016 D3c-7: the strings module and string_lower_support leaf":
       checkpoint n
       check n notin defs
     for n in definedNames(readSmt("string_lower_support.nim")):
+      if n in perModuleNames: continue
       checkpoint n
       check n notin defs
 

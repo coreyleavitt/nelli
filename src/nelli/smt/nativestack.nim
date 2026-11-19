@@ -95,3 +95,14 @@ proc nativeStackLeft*(): int =
   if stackLowCache == 0'u or sp < stackLowCache or sp >= stackHighCache:
     return high(int)
   int(sp - stackLowCache)
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(stackLowCache, stackHighCache)
+
+registerThreadStateRelease(releaseThreadState)

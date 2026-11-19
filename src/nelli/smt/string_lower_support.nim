@@ -427,3 +427,15 @@ proc resetStringSupport*() =
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   indexSplitOf = (ctx: Z3Context(nil), ids: initTable[int, int]())  ## RFC-0005 S8ag
   indexSplitCounter = 0                  ## RFC-0005 S8ag: reset split fresh-name counter
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(indexSplits, indexSplitOf, indexSplitCounter,
+    notInFormOverride, linkedNotInForm)
+
+registerThreadStateRelease(releaseThreadState)

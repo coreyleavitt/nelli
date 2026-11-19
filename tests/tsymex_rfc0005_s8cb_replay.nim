@@ -41,6 +41,13 @@ proc s8cbBigFrame(v: int) {.symexOpaque.} =
 when defined(linux) and compileOption("threads"):
   import std/posix
 
+  # RFC-0016 S8ck-r: a raw pthread that calls nim-z3 needs `-d:useMalloc`
+  # (Nim's allocator does no setup for a foreign thread; nim-z3 1320c2e,
+  # THREADING.md). The test's `.nim.cfg` sets it; this keeps a dropped cfg
+  # from silently putting the foreign-thread case back on Nim's allocator.
+  static:
+    doAssert defined(useMalloc), "the foreign-thread case needs -d:useMalloc (tests/tsymex_rfc0005_s8cb_replay.nim.cfg)"
+
   proc sutBig(v: int) =
     symexAssume(v == 3)
     s8cbBigFrame(v)
@@ -60,6 +67,11 @@ when defined(linux) and compileOption("threads"):
     {.cast(gcsafe).}:
       foreignOut.status = symexFind(sutBig, tLabel("big")).status
       foreignOut.big = s8cbBig
+      # RFC-0016 S8ck-r: Nim runs no destruction handler on a thread it did
+      # not create, so a foreign thread gives nelli's per-thread state back
+      # itself; without this the run's walker state leaked when the thread
+      # exited (LeakSanitizer, scripts/asan-slice.sh).
+      releaseSymexThreadState()
 
   proc foreignMain(x: pointer): pointer {.noconv.} =
     # Before anything allocates: its own frame must not.

@@ -85,6 +85,12 @@ export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
 # once the umbrella stopped re-exporting symex. Re-exported by name below,
 # so `import nelli/symex` callers are unchanged.
 
+# RFC-0016 S8ck-r (INF-04): a foreign thread (one Nim did not create) that
+# ran nelli calls `releaseSymexThreadState` before it exits; a Nim thread's
+# state is released at its exit automatically (src/nelli/thread_state.nim).
+import ./thread_state
+export thread_state.releaseSymexThreadState
+
 import ./engine/markers as symexMarkers
 export symexMarkers.SymexCaptureCtx,
        symexMarkers.symexCapture,

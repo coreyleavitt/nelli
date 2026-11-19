@@ -1682,7 +1682,12 @@ proc normalize[T](items: seq[Item[T]]; costs = false;
     if resolveBarrier(cur, costs, recLimit): continue
     if cur.len > 0 and decidesAtFront(cur[0]):
       return @[cur[0]]
-    var nx: seq[Item[T]]
+    # RFC-0016 S8ck-r: the initializer is load-bearing. Without it Nim 2.2.10
+    # (stock and patched) leaks `nx`: sempass2 forgets the writes made under
+    # the `for` below, marks `nx = pruned` a first write, and compiles it to
+    # a bitwise copy that never destroys the old buffer
+    # (tests/asan/nim_firstwrite_leak.nim).
+    var nx: seq[Item[T]] = @[]
     var cutting = false
     for it in cur:
       if it.kind == ikMarker:
@@ -4133,3 +4138,14 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
         if y in sure or y in alive[ord(x)]: continue
         result.pairs.add (x, y)
     if result.pairs.len > maxPairs: result.pairs = @[]
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(concreteCall, rnIds, selCache, verCache)
+
+registerThreadStateRelease(releaseThreadState)

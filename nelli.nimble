@@ -1909,6 +1909,12 @@ task test, "Run the test suite":
             "tsymex_0016_s8ch_addrglobal",
             # RFC-0016 S8ci (PRC-31): an own-context search runs Z3's defaults under seven eighths of its bound, the rest without the uncharged cheap equality search.
             "tsymex_0016_s8ci_eqsplit",
+            # RFC-0016 S8ck-r (INF-04): per-thread state is released (a Nim thread at exit,
+            # a foreign thread by its owner); no threadvar escapes it; the Nim 2.2.10
+            # first-write leak shape stays out of src/.
+            "tsymex_0016_s8ckr_threadstate",
+            "tsymex_0016_s8ckr_threadstate_audit",
+            "tsymex_0016_s8ckr_firstwrite_audit",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

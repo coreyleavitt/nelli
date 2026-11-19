@@ -67,6 +67,7 @@ export heap_model.distinctBijectivityHints, heap_model.distinctSortNames,
 import ./string_lower_support   ## RFC-0016 review D3c-7: index splits, `splitNeedle`, `literalStringBytes`
 import ./runtime_strings   ## RFC-0016 review D3c-7: Cluster S, `lowerStrArm`
 import ./runtime_closures   ## RFC-0016 review D3c-5: Cluster C, `lowerClosureArm`
+import ../thread_state   ## RFC-0016 S8ck-r: the per-thread state release registry
 import ./exits   ## RFC-0005 review R4: the exit channels (`park`, `claimAt`)
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
@@ -1026,18 +1027,34 @@ proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
 # `runSymexCaught` on both backends. This module has no lifecycle hook of its
 # own. The in-band sinks those notes describe predate the fix and remain the
 # walker's way to report a decline; they are no longer the only sound one.
+# They stay (S8ck item 6, re-read at S8ck-r against nim-z3 d86efda): raise-free
+# hooks make a raise SURVIVE, they do not make one cheap. A raise ends the
+# whole run at `runSymexCaught` as `sxUnknown` (the boundary-abort class),
+# because the walker has no unwind discipline to resume after one (no
+# try/finally around `arithFrames` and the other per-run stacks; every escape
+# ends the run, which re-seeds them). An in-band degrade (`lowerDegrade`,
+# `degradeStrArm`) instead taints only the path that met it
+# (`drainPendingLowerEffects` (d)), and every other path still decides. So
+# the sinks are kept for precision, and Nim 2.2.10 still loses a raise in any
+# destructor that enters a `try` (UPS-01), which nim-z3's raise-free hooks do
+# not cover.
 
 when defined(symexTestInjectWalkerFault):
   # RFC-0005 S8ce fault injection (compiled out of every normal build;
   # `-d:symexTestInjectWalkerFault` is set for its dedicated test files only,
-  # by their `.nim.cfg`). A raise unwinding through the walk crosses destroys
-  # of Z3-term-holding temporaries (`walkBlock`'s reassigned `seq[Path]`,
-  # `walk`'s `states` / `next`, a term-building helper's local `seq[Z3Bool]`);
-  # on the C backend nim-z3's hooks used to swallow it there. Dispatch
-  # reaching the sentinel label `__inject_s8ce_<shape>__` arms one shape; the
-  # next operation of that shape raises out of the walker's own code with
-  # that operation's Z3 temporaries live (`injectShapeFault`'s call sites
-  # name them). The `dispatch` shape fires at the sentinel statement itself.
+  # by their `.nim.cfg`). Dispatch reaching the sentinel label
+  # `__inject_s8ce_<shape>__` arms one shape; the next operation of that shape
+  # raises out of the walker's own code with that operation's Z3 values live
+  # (`injectShapeFault`'s call sites name them), and the test checks the raise
+  # reaches `runSymexCaught`. The `dispatch` shape fires at the sentinel
+  # statement itself. What this shows, and what it does not: the shapes are
+  # distinct raise ORIGINS, not distinct swallow sites. The only destroy
+  # observed swallowing a raise under nim-z3's old hooks (S8ce: the S8bx case
+  # and the probe's two tracebacks) is in `walkBlock`, its reassigned
+  # `seq[Path]`; most shapes were probably lost there too. That every other
+  # destroy site is safe rests on the generated-C scan (no hook pops the error
+  # flag; nim-z3's hooks are raise-free and `quirky`), with these shapes as
+  # witnesses, not on the shapes alone.
   var injectedShape {.threadvar.}: string
     ## The armed shape; cleared when it fires and by `resetSymexRunState`.
 
@@ -25658,6 +25675,16 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # `currentClosureSyms` holds for the run: once the mapped term died the
       # decl was freed while still cached, and the next path to reach this
       # lambda site mapped the freed decl.
+      # `wrapFuncDecl` takes the wrapper's own reference. The decl is the
+      # closure's run-lifetime decl (`buildClosure` holds one reference for
+      # the run), and the wrapper dec_refs on destroy: built from a bare
+      # object constructor it gave back a reference it never took, the
+      # decl was freed while the closure still named it, and a later
+      # translate into an own context read the freed node (RFC-0016 S8ck-r:
+      # heap-use-after-free under the ASan libz3; Z3 4.13.4's
+      # `ast_translation.cpp` UNREACHABLE on Windows). Masked until nim-z3
+      # d86efda bound the Z3Int/Z3Bool hooks: terms never released kept the
+      # decl alive through the map decl that names it.
       let fd = wrapFuncDecl[(Z3BitVec[64],), Z3BitVec[64]](
         ctx, cloSV.closureRawFD)
       let srcArr = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
@@ -26213,6 +26240,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   # nested try blocks are present, so an inner try/finally cannot be used).
   # Resetting it HERE — before any sync*/allocRef* call that checks
   # `currentWalkCtxPtr != nil` — ensures the stale pointer is never dereffed.
+  armThreadStateRelease()  ## RFC-0016 S8ck-r: a Nim thread's state is released when it exits
   resetWalkState(settings.budget.maxSplitParts)  ## RFC-0016 D3c-2: walk_state's threadvars, the sinks pointer included
   let ctx = newContext()
   setCurrentContext(ctx)
@@ -29102,3 +29130,45 @@ lowerHooks = LowerHooks(
   currentFrameId: currentFrameId,
   registerCapCell: registerCapCell,
   depositStrIndexOob: depositStrIndexOob)
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(freshnessCapHints, heapDepthErrors, newFieldZeroErrors,
+    ptrFamilyHints, closureEnvWrites, loweringReadNames, z3ApiErrorCount,
+    z3ApiFirstError, arithFrames, checkScopes, obligationLog, seqOobConds,
+    uninitReadConds, arithTrapConds, currentVariantHeaps,
+    currentWinningGlobals, heapWitnessNominalRegistry, currentCallerHeaps,
+    currentCallerHeapDepth, currentCallerAllocCounters,
+    currentCallerLiveRefs, currentClosureExitHeaps,
+    currentClosureExitAllocCounters, currentClosureExitLiveRefs,
+    currentClosureDidMutateHeap, currentClosureExitPc,
+    lastDrainedClosureExitPc, currentCallerUb, currentCallerTaint,
+    currentCallerPc, closureBodyCallerPc, currentClosureCallAxioms,
+    currentClosureCallAxiomStrs, currentClosureCallErrors, sliceViewCounter,
+    variantLitFreshCounter, variantConstructSymFreshCounter,
+    seqConformCounter, bitSetCardTerms, bitSetCardIds, bitSetCardSets,
+    walkerWorkUnits, uninitSeqBases, uninitSeqBaseIds, uninitSeqAliases,
+    uninitAliasHeld, uninitArrKinds, pendingPtrCompares, bvIvlDeclKinds,
+    glUnwrittenCtx, glUnwritten, glPartHavoc, glWatched, glVarGlobal,
+    glUnwrittenAsts, lowerAsReceiver, globalEntryVals, noinitSerial,
+    callGuardedNames, extractionErrors, unknownExnWarnings, ptrLeafAims,
+    symexTargetSolveStats, ownContextUnits, symexZ3CallCount,
+    seqCapDeclKinds, byteDomainKinds, deepTermsLeftAlone,
+    theoryFreeNeedsSimple, queryTimeoutMsCur, nativeStackCutFlag,
+    queryTimedOutFlag, walkerWorkBase, walkUnitsBase, walkRLimitCur,
+    walkWorkExhausted, tailUnitsCeil, tailWorkExhausted, tailUnitsRun,
+    intDivDeclKinds, int2bvDeclKind, eqDeclKind, ctxPruneLog,
+    symexIfArmsPruned, symexIfArmsChecked, symexLoopIterations,
+    rfc0005RawStatus, scratchCapped, uninterpDeclKind, paramBoundaryAbort,
+    ptrAims)
+  when defined(symexTestInjectWalkerFault):
+    releaseToDefault(injectedShape)
+  when defined(symexQueryStats):
+    releaseToDefault(symexQueryStats, symexQueryStatsPaused,
+      symexFactsFirstOff, symexStepStats, symexPerturbConsts, perturbSerial)
+
+registerThreadStateRelease(releaseThreadState)

@@ -655,3 +655,21 @@ proc resetWalkState*(maxSplitParts: int) =
   currentInFlightMsg = none(string)
   currentExnRefCounter = 0
   lastGetCurrentExnRef = (sortName: "", typeTag: "")
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(currentWalkCtxPtr, currentRefSorts, currentNilConsts,
+    currentDistinctSorts, currentClosureSyms, currentClosureBodies,
+    currentMaxSplitParts, convFloatToIntBoundConds, rangeDefectConds,
+    divByZeroConds, overflowConds, strIndexOobConds, regexRaiseMsgs,
+    parseIntRaiseConds, regexRecDefConds, regexRecFactConds, regexPointSites,
+    regexLimitSites, stripDecompConds, stripSynthCounter,
+    currentInFlightTypeId, currentInFlightMsg, currentExnRefCounter,
+    lastGetCurrentExnRef, currentLowerSinks, degradeSymCounter)
+
+registerThreadStateRelease(releaseThreadState)

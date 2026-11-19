@@ -510,7 +510,8 @@ jobs:
   # stock libz3 hides (scripts/asan-slice.sh header; the self-test proves it).
   # The ASan libz3 is built from the tagged source once per (version, build
   # script) and cached. Any sanitizer report, or a failing/hung test, fails the
-  # job; leaks are not gated (S8ck-r owns nim-z3's).
+  # job, a leak included (S8ck-r: tests/asan/lsan.supp holds the non-nelli
+  # suppressions).
   asan:
     needs: derive
     runs-on: ubuntu-24.04
@@ -547,7 +548,7 @@ jobs:
             bash scripts/build-z3-asan.sh "$Z3_ASAN_VERSION" "$HOME/z3-asan-prefix" "$RUNNER_TEMP/z3-asan-build"
           rm -rf "$RUNNER_TEMP/z3-asan-build"
 
-      - name: Self-test, the job fails on planted defects (a plain UAF, an over-released Z3 AST) and passes the throw control
+      - name: Self-test, the job fails on planted defects (a plain UAF, an over-released Z3 AST, a dropped heap block) and passes the throw control
         env:
           NELLI_HOST: "1"
         run: |

@@ -1696,17 +1696,18 @@ proc nextMarker(ctx: ParseCtx): int =
   inc ctx.markerCounter
   ctx.markerCounter
 
-proc declineAtSite(ctx: ParseCtx; kind: SymexErrorKind; msg, reason: string):
-    IRStmt =
+proc declineAtSite(ctx: ParseCtx; kind: SymexErrorKind; msg, reason: string;
+                   halt = false): IRStmt =
   ## RFC-0005 S8 (§2.5 point 1). A Class-A decline: records the classified
   ## `sevError` (`msg`, the diagnostic) anchored at a fresh marker, and
   ## returns that marker (`isUnsupported(kind, reason)`) -- the caller MUST
   ## place it in the IR at the point of substitution (the walker taints and
-  ## records every path that reaches it).
+  ## records every path that reaches it). `halt` makes the marker end the path
+  ## (RFC-0016 INT-76: nothing after it may meet a value of the wrong sort).
   let m = ctx.nextMarker()
   ctx.parseErrors.add SymexErrorInfo(kind: kind, severity: declineSeverity, msg: msg,
                                      scope: siteAnchored(m))
-  mkUnsupported(kind, reason, m)
+  mkUnsupported(kind, reason, m, halt)
 
 proc declineMarker(ctx: ParseCtx; kind: SymexErrorKind; reason: string): IRStmt =
   ## RFC-0005 S8. A Class-B decline: a marker with no parse-time record (the
@@ -1736,13 +1737,9 @@ proc declineLongDouble(ctx: ParseCtx; site: NimNode; what: string): IRStmt =
   ## target may not give (an initialised local was walked as an IEEE
   ## double; Nim's arithmetic is a double's, but a conversion from an
   ## integer stores the C value, exact in x87's 64-bit mantissa).
-  let m = ctx.nextMarker()
-  ctx.parseErrors.add SymexErrorInfo(kind: feUnsupportedParamType,
-    severity: declineSeverity,
-    msg: siteMsg(site, what & ": " & longDoubleReason & " (feUnsupportedParamType)"),
-    scope: siteAnchored(m))
-  mkUnsupported(feUnsupportedParamType, what & ": " & longDoubleReason, m,
-                halt = true)
+  ctx.declineAtSite(feUnsupportedParamType,
+    siteMsg(site, what & ": " & longDoubleReason & " (feUnsupportedParamType)"),
+    what & ": " & longDoubleReason, halt = true)
 
 proc declineUnsafeCast(ctx: ParseCtx; msg, reason: string): IRStmt =
   ## RFC-0005 S8. `heUnsafeCast`'s `declineAtSite`: the marker is the

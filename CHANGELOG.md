@@ -22,7 +22,7 @@ definedness check, and the removal of the two fields 0.9.2 deprecated; plus
 the code review of that surface (`docs/rfc/0016-review.md`, "0.10.0 review",
 nine rounds, floor at round 9).
 
-The walker version moves from `"287"` to `"369"`. Every 0.9.2 cache entry is
+The walker version moves from `"287"` to `"472"`. Every 0.9.2 cache entry is
 orphaned and the first run after the upgrade is cold. The soundness codec
 stays at version 4.
 
@@ -51,6 +51,72 @@ stays at version 4.
   `arith_regime.stampFor`); `ArithScopeProof`, `arithFrom*` and `replayArith`
   are deleted (review D2, a stamp can no longer be minted by a caller).
 - New settings `wholeRunDefinedness` (default on) and `budget.walkRLimit`.
+
+### Changed - int6 (RFC-0016 native-parity, after the 0.10.0 review)
+
+Each entry cites its section of `docs/migration/0.10.0.md`, or the commit
+where that note does not yet cover it.
+
+- **Check options belong to the region they were compiled under** (migration
+  5b). A routine takes the effective `rangeChecks`, `boundChecks`, `fieldChecks`
+  and `objChecks` of its own declaration, never its caller's `{.push.}`, so a
+  routine under `{.push rangeChecks: on.}` in a range-off build is walked
+  checked and a routine under `{.push rangeChecks: off.}` in a checked build is
+  walked as that build is, instead of declining `feCheckOption`. The same
+  holds for `boundChecks`, `fieldChecks` and `objChecks` (5b), and a push
+  position that is both on and off, or a push inside a routine body, still
+  declines `feCheckOption`. Walker 465.
+- **Per-region overflow checks** (migration 1, `arithChecks`; walker 467). A
+  routine under `{.push overflowChecks: off.}` or `{.push checks: off.}` in a
+  checked build is walked as a `--overflowChecks:off` build is (`ubSignedOverflow`
+  on undefined overflow, an exact wrap for an 8 or 16 bit result or under
+  `-d:nelliFwrapv`), instead of declining `feOverflowCheckOption`. Breaking for
+  an exhaustive `case`: `ArithScope` gains `asPushedOff` (appended) and
+  `RoutineArithFacts` the field `overflowOff` (migration 1). A push that
+  reaches a module through an importer still declines `feOverflowCheckOption`.
+- **Field-check push regions** (migration 5d; walker 469). A routine declared
+  under `{.push fieldChecks: off.}` in a checked build is walked as a
+  `--fieldChecks:off` build is (union bytes on c, `ubInactiveVariantField` on
+  cpp), where it used to decline `feUnsupportedOp`; a program with such a
+  region carries the variant image through its checked routines, which keep
+  their `FieldDefect`. A program with no such region is unchanged.
+- **Scanner text guard** (migration 1, int6-w, walker 468). The region reads
+  place a routine in its module's text, read from disk during the compile. A
+  routine whose text on disk ends before its position, or defines its name but
+  not there, because the module was saved during the compile, now declines
+  `feCheckOption` (rebuild without editing). An edit that moves no routine is
+  not detected.
+- **Walk budget, per-context charge and model reuse** (migration 3 and
+  9 to 10, `walkRLimit`; commits 92a1f583 and aa7464d7). The walker's
+  own work is charged to `walkRLimit` at 15 units per term visit beside the Z3
+  units (migration 3). Each check's own Z3 context is also charged, so a walk of
+  many small queries (a k-unroll such as `filterIt`) is bounded by the budget
+  and not only by solver time (92a1f583, walker 464). The checks that act only
+  on UNSAT are decided by a kept satisfying model before a search runs, which
+  cuts the per-check cost without sharing a context (aa7464d7, walker 466). A
+  walk the budget ends answers `sxUnknown` with `ckWalkWork`; raise
+  `walkRLimit` or set it `0` (migration 3).
+- **Command-syntax calls are walked** (commit 73e91183, walker 460; migration 7). A call spelled as a command (`f x`) in expression position
+  was declined `feUnsupportedExprKind`, so every path through Nim 2.2.10's
+  `filterIt` (it ends in `move result`) declined; `filterIt` is now walkable.
+- **NaN is admitted in float range stores** (commit 08039ffb, walker 463;
+  migration 8). A plain assignment or `+=`, `-=`, `*=` and `/=` on a
+  float range location is a checked store that raises `RangeDefect` when the
+  value is below `lo` or above `hi`; NaN passes that test natively, so the
+  heap and parameter domains and the clamp now admit it. Nothing is raised
+  under `--rangeChecks:off`.
+- **API breaks recorded by INT-34** (commit 4e7497b8, walker 416; migration
+  11, with before and after code). `FindingGap.kind`, `FindingHint.kind` and
+  `FindingHint.severity` are the `SymexErrorKind` and `SymexErrorSeverity`
+  enums, not strings (the cache stores them by name, so older records read the
+  same and a name the build does not know is a miss). The exported threadvar
+  `engineSymexDbErrors` is removed: a symex DB error is recorded on the engine
+  frame of the run that made it and added to that run's `Report.dbErrors`
+  whatever its outcome; errors made outside any run stay with the caller
+  through `consumeSymexDbErrors`. A cache key starts with the walker version
+  that wrote it (`w416:`) instead of `sx2:`; `pruneForeignSymexRecords` is an
+  opt-in sweep of records of other walker versions, and a backend lists its
+  keys through the new optional `ExampleDatabase.primaryKeysImpl`.
 
 ### Module layout
 
@@ -135,7 +201,7 @@ a consumer that imported an internal module by path.
   routine's arithmetic facts are stated once.
 - **`std/os` pruned from `symex.nim`** broke the `nelliVmAliasAudit` build
   only (R5-H1); the audit block imports what it uses.
-- Walker `"287"` to `"369"` (`symexWalkerVersion`): every cached verdict is
+- Walker `"287"` to `"472"` (`symexWalkerVersion`): every cached verdict is
   recomputed once.
 
 ## [0.9.2] — 2026-11-07

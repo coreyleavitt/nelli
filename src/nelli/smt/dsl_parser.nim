@@ -1749,6 +1749,14 @@ proc declineLongDouble(ctx: ParseCtx; site: NimNode; what: string): IRStmt =
   ## target may not give (an initialised local was walked as an IEEE
   ## double; Nim's arithmetic is a double's, but a conversion from an
   ## integer stores the C value, exact in x87's 64-bit mantissa).
+  ##
+  ## Why the decline is not softened to a float64 model: Nim maps `clongdouble`
+  ## to a float64-sized type, while x86-64 Linux C stores `long double` as an
+  ## 80-bit extended value in 16 bytes. Measured in the dev container (Nim
+  ## 2.2.10, gcc): `sizeof(clongdouble) == 8` against C `sizeof(long double)
+  ## == 16`. Nim's view of the type is therefore both narrower than the value
+  ## and wrongly sized, so no sort the walk could assign matches the native
+  ## value (see also the pinFind guard in tests/tsymex_0016_k9d_pinfind.nim).
   ctx.declineAtSite(feUnsupportedParamType,
     siteMsg(site, what & ": " & longDoubleReason & " (feUnsupportedParamType)"),
     what & ": " & longDoubleReason, halt = true)

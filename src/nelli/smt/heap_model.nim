@@ -115,6 +115,8 @@ proc hasHoleyEnum*(ty: IRType): bool =
   of itVariant, itMultiVariant, itRef, itPtr: true   # conservatively
   else: false
 
+proc rangeCondsIfNeeded*(v: SymVal, ty: IRType; holes = true): seq[Z3Bool]
+
 proc enumHoleConds*(v: SymVal, ty: IRType, zeroLegal: bool): seq[Z3Bool] =
   ## RFC-0016 INT-84. A holey enum value is one of its declared ordinals
   ## (`IRType.enumOrds`), and `0` too when `zeroLegal` (a zero-initialised
@@ -130,11 +132,19 @@ proc enumHoleConds*(v: SymVal, ty: IRType, zeroLegal: bool): seq[Z3Bool] =
   for o in ords:
     if runs.len > 0 and runs[^1][1] + 1 == o: runs[^1][1] = o
     else: runs.add (o, o)
+  # Each run's bounds go through `rangeCondsIfNeeded` (the range-invariant
+  # audit's sanctioned path) on a plain ranged copy of `ty`: no enum name or
+  # ordinals, so neither the zero-legal nor the holes arm applies.
+  let runTy = IRType()
+  runTy[] = ty[]
+  runTy.hasRange = true
+  runTy.enumName = ""
+  runTy.enumOrds = @[]
   var clause: Z3Bool
   for i, (a, b) in runs:
-    let cs =
-      if v.kind == svInt: @[v.zi >= mkZ3IntLit(a), v.zi <= mkZ3IntLit(b)]
-      else: bvRangeConds(v, a, b, ty.signed)
+    runTy.rangeLo = a
+    runTy.rangeHi = b
+    let cs = rangeCondsIfNeeded(v, runTy, holes = false)
     if cs.len != 2: return @[]
     let inRun = cs[0] and cs[1]
     clause = if i == 0: inRun else: clause or inRun

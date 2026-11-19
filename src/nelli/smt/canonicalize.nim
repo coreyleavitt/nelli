@@ -822,6 +822,16 @@ const renderAsChoicesVersion* = "12"
   ##   call too). Its re-run's depths were not modelled, and a call on a
   ##   literal or pinned subject read -21 for -1 or a match and the other
   ##   way round (SND-16); such a call is now unknown. No key bytes change.
+  ## - RFC-0016 INT-87 (444->448, provisional; 445-447 reserved for the
+  ##   in-flight INT-85/INT-86 lanes): a `cstring` is held by value
+  ##   (`tCString`: nil or its bytes, no NUL) instead of declining
+  ##   (`feUnsupportedParamType`). `== nil`/`isNil`, `==` (content, nil
+  ##   only equal to nil), `len`, `high`, `$` and `c[i]` (`c[len]` the NUL,
+  ##   nil a nil dereference, past it undefined) are modelled; a write
+  ##   through one, its address (`<`/`<=`/`cmp` compare addresses), a
+  ##   `cstring(s)` of a held string and a content read beside a possible
+  ##   alias write decline by name. A cstring literal is a value of the
+  ##   tuple (it was a plain string), so a key holding one changes.
   ## - RFC-0016 INT-84 (443->444, provisional): a holey enum input (a
   ##   parameter, its fields, elements, table values, set members, a ref
   ##   cell's fields) ranges over its declared ordinals, not `[low, high]`:
@@ -864,7 +874,7 @@ const renderAsChoicesVersion* = "12"
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
 
-const symexWalkerVersion* = "444"
+const symexWalkerVersion* = "448"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

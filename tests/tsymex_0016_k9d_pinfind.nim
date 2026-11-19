@@ -712,11 +712,12 @@ suite "K9d: pinFind":
     # the record is text: a NUL or a high byte in the domain shows escaped
     check r[0].domain.allIt(it in {' ' .. '~'})
     check pinFind(sutStrLit, tLabel("hit")).status == sxUnsat
-    # the walker declines a cstring parameter: returned as it came, no record
+    # a cstring parameter is held by value (RFC-0016 INT-87): an exact unsat,
+    # pinned over the cstring domain (nil first)
     let cs = pinFind(sutCstr, tLabel("hit"))
-    check cs.status == sxUnknown
-    check cs.errors.named(feUnsupportedParamType)
-    check recordsWith("/sutCstr/").len == 0
+    checkpoint show(cs.errors)
+    check cs.status == sxUnsat
+    check recordsWith("/sutCstr/").len == 1
 
   test "a planted unsat claim over a literal's neighbour is refused":
     ## sutNeighbour hits on "confi", reachable only as "config" minus a byte;

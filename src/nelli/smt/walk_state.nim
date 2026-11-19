@@ -614,6 +614,10 @@ type LowerHooks* = object
     ## Keeps a by-reference capture in the frame's env cell (RFC-0005 S8ax);
     ## it writes the frame of `WalkCtx`.
   depositStrIndexOob*: proc(oob: Z3Bool) {.nimcall.}
+  depositUndefinedOob*: proc(oob: Z3Bool) {.nimcall.}
+    ## RFC-0016 INT-87. An element access Nim emits with no bound check
+    ## (`cstringIndexOp`) outside its buffer: the undefined-access deposit
+    ## under every profile.
     ## A string element access outside its bounds (RFC-0016 PRC-07): the
     ## checked build's `IndexDefect` sink or the undefined-access deposit. It
     ## reads the build's check options and `arithTrapConds`, which

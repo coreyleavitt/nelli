@@ -3604,27 +3604,40 @@ proc allocateSym*(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     pcOut.add matches(sv, byteRange)
     SymVal(kind: svString, str: sv)
   of itTuple:
-    # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
-    var fields: seq[SymVal]
-    for i, ft in ty.fields:
-      let suffix = if ty.fieldNames[i].len > 0: "." & ty.fieldNames[i]
-                   else: "." & $i
-      # Round-6 B5: a traced position allocates svInt directly (only
-      # meaningful for an itInt field — any other field kind at a traced
-      # position is simply not a scan-offset shape, so it falls through to
-      # the ordinary recursive allocation unchanged).
-      if i in intOffsetPositions and ft.kind == itInt:
-        # R3 (S2): stamp the promoted field's static Nim type (`ft.width`/
-        # `ft.signed`) — same rationale as the bare-`itInt` arm above.
-        let v = SymVal(kind: svInt, zi: mkIntVar(baseName & suffix),
-                        ziWidth: ft.width, ziSigned: ft.signed)
-        # Issue #163 W8: same rationale as the bare-itInt arm above.
-        for c in rangeCondsIfNeeded(v, ft):
-          pcOut.add c
-        fields.add v
-      else:
-        fields.add allocateSym(ft, baseName & suffix, pcOut)
-    SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
+    if isCStringTy(ty):
+      # RFC-0016 INT-87: a `cstring` is nil or the bytes before its first
+      # NUL: each byte in 1..0xFF (the byte-faithful range of `itString`
+      # without the NUL), so `c[len(c)]` is the only NUL a read sees. Nil
+      # holds no bytes (`len(nil) == 0`, `$nil == ""`).
+      let nonNil = mkBoolVar(baseName & "." & ty.fieldNames[0])
+      let bytes = mkStringVar(baseName & "." & ty.fieldNames[1])
+      pcOut.add matches(bytes, star(range(mkString("\x01"), mkString("\xff"))))
+      pcOut.add implies(not nonNil, bytes <= mkString(""))
+      SymVal(kind: svTuple, fieldNames: ty.fieldNames,
+             fields: @[SymVal(kind: svBool, bo: nonNil),
+                       SymVal(kind: svString, str: bytes)])
+    else:
+      # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
+      var fields: seq[SymVal]
+      for i, ft in ty.fields:
+        let suffix = if ty.fieldNames[i].len > 0: "." & ty.fieldNames[i]
+                     else: "." & $i
+        # Round-6 B5: a traced position allocates svInt directly (only
+        # meaningful for an itInt field — any other field kind at a traced
+        # position is simply not a scan-offset shape, so it falls through to
+        # the ordinary recursive allocation unchanged).
+        if i in intOffsetPositions and ft.kind == itInt:
+          # R3 (S2): stamp the promoted field's static Nim type (`ft.width`/
+          # `ft.signed`) — same rationale as the bare-`itInt` arm above.
+          let v = SymVal(kind: svInt, zi: mkIntVar(baseName & suffix),
+                          ziWidth: ft.width, ziSigned: ft.signed)
+          # Issue #163 W8: same rationale as the bare-itInt arm above.
+          for c in rangeCondsIfNeeded(v, ft):
+            pcOut.add c
+          fields.add v
+        else:
+          fields.add allocateSym(ft, baseName & suffix, pcOut)
+      SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
   of itArray:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # #142: nested arrays land via the existing recursion. The

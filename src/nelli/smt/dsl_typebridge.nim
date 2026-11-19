@@ -2004,6 +2004,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   case (if resolved.kind in {nnkIdent, nnkSym}: typeSpelling(resolved) else: s)
   of "bool":     unranged(tBool())
   of "string":   unranged(tString())
+  of "cstring":  unranged(tCString())   ## RFC-0016 INT-87: held by value
   of "char":     unranged(tInt(8,  signed = false, isChar = true))  ## Phase 15
                                                      ## Z3c: char = uint8;
                                                      ## RFC-0005 S8am: `isChar`

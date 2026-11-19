@@ -1528,6 +1528,11 @@ type
                                    ## (`regexLiteralOfCtx`), exactly as if it
                                    ## had been written there: the constructor
                                    ## already ran, and a `let` cannot change.
+    cstrContentRead*: bool         ## RFC-0016 INT-87: a `cstring`'s bytes
+                                   ## were read (`len`, `[]`, `$`, `==`);
+                                   ## `parseProc` then checks the run for a
+                                   ## write a caller's buffer could see
+                                   ## (`cstrAliasHazard`).
     procScoped*: ProcScopedCollectors
                                    ## D4 (design finding, accepted). The four
                                    ## former individually-scoped collector
@@ -4195,6 +4200,8 @@ proc namesRoutineDirectly(e: NimNode): bool =
   (e.kind == nnkSym and symKind(e) notin procValueHeadKinds) or
     e.kind in {nnkLambda, nnkDo}
 
+proc routineMagic(sym: NimNode): string  ## RFC-0016 INT-87 fwd decl
+
 proc scanCall(n: NimNode; acc: var OpaqueEffects;
               seen, stack: var seq[NimNode]) =
   ## RFC-0005 S8cc. A call in a summarised body: the routine, then each
@@ -4220,8 +4227,11 @@ proc scanCall(n: NimNode; acc: var OpaqueEffects;
   # RFC-0005 S8cs: a stdlib routine's body is not read (`scanOpaqueEffects`), and
   # what it writes through a pointer it is given (`copyMem`, `zeroMem`) is no
   # read of the argument. Comparing a pointer stores nothing.
+  # RFC-0016 INT-87: nor does reading a `cstring`'s length or bytes.
   if not isUserRoutine(n[0]) and symKind(n[0]) notin procValueHeadKinds and
-     macros.strVal(n[0]) notin ["==", "!=", "isNil"]:
+     macros.strVal(n[0]) notin ["==", "!=", "isNil"] and
+     not magicIn(routineMagic(n[0]),
+                 @["LengthStr", "CStrToStr", "High", "EqCString"]):
     for i in 1 ..< n.len:
       if n[i].kind notin {nnkEmpty, nnkNilLit} and
          scanArgHoldsPtr(n[i].getTypeInst):
@@ -11736,6 +11746,188 @@ proc parseNilCompare(op: IRBinop; refNode0: NimNode; nilIsLhs: bool;
     return mkBoolLit(false)
   nil
 
+# ---- RFC-0016 INT-87: a `cstring`, held by value (`tCString`) ----------------
+
+proc isCStringNode(x: NimNode): bool =
+  ## RFC-0016 INT-87. `x` (a typed operand) is a `cstring`.
+  x != nil and x.typeKind == ntyCString
+
+proc cstringLitIR(s: string): IRExpr =
+  ## RFC-0016 INT-87. The `cstring` a literal converts to: its bytes up to
+  ## the first NUL (Nim passes the literal's buffer, and C stops there).
+  let nul = s.find('\0')
+  mkTupleLit(@[mkBoolLit(true), mkStrLit(if nul < 0: s else: s[0 ..< nul])],
+             tCString())
+
+proc cstringNilIR(): IRExpr =
+  ## RFC-0016 INT-87. Nim's nil `cstring`, the tuple's zero.
+  mkTupleLit(@[mkBoolLit(false), mkStrLit("")], tCString())
+
+proc cstringDecline(n: NimNode; what: string; preamble: var seq[IRStmt];
+                    ctx: ParseCtx) =
+  ## RFC-0016 INT-87. A named decline of an operation on a `cstring` the
+  ## by-value model cannot express.
+  preamble.add ctx.declineAtSite(feUnsupportedOp,
+    siteMsg(n, "RFC-0016 INT-87: " & what & " in `" & n.repr & "`: a " &
+            "`cstring` is held by value, its bytes and whether it is nil, " &
+            "so no write or address of its buffer is modelled " &
+            "(feUnsupportedOp)"),
+    "cstring: " & what & " (feUnsupportedOp)")
+
+proc cstringOperand(x: NimNode; preamble: var seq[IRStmt];
+                    ctx: ParseCtx): IRExpr =
+  ## RFC-0016 INT-87. `x` lowered and let-bound, so its fields are read
+  ## once each.
+  let v = freshSynth(ctx, "cstr")
+  preamble.add mkLet(v, tCString(), parseExpr(x, preamble, ctx))
+  mkVar(v)
+
+proc cstrNonNil(c: IRExpr): IRExpr = mkField(c, 0, "nonNil")
+proc cstrBytes(c: IRExpr): IRExpr = mkField(c, 1, "bytes")
+
+proc parseCStringExpr(n: NimNode; preamble: var seq[IRStmt];
+                      ctx: ParseCtx): IRExpr =
+  ## RFC-0016 INT-87. The lowering of every operation on a `cstring` the
+  ## by-value model (`tCString`) holds, or a named decline of one it cannot;
+  ## nil for a node that is no such operation. Native semantics (Nim 2.2.10,
+  ## c and cpp): `len(nil) == 0`, `$nil == ""`; `==` compares content and nil
+  ## equals only nil; `c[len(c)]` is the NUL; `<`, `<=` and `cmp` convert to
+  ## `pointer` and compare addresses, so they decline with every other
+  ## address of a `cstring`.
+  case n.kind
+  of nnkNilLit:
+    if isCStringTy(classifyType(n).ty): return cstringNilIR()
+  of nnkStrLit .. nnkTripleStrLit:
+    if isCStringNode(n): return cstringLitIR(n.strVal)
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkStringToCString,
+     nnkCast:
+    if n.len < 1: return nil
+    let src = n[^1]
+    let toC = isCStringNode(n)
+    let fromC = isCStringNode(src)
+    if toC and fromC:
+      return parseExpr(src, preamble, ctx)
+    if toC:
+      var lit = src
+      while lit.kind in {nnkHiddenStdConv, nnkStringToCString} and lit.len > 0:
+        lit = lit[^1]
+      if lit.kind in {nnkStrLit .. nnkTripleStrLit}:
+        return cstringLitIR(lit.strVal)
+      if lit.kind == nnkNilLit:
+        return cstringNilIR()
+      if n.kind == nnkCast:
+        cstringDecline(n, "a cast to `cstring`", preamble, ctx)
+      else:
+        cstringDecline(n, "a `cstring(...)` of a string the routine holds, " &
+                       "which aliases its buffer", preamble, ctx)
+      return cstringNilIR()
+    if fromC:
+      cstringDecline(n, "the address of a `cstring` (a conversion or cast " &
+                     "to `" & n.getTypeInst.repr & "`; `<`, `<=` and `cmp` " &
+                     "compare addresses)", preamble, ctx)
+      let z = zeroValueForType(classifyType(n).ty)
+      return (if z != nil: z else: mkIntLit(0))
+  of nnkBracketExpr:
+    if n.len == 2 and isCStringNode(n[0]):
+      # `c[i]`: nil is a nil dereference; 0 <= i < len a byte; i == len the
+      # NUL; anything else reads outside the buffer, undefined.
+      ctx.cstrContentRead = true
+      let c = cstringOperand(n[0], preamble, ctx)
+      let iv = freshSynth(ctx, "cidx")
+      preamble.add mkLet(iv, tInt(), parseExpr(n[1], preamble, ctx))
+      let nilTmp = freshSynth(ctx, "cnil")
+      let nilPtr = freshSynth(ctx, "cnilp")
+      let byteTy = tInt(8, signed = false, isChar = true)
+      preamble.add mkIf(@[mkBranch(mkUnop(uNot, cstrNonNil(c)), mkBlock(@[
+        mkLet(nilPtr, tPtr(byteTy), mkNil(tPtr(byteTy))),
+        mkDeref(nilTmp, mkVar(nilPtr), byteTy)]))])
+      return mkStrOp(iekStrAt, cstringIndexOp,
+        @[mkStrOp(iekStrConcat, "&", @[cstrBytes(c), mkStrLit("\0")]),
+          mkVar(iv)])
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix:
+    if n.len < 2 or n[0].kind != nnkSym: return nil
+    var anyC = false
+    for i in 1 ..< n.len:
+      if isCStringNode(n[i]): anyC = true
+    if not anyC: return nil
+    let magic = routineMagic(n[0])
+    if n.len == 2 and isCStringNode(n[1]):
+      whenMagic(magic, "IsNil"):
+        let c = cstringOperand(n[1], preamble, ctx)
+        return mkUnop(uNot, cstrNonNil(c))
+      whenMagic(magic, "LengthStr"):
+        ctx.cstrContentRead = true
+        let c = cstringOperand(n[1], preamble, ctx)
+        return mkStrOp(iekStrLen, "len", @[cstrBytes(c)])
+      whenMagic(magic, "High"):
+        ctx.cstrContentRead = true
+        let c = cstringOperand(n[1], preamble, ctx)
+        return mkBinop(bSub, mkStrOp(iekStrLen, "len", @[cstrBytes(c)]),
+                       mkIntLit(1))
+      whenMagic(magic, "CStrToStr"):
+        ctx.cstrContentRead = true
+        let c = cstringOperand(n[1], preamble, ctx)
+        return cstrBytes(c)
+    if n.len == 3 and magicIs(magic, "EqCString"):
+      let lhsNil = unwrapHidden(n[1]).kind == nnkNilLit
+      let rhsNil = unwrapHidden(n[2]).kind == nnkNilLit
+      if lhsNil and rhsNil: return mkBoolLit(true)
+      if lhsNil or rhsNil:
+        # nil-ness is the pointer, passed by value: no content is read
+        let c = cstringOperand(if lhsNil: n[2] else: n[1], preamble, ctx)
+        return mkUnop(uNot, cstrNonNil(c))
+      ctx.cstrContentRead = true
+      let a = cstringOperand(n[1], preamble, ctx)
+      let b = cstringOperand(n[2], preamble, ctx)
+      return mkBinop(bAnd, mkBinop(bEq, cstrNonNil(a), cstrNonNil(b)),
+                           mkBinop(bEq, cstrBytes(a), cstrBytes(b)))
+  else: discard
+  nil
+
+proc cstringWriteDecline(n: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0016 INT-87. A write through a `cstring` (`c[i] = x`), declined by
+  ## name; nil for any other statement.
+  if n.kind notin {nnkAsgn, nnkFastAsgn} or n.len < 2: return nil
+  var lhs = n[0]
+  while lhs.kind in {nnkHiddenDeref, nnkHiddenAddr} and lhs.len > 0:
+    lhs = lhs[0]
+  if lhs.kind != nnkBracketExpr or lhs.len < 1 or not isCStringNode(lhs[0]):
+    return nil
+  var pre: seq[IRStmt]
+  cstringDecline(n, "a write through a `cstring`", pre, ctx)
+  mkBlock(pre)
+
+proc cstrAliasHazard(procDef: NimNode; params: seq[IRParam]): string =
+  ## RFC-0016 INT-87. Why a content read of a `cstring` parameter may not see
+  ## the buffer's bytes as the walk holds them, or "". The caller can pass
+  ## `cstring(s)` of memory the routine also reaches: a `var` parameter, one
+  ## holding an address, or a global. A write there changes the bytes the
+  ## `cstring` addresses, which the by-value model does not see.
+  var holds = false
+  for p in params:
+    if irHoldsCString(p.ty): holds = true
+  if not holds: return ""
+  let formals = procDef[3]
+  for i in 1 ..< formals.len:
+    let id = formals[i]
+    let tyNode = id[id.len - 2]
+    if tyNode.kind == nnkVarTy:
+      return "the `var` parameter `" & id[0].repr & "`"
+    if isCStringNode(id[0]): continue
+    var acc: OpaqueEffects
+    var seen: seq[string]
+    reachPointees(id[0].getTypeInst, acc, seen)
+    if acc.heapAll or acc.heapTys.len > 0:
+      return "the parameter `" & id[0].repr & "`, which holds an address"
+  var acc = OpaqueEffects(inert: true, writesOnly: true)
+  var seen, stack: seq[NimNode]
+  scanOpaqueEffects(procDef[0], acc, seen, stack)
+  if not acc.inert: return "a body whose writes are not bounded (" & acc.why & ")"
+  if acc.havoc.len > 0: return "a write to `" & acc.havoc[0] & "`"
+  if acc.heapAll or acc.heapTys.len > 0:
+    return "a write through a ref or a pointer"
+  ""
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   # RFC-0005 S8bd: a by-reference base marked from an element or a call
   # result (`markByRef`) is its parameter, as a marked symbol is.
@@ -11780,6 +11972,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let mg = parseMGetOrPut(n, preamble, ctx)
     if mg != nil: return mg
   if isOfTest(n): return parseOfTest(n, preamble, ctx)   ## RFC-0005 S8bn
+  block cstr:   ## RFC-0016 INT-87
+    let c = parseCStringExpr(n, preamble, ctx)
+    if c != nil: return c
   case n.kind
   of nnkNilLit:
     # RFC-0005 S8bn (item 7). A `nil` literal in any typed position (`let
@@ -23479,6 +23674,9 @@ proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt =
 
 proc parseStmtBare(n: NimNode, ctx: ParseCtx): IRStmt =
   var preamble: seq[IRStmt]
+  block:   ## RFC-0016 INT-87: a write through a `cstring` declines by name
+    let w = cstringWriteDecline(n, ctx)
+    if w != nil: return w
   let inner = parseStmtInner(n, preamble, ctx)
   # Phase 14 B67. If a parse landed on `isUnsupported`, scan the
   # raw Nim sub-AST for symex markers and emit a {.hint.} for each
@@ -24923,6 +25121,18 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
           "the module-level variable `" & macros.strVal(g) & "`: " & why &
           " (feUnsupportedOp)"), parsed])
         break
+  if ctx.cstrContentRead:
+    # RFC-0016 INT-87: a content read of a `cstring` parameter where the
+    # routine may write memory the caller's buffer could be.
+    let why = cstrAliasHazard(procDef, params)
+    if why.len > 0:
+      parsed = mkBlock(@[ctx.declineAtSite(feUnsupportedOp,
+        "RFC-0016 INT-87: the target routine reads a `cstring` " &
+        "parameter's bytes and may write memory a caller's `cstring` could " &
+        "alias, through " & why & "; the walk holds the bytes by value, " &
+        "which no such write reaches (feUnsupportedOp)",
+        "cstring read beside a possible alias write (feUnsupportedOp)"),
+        parsed])
   ctx.popArithScope()
   discard ctx.assertsOff.pop()
   let bodyIR = withCheckDeclines(ctx, procDef, checkOpts,

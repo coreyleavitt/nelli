@@ -1209,6 +1209,14 @@ proc depositStrIndexOob(oob: Z3Bool) =
     strIndexOobConds.add oob
     syncStrIndexOobCond(oob)
 
+proc depositUndefinedOob(oob: Z3Bool) =
+  ## RFC-0016 INT-87. `c[i]` on a `cstring` outside `0 .. len(c)`: C reads
+  ## past the buffer, undefined whatever the build's checks.
+  let tr = ArithTrap(cond: oob, ub: some(uncheckedIndexUb()),
+                     site: uncheckedIndexSite(""))
+  arithTrapConds.add tr
+  syncArithTrapCond(tr)
+
 proc seedCallerHeapInWalkCtx*(p: Path)
   ## CR-9 Stage 6 fwd-decl (Groups 3+4). If `currentWalkCtxPtr != nil` (a
   ## walk is active), mirrors `p`'s heap state into the WalkCtx fields
@@ -9366,15 +9374,22 @@ proc byteLeafIds(ctx: Z3Context; roots: openArray[Z3Bool]): HashSet[int] =
   ## Every character of such a leaf has a code in 0..255 in every model of
   ## `roots`. Used by `seqLenCaps` (its byte tests) and, RFC-0005 S8ae, by
   ## `seqRangeFacts` (`str.to_code`'s upper bound).
+  ##
+  ## RFC-0016 INT-87: also a `cstring`'s bytes, whose constraint is `s in
+  ## (\x01..\xff)*` (`allocateSym`'s `tCString` pair, no NUL): every code
+  ## is in 1..255, so in 0..255 as well.
   let kinds = seqCapKinds()
   let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
   let byteReId = astId(ctx, byteRe.raw)
+  let cstrRe = star(range(mkString(ctx, "\x01"), mkString(ctx, "\xff")))
+  let cstrReId = astId(ctx, cstrRe.raw)
   for r in roots:
     let ra = toAnyAst(r)
     if getAstKind(ra) == akApp and
        ord(Z3_get_decl_kind(ctx.raw, unpackApp(ra).decl)) == kinds.inRe:
       let args = unpackApp(ra).args
-      if astId(ctx, args[1].raw) == byteReId and getAstKind(args[0]) == akApp and
+      let reId = astId(ctx, args[1].raw)
+      if (reId == byteReId or reId == cstrReId) and getAstKind(args[0]) == akApp and
          ord(Z3_get_decl_kind(ctx.raw, unpackApp(args[0]).decl)) == kinds.uninterp:
         result.incl astId(ctx, args[0].raw)
 
@@ -9435,6 +9450,29 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
     else: -1
   let byteLeaves = byteLeafIds(ctx, roots)
+  proc byteBuilt(ctx: Z3Context; src: Z3AnyAst): bool =
+    ## `src` is a byte leaf, a string literal whose every character is at
+    ## most 0xFF, or a `str.substr` or `str.++` of such terms: every one
+    ## of its characters has a code in 0..255. RFC-0016 INT-87: a
+    ## `cstring`'s `c[i]` reads `str.at(bytes ++ "\x00", i)` (its NUL
+    ## terminator is readable), which Z3 decided no faster in the first
+    ## form than a string's `s[i]` did.
+    if astId(ctx, src.raw) in byteLeaves: return true
+    if Z3_is_string(ctx.raw, src.raw):
+      let n = Z3_get_string_length(ctx.raw, src.raw)
+      if n == 0: return true
+      var cps = newSeq[cuint](int(n))
+      Z3_get_string_contents(ctx.raw, src.raw, n, cps[0].addr)
+      for c in cps:
+        if c > 0xFF'u32: return false
+      return true
+    let k = kindOf(ctx, src)
+    if k == kinds.strExtract: return byteBuilt(ctx, unpackApp(src).args[0])
+    if k >= 0 and k == kinds.strConcat:
+      for a in unpackApp(src).args:
+        if not byteBuilt(ctx, a): return false
+      return true
+    false
   proc byteTestChar(ctx: Z3Context; conv: Z3AnyAst):
       tuple[ok: bool, ch: Z3AnyAst] =
     ## `str.at(s, i)` when `conv` is `int2bv[8](str.to_code(str.at(s, i)))`
@@ -9451,9 +9489,7 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     if kindOf(ctx, code) != kinds.toCode: return
     let ch = unpackApp(code).args[0]
     if kindOf(ctx, ch) != kinds.strAt: return
-    var src = unpackApp(ch).args[0]
-    while kindOf(ctx, src) == kinds.strExtract: src = unpackApp(src).args[0]
-    if astId(ctx, src.raw) notin byteLeaves: return
+    if not byteBuilt(ctx, unpackApp(ch).args[0]): return
     (true, ch)
   var literalLeaves: HashSet[int]   # RFC-0005 S8cd
   block:
@@ -28539,6 +28575,21 @@ proc readUInt64*(w: RawWitness, name: string): uint64 =        w.uintVals[name]
 
 proc readString*(w: RawWitness, name: string): string = w.strVals[name]
 
+var cstringWitnessBufs {.threadvar.}: seq[ref string]
+  ## RFC-0016 INT-87. The buffers `readCString` handed out, kept alive for
+  ## the thread: a witness `cstring` addresses one, and the tuple holding it
+  ## may outlive any scope the reader runs in.
+
+proc readCString*(w: RawWitness, name: string): cstring =
+  ## RFC-0016 INT-87. A `cstring` witness (`tCString`): nil, or a fresh
+  ## buffer holding the model's bytes and the terminating NUL (a Nim string
+  ## keeps one past its length).
+  if not w.boolVals[name & ".nonNil"]: return nil
+  let buf = new string
+  buf[] = w.strVals[name & ".bytes"]
+  cstringWitnessBufs.add buf
+  cstring(buf[])
+
 # ---- RFC-0005 S8h: ref witnesses built from the model's input heap ---------
 #
 # A `ref`/`ptr` position of the typed witness (a param, a field of a by-value
@@ -29465,4 +29516,5 @@ lowerHooks = LowerHooks(
   lower: lower, lowerClosureCall: lowerClosureCall,
   currentFrameId: currentFrameId,
   registerCapCell: registerCapCell,
-  depositStrIndexOob: depositStrIndexOob)
+  depositStrIndexOob: depositStrIndexOob,
+  depositUndefinedOob: depositUndefinedOob)

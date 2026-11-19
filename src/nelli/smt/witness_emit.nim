@@ -91,6 +91,8 @@ proc stdName(name: string): NimNode =
   of "readFloat": bindSym"readFloat"
   of "readFloat32": bindSym"readFloat32"
   of "readString": bindSym"readString"
+  of "readCString": bindSym"readCString"          # RFC-0016 INT-87
+  of "cstring": bindSym"cstring"                  # RFC-0016 INT-87
   of "readSeqInt": bindSym"readSeqInt"
   of "readSeqInt8": bindSym"readSeqInt8"
   of "readSeqInt16": bindSym"readSeqInt16"
@@ -288,6 +290,11 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
                            witId: NimNode): (NimNode, NimNode) =
   ## Recursive: returns (Nim type AST, witness-construction expression). The
   ## result may use one node at several places; `emitTyAndReader` unshares.
+  if isCStringTy(ty):
+    # RFC-0016 INT-87: nil, or a buffer of the bytes and a NUL
+    # (`readCString`), passed as the `cstring` it is.
+    return (stdName("cstring"), newCall(stdName("readCString"), witId,
+                                        newLit(path)))
   case ty.kind
   of itUninterp:
     if ty.uninterpName == "__closure":

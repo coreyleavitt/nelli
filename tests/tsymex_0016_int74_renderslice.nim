@@ -16,7 +16,7 @@ import std/[unittest, times, strutils, options, sequtils, math]
 import nelli
 import nelli/symex
 import z3
-import nelli/smt/[types, symval, string_lower_support, runtime_strings]
+import nelli/smt/[types, symval, string_lower_support, runtime_strings, heap_model]
 import ./s8cu_helpers
 
 proc bvSortOf(ctx: Z3Context; w: int): auto =
@@ -40,13 +40,64 @@ proc renderingOf(ctx: Z3Context; v: Z3AnyAst; w: int; signed: bool): Z3String =
   env["v"] = bvSV(ctx, v, w, signed)
   lowerStrArm(env, mkStrOp(iekIntToStr, "$", @[mkVar("v")])).str
 
+const proofRLimit = 50_000_000'u
+  ## Z3 `rlimit` units for each proof check, in place of a wall-clock
+  ## `timeout` (a wall limit made the verdict depend on the host: a proof
+  ## that fit in 120 s alone was `zsUnknown` under load). Source: the
+  ## largest check of this file spends 4.56M units (`INT74RULES maxunits`,
+  ## Z3 5.1; byte 5 of `substr(concat(x, "ab"), 2, 9)`; the proofs below
+  ## are split into cases so that none is larger), and 50M is 11 times
+  ## that. The margin is wide because a check's cost is not exactly the
+  ## counted units: the `growStale` query counted 17.8M units when decided
+  ## and was still cut off under a 20M budget (`tsymex_rfc0005_s8cn_step1d`).
+
+var proofUnits = 0'u
+  ## The rlimit units the last `proveUnsat` spent (Z3's `rlimit count` is
+  ## the context's running total, so this is the difference).
+var proofMaxUnits = 0'u
+var proofCtxSeen: pointer
+var proofCtxTotal = 0'u
+
 proc proveUnsat(ctx: Z3Context; fs: openArray[Z3Bool]): Z3Status =
   let s = newSolver(ctx)
   let p = newParams(ctx)
-  p.set("timeout", 120_000'u)
+  p.set("rlimit", proofRLimit)
+  p.set("random_seed", 0'u)
   s.setParams(p)
   for f in fs: s.add f
-  s.check()
+  result = s.check()
+  let st = s.getStatistics()
+  var total = 0'u
+  if st.contains("rlimit count"):
+    total = if st.isInt("rlimit count"): uint(st.getInt("rlimit count"))
+            else: uint(st.getFloat("rlimit count"))
+  if proofCtxSeen != cast[pointer](ctx.raw):
+    proofCtxSeen = cast[pointer](ctx.raw)
+    proofCtxTotal = 0
+  proofUnits = total - proofCtxTotal
+  proofCtxTotal = total
+  proofMaxUnits = max(proofMaxUnits, proofUnits)
+
+proc lengthCases(ctx: Z3Context; parts: seq[Z3String]; k: int): seq[seq[Z3Bool]] =
+  ## A partition of every assignment to `parts` by where byte `k` of their
+  ## concatenation falls: each part's length is each of `0 .. rem` (`rem` the
+  ## bytes left before `k`, so the next part starts that many bytes closer),
+  ## or more than `rem`, and then `k` is inside that part (the later parts'
+  ## lengths do not matter, and the last part is not split). Lengths are
+  ## never negative, so the cases cover every model and an UNSAT in each is
+  ## an UNSAT of the unsplit query. With no parts there is one case, the
+  ## empty assumption.
+  if parts.len == 0: return @[newSeq[Z3Bool]()]
+  proc rec(ctx: Z3Context; parts: seq[Z3String]; i, rem: int;
+           acc: seq[Z3Bool]; into: var seq[seq[Z3Bool]]) =
+    if i == parts.high:
+      into.add acc
+      return
+    for a in 0 .. rem:
+      rec(ctx, parts, i + 1, rem - a, acc & (len(parts[i]) == mkInt(ctx, a)),
+          into)
+    into.add acc & (len(parts[i]) > mkInt(ctx, rem))
+  rec(ctx, parts, 0, k, @[], result)
 
 proc inBand(ctx: Z3Context; v: Z3AnyAst; signed: bool; lo, hi: string;
             w: int): Z3Bool =
@@ -182,6 +233,7 @@ suite "INT-74: a rendering's bytes are Nim's (Z3 proves each band)":
           if st != zsUnsat:
             checkpoint "neg " & $neg & " digits " & $l & ": " & $st
           check st == zsUnsat
+      echo "INT74BYTES maxunits ", proofMaxUnits
       echo "INT74BYTES w", w, " ", signed, " ",
         formatFloat(epochTime() - t0, ffDecimal, 2), " s (slowest ",
         formatFloat(worst, ffDecimal, 2), " s)"
@@ -250,15 +302,22 @@ suite "INT-74: the slice, concatenation and index rules (Z3 proves them)":
     let ab = mkString(ctx, "ab")
     var terms = @[concat(x, y), concat(x, concat(y, z)), concat(ab, x),
                   concat(x, ab), ite(c, x, ab)]
+    # The free parts of each term, in order: the concatenations over several
+    # free strings are proved by cases on those parts' lengths (below).
+    var freeParts = @[@[x, y], @[x, y, z], @[], @[], @[]]
     for (i, n) in [(0, 2), (1, 3), (2, 9), (-1, 2), (0, 0), (3, -1)]:
       terms.add substr(concat(x, ab), mkInt(ctx, i), mkInt(ctx, n))
+      freeParts.add @[]
     let t0 = epochTime()
-    for t in terms:
+    for ti, t in terms:
       for k in 0 .. 5:
         let f = strByteRewrite(t, k)
-        let st = proveUnsat(ctx, [not eq8(f, wrap[Z3AnyAst](ctx, walkerRead(t, k).raw))])
-        if st != zsUnsat: checkpoint $t & " byte " & $k & ": " & $st
-        check st == zsUnsat
+        let bad = not eq8(f, wrap[Z3AnyAst](ctx, walkerRead(t, k).raw))
+        for cs in lengthCases(ctx, freeParts[ti], k):
+          let st = proveUnsat(ctx, @[bad] & cs)
+          if st != zsUnsat: checkpoint $t & " byte " & $k & ": " & $st
+          check st == zsUnsat
+    echo "INT74RULES maxunits ", proofMaxUnits
     echo "INT74RULES ", formatFloat(epochTime() - t0, ffDecimal, 2), " s"
 
   test "a term without a rendering keeps the walker's read":
@@ -361,9 +420,22 @@ suite "INT-74: an extended narrower value renders as its own kind":
       check int(Z3_get_bv_sort_size(ctx.raw,
         Z3_get_sort(ctx.raw, k.get.v.raw))) == k.get.width
       let rn = renderingOf(ctx, k.get.v, k.get.width, k.get.signed)
-      let st = proveUnsat(ctx, [r != rn])
+      # (E) in two steps. The renderings are `ite(v < 0, "-" ++ from_int(-v),
+      # from_int(v))` over `toZ3Int` of each value, so they are equal when
+      # those Int terms are. Step 1 proves the Int terms equal for all `x`
+      # (a bit-vector and arithmetic query, no string); step 2 asserts that
+      # lemma and proves the renderings equal, which is congruence once the
+      # two terms are one. Proved this way the sequence solver never has to
+      # relate two `from_int` terms through a `bv2int` of each value.
+      let lemma = toZ3Int(bvSV(ctx, c.v, c.w, c.signed)) ==
+                  toZ3Int(bvSV(ctx, k.get.v, k.get.width, k.get.signed))
+      let st1 = proveUnsat(ctx, [not lemma])
+      let st = proveUnsat(ctx, [lemma, r != rn])
+      if st1 != zsUnsat: checkpoint c.name & ": (E) lemma " & $st1
+      check st1 == zsUnsat
       if st != zsUnsat: checkpoint c.name & ": (E) " & $st
       check st == zsUnsat
+    echo "INT74NARROW maxunits ", proofMaxUnits
     echo "INT74NARROW ", formatFloat(epochTime() - t0, ffDecimal, 2), " s"
 
 # ---- the row, pinned (K9) ----------------------------------------------------

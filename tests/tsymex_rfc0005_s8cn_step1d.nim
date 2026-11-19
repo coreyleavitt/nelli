@@ -29,6 +29,22 @@ when not defined(symexQueryStats):
 
 const smallCap = SymexSettings(budget: ResourceBudget(maxSeqLen: 8))
 
+const growStaleBudget = SymexSettings(
+  budget: ResourceBudget(seqQueryRLimit: 80_000_000))
+  ## `growStale`'s path through a grow and then a second grow (`m` past
+  ## `s.len`, then `n` past `m`) holds two NUL pads in `("\0")*` joined by two
+  ## concatenations, a heavier sequence query than `growPad`'s one pad. The
+  ## capped check (step 1) decides it UNSAT on Z3 5.1 after 17.76M rlimit
+  ## units (measured with `symexStepStats`: `1/zsUnsat=17755342`, 35 s); Z3
+  ## 4.13.4 decides it inside the default. Step 1 runs under half of
+  ## `seqQueryRLimit` (`checkExact`), and the default 20M (10M per check)
+  ## ends it `zsUnknown`. Measured too: a 40M budget (20M per check) ALSO
+  ## ends it `zsUnknown` although 17.76M is below 20M, so a check's cut-off
+  ## is not at the counted units; 80M (40M per check) decides it. 80M is the
+  ## smallest budget tried that does, not an interpolation. Only this query
+  ## asks for it: the default stays the engine's bound, and `maxSeqLen` is
+  ## the default 128 (`t` runs to 12 bytes).
+
 proc stepStatus(name: string): string =
   ## The last answer step `name` gave in the walk just run, or "".
   for s in symexStepStats:
@@ -106,7 +122,7 @@ suite "S8cn (1): grow_pad_dead natively":
     check d.status == sxUnsat
     let l = symexFind(growPad, tLabel("grow_pad_live"))
     check l.status == sxSat
-    let g = symexFind(growStale, tLabel("grow_stale_dead"))
+    let g = symexFind(growStale, tLabel("grow_stale_dead"), growStaleBudget)
     checkpoint show(g.errors)
     check g.status == sxUnsat
     let tooSmall = walk(growPad, "grow_pad_dead")

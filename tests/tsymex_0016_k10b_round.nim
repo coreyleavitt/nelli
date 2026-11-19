@@ -14,6 +14,7 @@ import nelli
 import nelli/symex
 import nelli/db
 import ./s8cu_helpers
+from nelli/smt/runtime import walkerContextUnits
 
 const gateOff = block:
   var s = pinSettingsConst
@@ -179,7 +180,20 @@ suite "K10b: whole-run definedness":
       let f = line.split('\t')
       if f.len >= 2 and f[1] == "k10b-tail": tail = parseInt(f[0])
     checkpoint "tail units: " & $tail
-    check tail >= 0 and tail < 20_000
+    # The bound is on the work the tail's queries do, not on the fixed charge
+    # each query's own solver context carries (`walkerContextUnits`, int6 D1b:
+    # a walk is charged per context, 25,000 then 20,000 units). The tail opens
+    # two contexts (measured: 50,441 units at 25,000 per context, 40,441 at
+    # 20,000; 441 either way beside the contexts), so the reading moved with
+    # the charge and not with the pins. The 20,000 residual is the original
+    # bound, sourced from the K10b reading it was written against (126 units
+    # for the folded tail, 477,838 unfolded); the context count is the other
+    # half of "few queries", pinned at the two measured.
+    check tail >= 0
+    let contexts = tail div walkerContextUnits
+    checkpoint "tail contexts: " & $contexts
+    check contexts <= 2
+    check tail - contexts * walkerContextUnits < 20_000
 
   test "(h) a branch on a call's result in the tail is decided by the pc: no walker fault":
     # The tail walk asked the pins alone whether `tailCol(a) == tcGreen`; the

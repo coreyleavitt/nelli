@@ -179,6 +179,17 @@ where that note does not yet cover it.
   and a call expanding it to an import was replayed past, a trusted `sxSat`
   through a module natively first compiled unpushed (`RangeDefect`). The
   block is read; the call keeps the coarse reading, and the routine declines.
+- **`sequtils`' templates' own loop-counter step** (int6-x2; walker 484).
+  `findIt`, `keepItIf`, `toSeq` and `toSeq2` expand `sequtils`'
+  `unCheckedInc` into the caller's routine, which the int6-u exemption
+  (a routine of `sequtils` only) left unreadable. The step is read through
+  when the stepped counter's symbol is declared at the template's own
+  counter declaration in `sequtils`' text, a variable the template generates
+  and no other code can name; each is bounded by its loop (audited in
+  `tests/0016-allowlist/pushexempt.txt`). An opaque callee using `findIt` or
+  `keepItIf` has its verdict from before int6-t again. A user's step of its
+  own variable through `import std/sequtils {.all.}` stays unreadable, even
+  one declared at a counter's line and column.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

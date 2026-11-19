@@ -1475,7 +1475,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## `sequtils.count` is read through; a stdlib routine inside a pushing
     ## stdlib body is placed under the push; the module-level call rule reads
     ## a module-level pragma block's definitions): 482->483.
-    check symexWalkerVersion == "483"
+    ## RFC-0016 int6-x2 (`sequtils`' templates' own loop-counter step is read
+    ## through, matched by the counter symbol's declaration): 483->484.
+    check symexWalkerVersion == "484"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

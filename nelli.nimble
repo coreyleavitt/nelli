@@ -2109,8 +2109,10 @@ task test, "Run the test suite":
             "tsymex_0016_int6u_seqinc",
             # RFC-0016 int6-w2: an opaque toSeq(s.items) builds (the effect summary skips a type slot; an untyped expression declines).
             "tsymex_0016_int6w2_opaquetoseq",
-            # RFC-0016 int6-w2: sequtils' templates stay unreadable (unCheckedInc is reachable through an {.all.} import).
+            # RFC-0016 int6-w2: a user's {.all.} step with sequtils' unCheckedInc stays unreadable.
             "tsymex_0016_int6w2_seqtpl",
+            # RFC-0016 int6-x2: sequtils' templates' own counter step is read through (findIt/keepItIf pre-int6-t verdicts); a user's {.all.} step stays unreadable.
+            "tsymex_0016_int6x2_seqctr",
             # RFC-0016 int6-w2: a stdlib routine declared inside a pushing stdlib body is placed under the push.
             "tsymex_0016_int6w2_stdnest",
             # RFC-0016 int6-w2: a template defined inside a module-level pragma block keeps the module-level call's coarse reading.

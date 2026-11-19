@@ -704,8 +704,24 @@ const loopIncExemptions* = [
   ## as expanded inside a routine of that same file. Each entry is audited, use
   ## site by use site, in `tests/0016-allowlist/pushexempt.txt`, which must
   ## list exactly these (`tsymex_0016_int6t_typedpush`). RFC-0016 int6-u:
-  ## `sequtils`' own copy, inside that module's routines (its exported
-  ## templates expand it into the caller's routine, which stays unreadable).
+  ## `sequtils`' own copy, inside that module's routines. RFC-0016 int6-x2:
+  ## and where one of its exported templates expands it into a caller's
+  ## routine, stepping that template's own counter (`loopIncCounters`).
+
+const loopIncCounters* = [
+  (file: "pure/collections/sequtils.nim", tpl: "findIt", counter: "i"),
+  (file: "pure/collections/sequtils.nim", tpl: "keepItIf", counter: "pos"),
+  (file: "pure/collections/sequtils.nim", tpl: "toSeq2", counter: "i"),
+  (file: "pure/collections/sequtils.nim", tpl: "toSeq", counter: "i")]
+  ## RFC-0016 int6-x2. The audited use sites of a `loopIncExemptions`
+  ## template inside a template of the same file, which expands the step into
+  ## its caller's routine: the template `tpl` declares the stepped `counter`
+  ## in its own text, a local the template generates (gensym), so no code
+  ## outside it can name the variable. A step is one of these when its
+  ## counter's symbol is declared at that declaration's position in the
+  ## toolchain's file (`loopIncCounterSites`), never by the counter's name. The
+  ## positions and each counter's bound are listed in
+  ## `tests/0016-allowlist/pushexempt.txt` under the template's entry.
 
 proc isLoopIncTemplate(t: NimNode; name: string): bool =
   ## The parsed `template <name>(x) = {.push overflowChecks: off.}; inc(x);
@@ -729,21 +745,80 @@ proc isLoopIncTemplate(t: NimNode; name: string): bool =
     return false
   b[2].kind == nnkPragma and b[2].len == 1 and nameOf(b[2][0]) == "pop"
 
-proc loopIncExempt*(owner, push: NimNode): bool =
+proc findTemplateDefs(n: NimNode; name: string; acc: var seq[NimNode]) =
+  ## Every parsed `template <name>` in `n`, at any depth (`since (1, 1):`
+  ## wraps some of `sequtils`' templates).
+  if n.kind == nnkTemplateDef and n.len >= 7 and routineNameOf(n[0]) == name:
+    acc.add n
+  for c in n: findTemplateDefs(c, name, acc)
+
+proc counterDecls(n: NimNode; counter: string; acc: var seq[NimNode]) =
+  ## The `IdentDefs` declaring the plain name `counter` (no pragma, so no
+  ## `{.inject.}`) in a `var` section of the parsed template body `n`.
+  if n.kind == nnkVarSection:
+    for d in n:
+      if d.kind == nnkIdentDefs:
+        for i in 0 ..< d.len - 2:
+          if d[i].kind == nnkIdent and d[i].strVal == counter: acc.add d
+  for c in n: counterDecls(c, counter, acc)
+
+proc loopIncCounterSites*(file: string; path = ""):
+    seq[tuple[tpl: string; line, col: int]] =
+  ## RFC-0016 int6-x2. The positions, in the toolchain file `file` (its path
+  ## under `lib/`; read from `path`, the compiler's own spelling of it, when
+  ## given), of the `loopIncCounters` declarations: each template is
+  ## defined once there, without pragmas (no `{.dirty.}`, which would inject
+  ## its locals), and declares its counter exactly once. A template that does
+  ## not has no site (the toolchain no longer has the audited shape).
+  let ast = bodyAstOf(if path.len > 0: path else: configuredLibDir / file)
+  if ast == nil: return
+  for e in loopIncCounters:
+    if e.file != file: continue
+    var defs: seq[NimNode]
+    findTemplateDefs(ast, e.tpl, defs)
+    if defs.len != 1 or defs[0][4].kind != nnkEmpty: continue
+    var decls: seq[NimNode]
+    counterDecls(defs[0][6], e.counter, decls)
+    if decls.len != 1: continue
+    let li = decls[0].lineInfoObj
+    result.add (e.tpl, li.line, li.column)
+
+proc auditedCounter(counter: NimNode; rel: string): bool =
+  ## RFC-0016 int6-x2. Is the variable `counter` (a symbol of a typed body)
+  ## declared at one of `rel`'s `loopIncCounterSites`? Read from the symbol's
+  ## own declaration (`getImpl`, its `IdentDefs`), whose position is the
+  ## template text's when a template generated it: user code declares its
+  ## variables in its own file.
+  if counter == nil or counter.kind != nnkSym or counter.symKind != nskVar:
+    return false
+  let decl =
+    try: counter.getImpl
+    except CatchableError: return false
+  if decl == nil or decl.kind != nnkIdentDefs: return false
+  let li = decl.lineInfoObj
+  if libRelPath(li.filename, configuredLibDir) != rel: return false
+  for s in loopIncCounterSites(rel, li.filename):
+    if s.line == li.line and s.col == li.column: return true
+
+proc loopIncExempt*(owner, push: NimNode; counter: NimNode = nil): bool =
   ## RFC-0016 int6-t. Is the pragma statement `push`, in the typed body of the
   ## routine definition `owner`, the push of a `loopIncExemptions` template as
   ## that template's own module expands it? Identified by position, never by a
   ## name alone: `push` stands at the push of the template's body in the
   ## toolchain's own file (a template expansion carries its definition's
   ## positions), that file's text there is the template's exact shape
-  ## (`isLoopIncTemplate`), and `owner` is a routine of the same file (the
-  ## template is not exported, so only that module expands it). The caller
-  ## checks the expanded region's own shape.
+  ## (`isLoopIncTemplate`), and `owner` is a routine of the same file. The
+  ## caller checks the expanded region's own shape. RFC-0016 int6-x2: or
+  ## `owner` is any routine and the stepped `counter` is declared at an
+  ## audited counter site of that file (`auditedCounter`): the template is
+  ## unexported, but `import std/sequtils {.all.}` reaches it, so a routine
+  ## outside the file is admitted only by the counter, never by the push.
   if owner == nil or owner.kind notin RoutineNodes or push == nil: return false
   let pli = push.lineInfoObj
   let rel = libRelPath(pli.filename, configuredLibDir)
-  if rel.len == 0 or
-     libRelPath(owner.lineInfoObj.filename, configuredLibDir) != rel:
+  if rel.len == 0: return false
+  if libRelPath(owner.lineInfoObj.filename, configuredLibDir) != rel and
+     not auditedCounter(counter, rel):
     return false
   for e in loopIncExemptions:
     if e.file != rel: continue
@@ -831,7 +906,7 @@ proc loopIncRegion(s, owner: NimNode): bool =
   if step.len == 3 and
      (step[2].kind notin {nnkIntLit .. nnkInt64Lit} or step[2].intVal != 1):
     return false
-  isPopPragma(s[2]) and loopIncExempt(owner, push)
+  isPopPragma(s[2]) and loopIncExempt(owner, push, step[1])
 
 proc bodyCheckPragma*(n, owner: NimNode): NimNode =
   ## RFC-0016 int6-t. The first pragma statement naming a check option in the

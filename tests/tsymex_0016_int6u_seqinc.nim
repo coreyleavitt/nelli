@@ -24,7 +24,8 @@
 ## `result` starts at 0 and is stepped at most once per item of `s`, so it
 ## stays below `len(s)`. Its verdict is aaa74c4b's, `{ubSignedOverflow}`.
 ## The exported templates `findIt`, `keepItIf` and `toSeq` expand the step
-## into the caller's own routine and are not exempt.
+## into the caller's own routine; they are exempt there by their counter
+## (int6-x2, `tsymex_0016_int6x2_seqctr`).
 
 import std/[unittest, strutils, sequtils]
 import nelli

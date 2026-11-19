@@ -1542,8 +1542,16 @@ const renderAsChoicesVersion* = "12"
   ##   pragma block (`check_scan.defsWalk`): a template there, named by a
   ##   proc's name too, keeps the coarse reading (a trusted verdict through
   ##   a module it imports first now declines). No key bytes change.
+  ## - RFC-0016 int6-x2 (483->484): the audited loop-counter step of
+  ##   `sequtils`' templates `findIt`, `keepItIf`, `toSeq` and `toSeq2`, which
+  ##   expand into the caller's routine, is read through when the stepped
+  ##   counter's symbol is declared at the template's own counter declaration
+  ##   in `sequtils`' text (`check_options.loopIncCounters`); a user's
+  ##   `{.all.}` step of its own variable stays unreadable. Verdicts move (a
+  ##   callee using `findIt` or `keepItIf` has its pre-int6-t verdict again).
+  ##   No key bytes change.
 
-const symexWalkerVersion* = "483"
+const symexWalkerVersion* = "484"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

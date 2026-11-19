@@ -4823,7 +4823,7 @@ proc mulOverflowSplit(a, b: SymVal): Option[Z3Bool] =
     var v: int64
     if numeral(t, v):
       if v == 0 or v == 1: return keep(ctx.checkErr Z3_mk_false(ctx.raw))
-      if v == -1: return keep(ctx.checkErr Z3_mk_eq(ctx.raw, o, lit(lo)))
+      if v == -1: return keep(checkedEq(ctx, o, lit(lo)))
       if v > 1:
         return orOf(keep(ctx.checkErr Z3_mk_bvsgt(ctx.raw, o, lit(hi div v))),
                     keep(ctx.checkErr Z3_mk_bvslt(ctx.raw, o, lit(lo div v))))
@@ -9589,8 +9589,8 @@ proc seqCapKinds(): SeqCapKinds =
       strSuffix:   kindOf(ctx, endsWith(str, ch).raw),
       strFromCode: kindOf(ctx, ctx.checkErr Z3_mk_string_from_code(ctx.raw,
                                                                    c.raw)),
-      iteK:        kindOf(ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
-                     (c == c).raw, str.raw, str.raw)))
+      iteK:        kindOf(ctx, checkedIte(ctx, (c == c).raw, str.raw,
+                                          str.raw)))
     # RFC-0005 S8ai: disable an S8ai kind that is not unique. A power that
     # shares the loop's ordinal is read by the loop arm (`regexLenBounds`),
     # so only the power is dropped.
@@ -12081,7 +12081,7 @@ proc bvViewRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     bvExtDeclKinds = (ready: true,
       zext: kindOf(pc.checkErr Z3_mk_zero_ext(pc.raw, 8, v.raw)),
       sext: kindOf(pc.checkErr Z3_mk_sign_ext(pc.raw, 8, v.raw)),
-      iteK: kindOf(pc.checkErr Z3_mk_ite(pc.raw,
+      iteK: kindOf(checkedIte(pc,
         pc.checkErr(Z3_mk_bvslt(pc.raw, v.raw, v2.raw)), v.raw, v2.raw)))
   let bv2nat = intDivDeclKinds.bv2nat
   var seen: HashSet[int]

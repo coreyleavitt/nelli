@@ -859,6 +859,7 @@ const
   ## moved into it, `symval.nim` and `z3check.nim`.
   slsAllowed = ["std/tables", "std/options", "std/sets", "std/algorithm",
                 "std/strutils", "z3", "./types",
+                "./z3check",        ## K9e: the sort-checked builders (S8m audit)
                 "../thread_state"]  ## S8ck-r: the Z3-free per-thread release leaf
   strAllowed = ["std/tables", "std/options", "std/sets", "std/strutils", "z3",
                 "./types", "./abstraction", "./symval", "./walk_state",

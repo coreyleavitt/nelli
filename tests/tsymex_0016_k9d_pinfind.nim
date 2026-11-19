@@ -691,6 +691,11 @@ suite "K9d: pinFind":
     check d.values.allIt(it.len == ($it).len)   # no NUL cut a value short
     check "cs-lit" in d.values.mapIt($it)
     check "cs-lit".cstring in d.values
+    # RFC-0016 INT-87: nil, the empty string and a high byte are values
+    check d.values[0].isNil and d.values.countIt(it.isNil) == 1
+    check d.values.anyIt(not it.isNil and it.len == 0)
+    check d.values.anyIt(not it.isNil and it.len > 0 and ord(it[0]) >= 0x80)
+    check "a".cstring in d.values   # the NUL-holding hint's prefix
 
   test "a string sat witness outside the domain is still replayed exactly":
     let r = pinFind(sutStrSat, tLabel("hit"))

@@ -927,7 +927,11 @@ var cstringArena {.threadvar.}: seq[string]
   ## domain's values never dangle
 
 proc cstringDomain(h: StringHints): Domain[cstring] =
-  var vs: seq[cstring]
+  ## nil, then the string domain's values without a NUL (a NUL ends a
+  ## cstring, so a value holding one is its prefix, already in the set).
+  ## RFC-0016 INT-87: nil is a value of the type (`len` 0, `$` "", equal
+  ## only to nil), which a caller passes as readily as any string.
+  var vs: seq[cstring] = @[cstring(nil)]
   for s in stringDomainValues(h):
     if '\0' notin s:
       cstringArena.add s

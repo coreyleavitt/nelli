@@ -1354,8 +1354,35 @@ const renderAsChoicesVersion* = "12"
   ##   it, are `c_longdouble` values (`isLongDoubleTyped`): they declined as
   ##   a `weInternalWalkerFault` where the other sites decline
   ##   `feUnsupportedParamType`. No key bytes change.
+  ## - RFC-0016 int6 float range stores (460->463; 461 and 462 are reserved
+  ##   by sibling branches): a conversion into a float range is checked
+  ##   (`iekConvFloatRange`, its one owner, key `Ex<CFR:`): `v = a`, `U(a)`,
+  ##   an argument, and the store system's `+=`, `-=`, `*=` and float32's
+  ##   `/=` make into the range they are instantiated at. Each was stored
+  ##   unchecked, a false `sxUnsat` for its `RangeDefect`; float64's `/=` is
+  ##   a plain `float64` routine and stays unchecked. Nim's check is `x < lo
+  ##   or x > hi`, so NaN is a value of a float range (`rangeCondsIfNeeded`),
+  ##   which INT-77 had excluded.
+  ## - RFC-0016 int6 c_longdouble containers (same bump): an element or
+  ##   dereference whose container is an `if`, `case`, `block` or
+  ##   statement-list expression, a conversion, a field, or of a named
+  ##   container type is read as the container's type
+  ##   (`containerHoldsLongDouble`), and declines `feUnsupportedParamType`;
+  ##   each was a `weInternalWalkerFault`. No key bytes change.
+  ## - RFC-0016 int6 check scopes (463->465; 464 is reserved by a sibling
+  ##   branch): a check option belongs to the code region it was compiled
+  ##   under, in both directions. A routine declared under `push
+  ##   rangeChecks: off` (bound, field, object alike) in a checked build is
+  ##   walked unchecked instead of declining `feCheckOption`; one declared
+  ##   under `push rangeChecks: on` in an off build raises `RangeDefect`
+  ##   (it was a false `sxUnsat`: the range drain read the build's bit).
+  ##   Each body takes the scope of its own declaration, never its
+  ##   caller's; system's range store of `*=` and of a float range's `op=`
+  ##   takes the build's, and its operand the caller's. Key bytes change:
+  ##   every routine body carries `@on{...}:` in every build, and those
+  ##   stores gain a block (their operand a `let`).
 
-const symexWalkerVersion* = "460"
+const symexWalkerVersion* = "465"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -7291,6 +7318,10 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       (if e.ciwHasRange: $e.ciwLo & ".." & $e.ciwHi & ":" else: "") &
       (if e.ciwHoley: "h:" else: "") &   # RFC-0016 INT-84
       canonicalize(e.ciwOperand, env) & ">"
+  of iekConvFloatRange:
+    # RFC-0016 int6: the bounds by their bits (a float's `$` rounds).
+    "Ex<CFR:" & $e.cfrWidth & ":" & toHex(cast[uint64](e.cfrLo)) & "," &
+      toHex(cast[uint64](e.cfrHi)) & ":" & canonicalize(e.cfrOperand, env) & ">"
   of iekConvIntReinterpret:
     # A1 adjudication: width + target signedness are both part of the key
     # (mirrors iekConvIntWidth) so a signed vs. unsigned reinterpret of the

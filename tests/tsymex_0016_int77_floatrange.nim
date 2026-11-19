@@ -3,11 +3,16 @@
 ## `range[0.0 .. 1.0]` and `range[-1.5'f32 .. 2.5'f32]` did not compile in the
 ## walker: `parseRangeBracket` read the bounds with `intVal`. Nim admits a
 ## value into a float range when `lo <= x and x <= hi` (an IEEE comparison in
-## the base width), so the range is the closed interval with NaN excluded and
-## -0.0 admitted beside 0.0. The walker now constrains a float-range value to
-## that interval wherever the type lands (a parameter, an object field, a seq
-## element). Every verdict is pinned natively (`pinExact` over the float-range
-## domain, `pinFind`, `s8cu_helpers`).
+## the base width), so the range is the closed interval with -0.0 admitted
+## beside 0.0. The walker now constrains a float-range value to that interval
+## wherever the type lands (a parameter, an object field, a seq element).
+## Every verdict is pinned natively (`pinExact` over the float-range domain,
+## `pinFind`, `s8cu_helpers`).
+##
+## RFC-0016 int6: Nim's check is `x < lo or x > hi` (`raiseRangeErrorF`), so
+## NaN passes it and is a value of the range (probed: `v = NaN` stores into a
+## `range[0.0 .. 1.0]`, and `unitNaN(NaN)` reaches its label). INT-77 read the
+## check as `lo <= x and x <= hi` and pinned `x != x` unreachable.
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -88,12 +93,13 @@ proc seqElemSat(xs: seq[Unit]) =
 template k(n: untyped): CellKey = cellKey(faGeneric, "int77/" & n)
 
 suite "INT-77: float range parameters":
-  test "range[0.0 .. 1.0]: the closed interval, NaN excluded":
+  test "range[0.0 .. 1.0]: the closed interval and NaN":
     let d = boundaryOf(range[0.0 .. 1.0])
     check pinExact(unitHigh, k("unitHigh"), domain = d).status == sxSat
     check pinExact(unitAbove, k("unitAbove"), domain = d).status == sxUnsat
     check pinExact(unitBelow, k("unitBelow"), domain = d).status == sxUnsat
-    check pinExact(unitNaN, k("unitNaN"), domain = d).status == sxUnsat
+    let nan = pinExact(unitNaN, k("unitNaN"), domain = d)
+    check nan.status == sxSat and nan.witness[0] != nan.witness[0]
     check pinExact(unitTop, k("unitTop"), domain = d).status == sxSat
 
   test "range[0.0 .. 1.0] admits -0.0, as Nim's range check does":
@@ -109,7 +115,8 @@ suite "INT-77: float range parameters":
     check pinExact(spanAbove, k("spanAbove"), domain = d).status == sxUnsat
     check pinExact(spanBelow, k("spanBelow"), domain = d).status == sxUnsat
     check pinExact(spanLow, k("spanLow"), domain = d).status == sxSat
-    check pinExact(spanNaN, k("spanNaN"), domain = d).status == sxUnsat
+    let nan = pinExact(spanNaN, k("spanNaN"), domain = d)
+    check nan.status == sxSat and nan.witness[0] != nan.witness[0]
     check pinExact(spanWide, k("spanWide"), domain = d).status == sxUnsat
 
   test "a named float range":
@@ -125,7 +132,8 @@ suite "INT-77: float range parameters":
     let lp = pinFind(seqLoop, tLabel("hit"))
     checkpoint $lp.errors
     check lp.status == sxUnsat
-    check pinFind(arrElem, tLabel("hit")).status == sxUnsat
+    # int6: `a[0] != a[0]` holds for a NaN element, a value of the range
+    check pinFind(arrElem, tLabel("hit")).status == sxSat
     check pinFind(seqElemSat, tLabel("hit")).status == sxSat
 
 suite "INT-77: walker version":

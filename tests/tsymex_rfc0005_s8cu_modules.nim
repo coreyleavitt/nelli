@@ -89,7 +89,10 @@ suite "S8cu: a callee in another module":
 
   test "an unchecked callee declines":
     check native(viaUncheckedField(4)) == "hit"
-    pinDecline(viaUncheckedField, declKey, feCheckOption)
+    # RFC-0016 int6: the callee's `fieldChecks: off` is modelled; its
+    # wrong-branch write declines on its own path (`inactiveFieldSide`).
+    pinDecline(viaUncheckedField, declKey, feUnsupportedOp,
+               excluding = {feCheckOption})
     check native(viaUncheckedAdd(high(int))) == "hit"
     pinDecline(viaUncheckedAdd, declKey, feOverflowCheckOption)
 

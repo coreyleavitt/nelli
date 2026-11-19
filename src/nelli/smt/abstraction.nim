@@ -168,7 +168,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
   of iekVar:
     if ranges.hasKey(e.vname): some(ranges[e.vname]) else: none(Interval)
   of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekConvIntWidth,
-     iekConvIntReinterpret,
+     iekConvIntReinterpret, iekConvFloatRange,
      iekMathCall,
      iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains,
      iekTabRemovedSince,
@@ -319,6 +319,8 @@ proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
     collectVarRefs(e.ciwOperand, into)
   of iekConvIntReinterpret:  ## A1 adjudication: recurse into the operand.
     collectVarRefs(e.cirOperand, into)
+  of iekConvFloatRange:      ## RFC-0016 int6
+    collectVarRefs(e.cfrOperand, into)
   of iekMathCall:
     for a in e.mathArgs: collectVarRefs(a, into)
   of StrOpKinds:

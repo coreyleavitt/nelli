@@ -216,14 +216,16 @@ proc rangeCondsIfNeeded*(v: SymVal, ty: IRType; holes = true): seq[Z3Bool] =
         return
     conds
   elif ty.kind in {itFloat32, itFloat64} and ty.floatRange:
-    # RFC-0016 INT-77: Nim's float range check is `lo <= x and x <= hi` in
-    # the base width, so the value set is the closed IEEE interval: NaN
-    # fails both comparisons, -0.0 passes wherever 0.0 does.
+    # RFC-0016 INT-77, int6: Nim's float range check raises when `x < lo or
+    # x > hi` in the base width (`raiseRangeErrorF`), so the value set is the
+    # closed IEEE interval and NaN, which fails both comparisons (probed: `v
+    # = NaN` stores NaN into a `range[0.0 .. 1.0]`); -0.0 passes wherever 0.0
+    # does. INT-77 read the check as `lo <= x and x <= hi` and excluded NaN.
     if v.kind == svFloat64:
-      @[v.fp64 >= mkFloat64(ty.floatLo), v.fp64 <= mkFloat64(ty.floatHi)]
+      @[not (v.fp64 < mkFloat64(ty.floatLo)), not (v.fp64 > mkFloat64(ty.floatHi))]
     elif v.kind == svFloat32:
-      @[v.fp32 >= mkFloat32(float32(ty.floatLo)),
-        v.fp32 <= mkFloat32(float32(ty.floatHi))]
+      @[not (v.fp32 < mkFloat32(float32(ty.floatLo))),
+        not (v.fp32 > mkFloat32(float32(ty.floatHi)))]
     else:
       @[]
   else:

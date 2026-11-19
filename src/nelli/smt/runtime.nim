@@ -1090,20 +1090,22 @@ var arithFrames {.threadvar.}: ArithFrames
   ## Unsigned results still wrap (`wrapIntToWidth`).
 
 var checkScopes {.threadvar.}: seq[set[CheckOption]]
-  ## RFC-0016 PRC-07. A lexical stack beside `arithScopes`: the top is the
-  ## set of checks of `rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks`
-  ## that the routine body being walked turns back on in a build with them
-  ## off (`IRStmt.blkOn`). Read only through `checkedNow`.
+  ## RFC-0016 PRC-07, int6. A lexical stack beside `arithScopes`: the top is
+  ## the effective set of checks of `rangeChecks`, `boundChecks`,
+  ## `fieldChecks`, `objChecks` the routine body being walked is compiled
+  ## with (`IRStmt.blkOn`), in either build direction; the root is the
+  ## build's. Read only through `checkedNow`.
 
 proc resetArith() =
   arithFrames = ArithFrames.init()
-  checkScopes = @[{}]
+  checkScopes = @[buildSemantics.checks * {coRange, coBound, coField, coObj}]
 
 proc checkedNow(co: CheckOption): bool =
-  ## Whether the C compiler emitted check `co` for the routine being walked:
-  ## the build's option, or the routine's own `push` turning it back on.
-  co in buildSemantics.checks or
-    (checkScopes.len > 0 and co in checkScopes[^1])
+  ## Whether the C compiler emitted check `co` for the code being walked: its
+  ## routine's effective scope (the build's, less what its position pushed
+  ## off, plus what it pushed back on), or the build's outside any.
+  if checkScopes.len > 0: co in checkScopes[^1]
+  else: co in buildSemantics.checks
 
 var obligationLog* {.threadvar.}: ObligationLog
   ## Issue #161 slice 2. Audit trail, NOT a raise-fork sink — deliberately
@@ -1816,6 +1818,10 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     of 16: some(SymVal(kind: svBV16, signed: e.cirTgtSigned, bv16: mkBitVec[16](0)))
     of 32: some(SymVal(kind: svBV32, signed: e.cirTgtSigned, bv32: mkBitVec[32](0)))
     else:  some(SymVal(kind: svBV64, signed: e.cirTgtSigned, bv64: mkBitVec[64](0'i64)))
+  of iekConvFloatRange:
+    # RFC-0016 int6: a float of the range's width, as `lower` returns.
+    if e.cfrWidth == 32: some(SymVal(kind: svFloat32, fp32: mkFloat32(0'f32)))
+    else: some(SymVal(kind: svFloat64, fp64: mkFloat64(0.0)))
   of iekMathCall:
     # Phase 15 F6: predicates produce svBool; float ops produce a float of
     # the first arg's width; deferred ops have no proto (they raise on lower).
@@ -4989,7 +4995,9 @@ proc checked(ac: ArithCheck): bool =
   ## `OverflowDefect` and `DivByZeroDefect` all the same: the routine is not
   ## the build. A check the build does not compile in is not forked: the
   ## unchecked operation is undefined and the definedness axis answers it.
-  arithFrames.emits(ac)
+  ## RFC-0016 int6: the range check is the code region's (`checkedNow`), so a
+  ## conversion's `RangeDefect` follows the routine's own scope.
+  if ac == acRange: checkedNow(coRange) else: arithFrames.emits(ac)
 
 proc defProfile(): DefProfile =
   ## RFC-0016 K10a-axis. The build's arithmetic, as the definedness axis keys
@@ -5867,7 +5875,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       coerceIntLit(proto.get, e.ival)
     else:
       bvConst(tInt(64, true), e.ival)
-  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekMathCall:
+  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekMathCall,
+     iekConvFloatRange:
     # Stage 7 (CR-7) Cluster F: float literal, int→float, float→int, math
     # arms extracted into `lowerFloatArm` (defined above, before this proc body).
     lowerFloatArm(env, e)
@@ -7635,9 +7644,10 @@ proc clampWitnessField(w: var RawWitness, path: string, fty: IRType) =
       w.uintVals[path] = uint64(clampToDeclaredRange(int64(w.uintVals[path]), fty))
   elif fty.kind in {itFloat32, itFloat64} and fty.floatRange:
     # RFC-0016 INT-77: an unread float-range cell, as an unread int one; a
-    # value outside the interval (NaN included) is replaced by its low bound
+    # value outside the interval is replaced by its low bound. NaN is a value
+    # of the range (int6: Nim's check, `x < lo or x > hi`, passes it).
     template clampF(x, lo, hi: untyped): untyped =
-      (if x >= lo and x <= hi: x else: lo)
+      (if x < lo or x > hi: lo else: x)
     if fty.kind == itFloat64 and w.float64Vals.hasKey(path):
       w.float64Vals[path] = clampF(w.float64Vals[path], fty.floatLo, fty.floatHi)
     elif fty.kind == itFloat32 and w.float32Vals.hasKey(path):
@@ -22185,8 +22195,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
     of wmFollowConcrete: discard
     if stmt.blkArith.claims or stmt.blkScoped:
       # RFC-0016 W1-d2c. A routine body: its arithmetic is its own, whoever
-      # called it, and the caller's resumes after it. RFC-0016 PRC-07: so are
-      # the checks its options turn back on in a build with them off.
+      # called it, and the caller's resumes after it. RFC-0016 PRC-07, int6:
+      # so are the checks it is compiled with, its effective scope.
       let pushed = arithFrames.enterBody(stmt.blkArith)
       if stmt.blkScoped: checkScopes.add stmt.blkOn
       let plain = IRStmt(kind: isBlock, stmts: stmt.stmts,

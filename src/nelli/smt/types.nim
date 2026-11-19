@@ -533,11 +533,13 @@ type
     of itFloat32, itFloat64:
       # Phase 15 F1: sort fully determined by the kind.
       floatRange*: bool        ## RFC-0016 INT-77. A float `range[lo..hi]`:
-      floatLo*: float64        ## Nim admits `x` when `lo <= x and x <= hi`
+      floatLo*: float64        ## Nim rejects `x` when `x < lo or x > hi`
       floatHi*: float64        ## (an IEEE comparison in the base width), so
-                               ## the value set is that closed interval: NaN
-                               ## is outside it and -0.0 is inside whenever
-                               ## 0.0 is. The bounds are held as float64,
+                               ## the value set is that closed interval and
+                               ## NaN (int6, probed: `v = NaN` stores), and
+                               ## -0.0 is inside whenever 0.0 is. A store is
+                               ## checked by `iekConvFloatRange`. The bounds
+                               ## are held as float64,
                                ## which holds a float32 bound exactly. As
                                ## `hasRange` on `itInt`: not part of `==`
                                ## (a refinement, not a shape), part of the
@@ -655,6 +657,12 @@ type
                        ## pass-through used to skip (that omission, not the
                        ## conversion itself, was B2's actual unsoundness
                        ## finding). `cirOperand`/`cirTgtSigned` below.
+    iekConvFloatRange  ## RFC-0016 int6: a float converted into a float
+                       ## `range[lo..hi]` of its own width (`v = a`, `U(a)`,
+                       ## the store system's `+=` makes into a range local).
+                       ## The one owner of the float range check: Nim raises
+                       ## `RangeDefect` when `x < lo or x > hi`, so NaN
+                       ## passes; the value is the operand's.
     iekMathCall  ## Phase 15 F6: std/math float op or FP predicate
                  ## (`abs`/`sqrt`/`min`/`max`/`floor`/`ceil`/`round`/`trunc`/
                  ## `signbit`/`isNaN`/`isInf`/`isFinite`/`isNormal`), plus the
@@ -935,6 +943,10 @@ type
       ciwHoley*: bool        ## RFC-0016 INT-84: the target is a holey enum,
                              ## so the converted value may be a hole (Nim
                              ## checks `low .. high` only).
+    of iekConvFloatRange:
+      cfrOperand*: IRExpr      ## RFC-0016 int6: the float being checked
+      cfrWidth*:   int         ## its width and the range's base: 32 or 64
+      cfrLo*, cfrHi*: float64  ## the range's bounds (exact for float32 too)
     of iekConvIntReinterpret:
       cirOperand*:   IRExpr  ## A1 adjudication: the value being reinterpreted
       cirWidth*:     int     ## shared src==tgt width: 8, 16, 32, or 64
@@ -1457,11 +1469,12 @@ type
         ## The facts `blkArith` was decided from: the emit writes them as a
         ## literal and the generated code re-decides (`stampFor` is const-pure).
       blkScoped*: bool
-        ## RFC-0016 PRC-07. A routine body in a build with a check off
-        ## (`rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks`): the body
-        ## is walked under `blkOn`, the checks its own options turn back on
-        ## (`withCheckScope`). A routine that turns none on is scoped with the
-        ## empty set, which keeps it from inheriting its caller's.
+        ## RFC-0016 PRC-07, int6. A routine body, in every build: the body is
+        ## walked under `blkOn`, the effective set of `rangeChecks`,
+        ## `boundChecks`, `fieldChecks`, `objChecks` it is compiled with
+        ## (`withCheckScope`): the build's, less what its position pushed off,
+        ## plus what it pushed back on. Every body is scoped, which keeps it
+        ## from inheriting its caller's.
       blkOn*: set[CheckOption]
       blkLabel*: string
         ## RFC-0005 S8m. "" for a plain statement sequence. Non-empty: a
@@ -2760,6 +2773,13 @@ proc carriesRangeCheck*(e: IRExpr, ty: IRType): bool =
     ty != nil and ty.kind == itInt and ty.hasRange and
     e.ciwLo >= ty.rangeLo and e.ciwHi <= ty.rangeHi
 
+proc mkConvFloatRange*(e: IRExpr, width: int, lo, hi: float64): IRExpr =
+  ## RFC-0016 int6. `e`, a float of `width` bits, converted into the float
+  ## range `[lo..hi]` of that width: `RangeDefect` where `e < lo or e > hi`.
+  doAssert width in [32, 64], "mkConvFloatRange: width " & $width
+  IRExpr(kind: iekConvFloatRange, cfrOperand: e, cfrWidth: width,
+         cfrLo: lo, cfrHi: hi)
+
 proc mkConvIntReinterpret*(e: IRExpr, width: int, tgtSigned: bool): IRExpr =
   ## A1 adjudication (walker v116): SAME-WIDTH signedness reinterpret (e.g.
   ## `uint(x)` from an `int`). No widening/narrowing — the underlying Z3 BV
@@ -3117,10 +3137,10 @@ proc mkRoutineBlock*(facts: RoutineArithFacts; stmts: seq[IRStmt]): IRStmt =
   mkArithBlock(stampFor(facts), stmts, facts)
 
 proc withCheckScope*(b: IRStmt; on: set[CheckOption]): IRStmt =
-  ## RFC-0016 PRC-07. `b`, a routine body block, walked under the checks `on`
-  ## (those of `rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks` its
-  ## own options turn on in a build with them off); each other check of the
-  ## four follows the build.
+  ## RFC-0016 PRC-07, int6. `b`, a routine body block, walked under the checks
+  ## `on`: the effective set of `rangeChecks`, `boundChecks`, `fieldChecks`,
+  ## `objChecks` it is compiled with. A check of the four not in `on` is off
+  ## there, whatever the build says.
   b.blkScoped = true
   b.blkOn = on
   b
@@ -5240,6 +5260,8 @@ proc render*(e: IRExpr): string =
       "range[" & $e.ciwLo & ".." & $e.ciwHi & "](" & render(e.ciwOperand) & ")"
     else:
       "widen" & $e.ciwTgtWidth & "(" & render(e.ciwOperand) & ")"
+  of iekConvFloatRange:
+    "range[" & $e.cfrLo & ".." & $e.cfrHi & "](" & render(e.cfrOperand) & ")"
   of iekConvIntReinterpret:
     "reinterpret" & (if e.cirTgtSigned: "signed" else: "unsigned") &
       $e.cirWidth & "(" & render(e.cirOperand) & ")"

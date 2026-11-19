@@ -114,7 +114,7 @@ const notLeaking = importLeak(scanModuleText(self, "import foo\n{.push overflowC
 macro checksOf(fn: typed): untyped =
   let impl = (if fn.kind == nnkSym: fn else: fn[0]).getImpl
   let c = routineChecks(impl)
-  newLit($c.checks & "|" & c.why)
+  newLit($c.checks & "|" & $c.offModelled & "|" & c.why)
 
 {.push fieldChecks: off.}
 proc userUnderPush(v: int): int = v
@@ -128,11 +128,13 @@ const userOn = checksOf(userClean)
 suite "S8cu scan: a routine's own checks":
 
   test "nelli's own runtime under its push does not decline":
-    check runtimeOwn == "{}|"
+    check runtimeOwn == "{}|{}|"
 
   test "a user routine under the same push does; one outside it does not":
-    check userOff == "{fieldChecks}|"
-    check userOn == "{}|"
+    # RFC-0016 int6: off on every reading, in a user module, it is modelled
+    # (`offModelled`), not a deviation.
+    check userOff == "{}|{fieldChecks}|"
+    check userOn == "{}|{}|"
 
 suite "S8cu scan: what cannot be read":
 

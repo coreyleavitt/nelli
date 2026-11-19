@@ -3,13 +3,22 @@
 ## The routine runs without the check; the walker modelled it and reported a raise
 ## that never happens. It now declines by name (`check_options.nim`). Each row runs
 ## the routine natively on this build, so a wrong expectation fails here too.
+##
+## RFC-0016 int6: a check of `rangeChecks`, `boundChecks`, `fieldChecks`,
+## `objChecks` pushed off is now modelled (the routine is walked as a build
+## with it off walks it), so those rows are judged against the native binary
+## (`pinFind`) or as the build route's undefined access. `overflowChecks` off
+## in a checked build still declines (`feOverflowCheckOption`).
 import std/[unittest, sets, strutils]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/definedness
 import ./s8cu_helpers
 
 const declKey = cellKey(faGeneric, "s8cu_push")
+const idxKey = cellKey(axDefinedness, "index/unchecked")
+const objKey = cellKey(axDefinedness, "conv/objDowncast")
 
 type K = enum kA, kB, kC, kD
 type P = object
@@ -109,7 +118,8 @@ suite "S8cu: the push form":
 
   test "fieldChecks":
     check native(fieldOff(4)) == "hit"
-    pinDecline(fieldOff, declKey, feCheckOption)
+    # The wrong-branch write declines on its own path (`inactiveFieldSide`).
+    pinDecline(fieldOff, declKey, feUnsupportedOp, excluding = {feCheckOption})
     let d = symexFind(fieldOff, tFieldDefect())
     check d.status == sxUnknown
 
@@ -123,22 +133,35 @@ suite "S8cu: the push form":
 
   test "rangeChecks":
     check native(rangeOff(300)) == "hit"
-    pinDecline(rangeOff, declKey, feCheckOption)
+    let r = pinFind(rangeOff, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    let x = pinFind(rangeOff, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxUnsat
 
   test "boundChecks":
     check native(boundOff(3)) == "hit"
-    pinDecline(boundOff, declKey, feCheckOption)
+    # `a[3]` of a 3-array is a C access outside it, as in a
+    # `--boundChecks:off` build (`tsymex_0016_boundoff`).
+    pinDecline(boundOff, idxKey, ubArrayOutOfBounds, excluding = {feCheckOption})
 
   test "objChecks":
     check native(objOff(1)) == "hit"
-    pinDecline(objOff, declKey, feCheckOption)
+    # `Ch(p)` of a `Par` is an invalid down-conversion, as in an
+    # `--objChecks:off` build (`tsymex_0016_objoff`).
+    pinDecline(objOff, objKey, ubInvalidObjConversion,
+               excluding = {feCheckOption})
 
   test "checks":
     check native(umbrella(high(int))) == "hit"
     let r = symexFind(umbrella, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxUnknown
-    check r.errors.named(feCheckOption)
+    # int6: the four are modelled off (the field write declines on its own
+    # path); the overflow push still declines.
+    check not r.errors.named(feCheckOption)
+    check r.errors.named(feUnsupportedOp)
     check r.errors.named(feOverflowCheckOption)
 
   test "a raise the model catches is no `sxUnsat`":

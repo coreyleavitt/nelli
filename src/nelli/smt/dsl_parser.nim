@@ -427,6 +427,11 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekConvIntReinterpret:
     newCall(bindSym"mkConvIntReinterpret", emitExpr(e.cirOperand),
             newLit(e.cirWidth), newLit(e.cirTgtSigned))
+  of iekConvFloatRange:
+    newCall(bindSym"mkConvFloatRange", emitExpr(e.cfrOperand),
+            newLit(e.cfrWidth),
+            newCall(bindSym"floatOfBits", newLit(cast[uint64](e.cfrLo))),
+            newCall(bindSym"floatOfBits", newLit(cast[uint64](e.cfrHi))))
   of iekMathCall:
     var argLit = newTree(nnkBracket)
     for a in e.mathArgs: argLit.add emitExpr(a)
@@ -1783,10 +1788,11 @@ func ordinalUnchecked(ctx: ParseCtx): bool =
 
 func checkedHere(ctx: ParseCtx; co: CheckOption): bool =
   ## RFC-0016 PRC-07. Whether the C compiler emits check `co` (`coRange`,
-  ## `coBound`, `coField`, `coObj`) for the routine being parsed: the build's
-  ## option, or the routine's own `push` turning it back on.
-  co in buildSemantics.checks or
-    (ctx.checkScopes.len > 0 and co in ctx.checkScopes[^1])
+  ## `coBound`, `coField`, `coObj`) for the routine being parsed: its effective
+  ## scope (`checkedIn`, RFC-0016 int6), which is the build's option outside
+  ## any routine.
+  if ctx.checkScopes.len > 0: co in ctx.checkScopes[^1]
+  else: co in buildSemantics.checks
 
 func floatCheckedHere(ctx: ParseCtx): set[CheckOption] =
   ## RFC-0016 PRC-07 (float half). Of `coNan` and `coInf`, the checks the
@@ -1812,15 +1818,22 @@ func pushedOn(c: RoutineChecks): set[CheckOption] =
   if c.fieldOn: result.incl coField
   if c.objOn: result.incl coObj
 
-func hasCheckOff(): bool =
-  ## A build with one of the four checks off: every routine body is scoped.
-  {coRange, coBound, coField, coObj} - buildSemantics.checks != {}
+const scopeChecks = {coRange, coBound, coField, coObj}
+  ## RFC-0016 int6. The checks a code region carries in its scope.
+
+func checkedIn(c: RoutineChecks): set[CheckOption] =
+  ## RFC-0016 int6. Of the four checks, those a routine is compiled with: the
+  ## build's, less those its position turns off (`offModelled`), plus those it
+  ## turns back on (`pushedOn`). Where its position was not read (`c.why`) the
+  ## build's: the routine declines whole.
+  if c.why.len > 0: return buildSemantics.checks * scopeChecks
+  (buildSemantics.checks * scopeChecks - c.offModelled) + pushedOn(c)
 
 proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
   ## Opens the routine's arithmetic scope for its parse, and its check scope.
   ctx.arith.enterParse arithFacts(c, inherit)
   ctx.checkScopes.add(if inherit and ctx.checkScopes.len > 0: ctx.checkScopes[^1]
-                      else: pushedOn(c) + floatOn(c))
+                      else: checkedIn(c) + floatOn(c))
 
 proc popArithScope(ctx: ParseCtx) =
   ctx.arith.leave()
@@ -1897,8 +1910,9 @@ proc ownerChecked(owner: NimNode; co: CheckOption): bool =
   ## `owner`: the build's option, or the routine's own `push` turning it on.
   if co in buildSemantics.checks:
     # `RoutineChecks.checks` holds the options that DEVIATE from the walker's
-    # model (on): a routine that pushed `co` off carries it there.
-    owner == nil or co notin routineChecks(owner).checks
+    # model (on), and `offModelled` those it turns off and the walker models.
+    owner == nil or (let rc = routineChecks(owner);
+                     co notin rc.checks and co notin rc.offModelled)
   else:
     owner != nil and co in pushedOn(routineChecks(owner))
 
@@ -1924,15 +1938,15 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   let facts = arithFacts(c, inherit)
   let arith = decide(facts)
   let restrictParams = noaliasWithPeers(impl)
-  # RFC-0016 PRC-07: a build whose own range, bound, field or object checks
-  # are off is walked as compiled (`checks` never names them there). A routine
-  # that pushes one back on is walked checked: its body block carries the
-  # checks it is compiled with (`withCheckScope`), which the walker reads for
-  # the access, conversion and index checks (`boundsUnchecked`,
-  # `fieldsUnchecked`); every routine of such a build is scoped, so a callee
-  # that pushes nothing does not inherit its caller's. Where the routine's
-  # options could not be read (`c.why`) it declines below.
-  let scoped = hasCheckOff() and not inherit
+  # RFC-0016 PRC-07, int6: a routine is walked with the range, bound, field
+  # and object checks it is compiled with, in either build direction: its
+  # body block carries them (`withCheckScope(checkedIn(c))`), which the walker
+  # reads for the access, conversion and index checks (`checkedNow`,
+  # `boundsUnchecked`, `fieldsUnchecked`). Every routine body is scoped, so a
+  # callee takes the scope of its own declaration, never its caller's push.
+  # Where the options could not be read (`c.why`), or a check is ambiguous,
+  # leaked or a stdlib module's push, it declines below.
+  let scoped = not inherit
   if c.checks == {} and not arith.stamp.claims and c.unadmitted.len == 0 and
      restrictParams.len == 0 and not scoped:
     return body
@@ -1974,7 +1988,7 @@ proc withCheckDeclines(ctx: ParseCtx; impl: NimNode; c: RoutineChecks;
   result = if body != nil and arith.stamp.claims:
              mkArithBlock(arith.stamp, decl, facts)
            else: mkBlock(decl)
-  if scoped: result = result.withCheckScope(pushedOn(c))
+  if scoped: result = result.withCheckScope(checkedIn(c))
 
 proc srcSite(n: NimNode): string =
   ## K10a-float: `file:line:col` of `n`, the name of an undefined-behaviour
@@ -2421,6 +2435,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     ## A1 adjudication: a same-width tag flip has no inline raise fork of
     ## its own either — only its operand can carry one.
     result = rhsHasInlineDefectFork(e.cirOperand)
+  of iekConvFloatRange:
+    ## RFC-0016 int6: the float range check forks `RangeDefect`.
+    result = true
   of iekMathCall:
     for a in e.mathArgs:
       if rhsHasInlineDefectFork(a): return true
@@ -2592,6 +2609,7 @@ proc irKids*(e: IRExpr): seq[IRExpr] =
   of iekConvIntToFloat, iekConvFloatToInt: @[e.convOperand]
   of iekConvIntWidth: @[e.ciwOperand]
   of iekConvIntReinterpret: @[e.cirOperand]
+  of iekConvFloatRange: @[e.cfrOperand]
   of iekMathCall: e.mathArgs
   of iekBinop: @[e.lhs, e.rhs]
   of iekUnop: @[e.operand]
@@ -7265,6 +7283,101 @@ proc convertFloatWidth(n, operand: NimNode, preamble: var seq[IRStmt],
   let op = if fltWidthOfKind(n.getTypeInst.typeKind) == 32: "toFloat32"
            else: "toFloat64"
   mkMathCall(admitFloatCall(op, 1), op, @[parseExpr(operand, preamble, ctx)])
+
+proc floatRangeOf(t: IRType): IRType =
+  ## RFC-0016 int6. `t` when it is a float `range[lo..hi]`, else nil.
+  if t != nil and t.kind in {itFloat32, itFloat64} and t.floatRange: t
+  else: nil
+
+proc mkFloatRangeCheck(v: IRExpr; tgt: IRType): IRExpr =
+  ## RFC-0016 int6. `v`, a float of `tgt`'s width, converted into the float
+  ## range `tgt` (`iekConvFloatRange`, the one owner of the check).
+  mkConvFloatRange(v, (if tgt.kind == itFloat32: 32 else: 64),
+                   tgt.floatLo, tgt.floatHi)
+
+proc convIntoFloatRange(conv, operand: NimNode; preamble: var seq[IRStmt];
+                        ctx: ParseCtx): IRExpr =
+  ## RFC-0016 int6. A conversion into a float range (`conv`, typed: an
+  ## explicit `U(a)` or the hidden conversion Nim puts on `v = a`, an
+  ## argument, a constructor field, a `return`), or nil when `conv`'s type is
+  ## no float range. Nim checks the value against the range's bounds
+  ## (`RangeDefect` outside them, NaN passing), after rounding it to the
+  ## range's width when the operand is of the other float width. Unlike the
+  ## int side, an operand of a float range inside the target is checked too
+  ## (probed: `w = v` with `v: range[0.0 .. 1.0]` holding 2.0, which
+  ## float64's `/=` stores, and `w: range[0.0 .. 1.5]` raises).
+  let tgt = floatRangeOf(classifyType(conv).ty)
+  if tgt == nil: return nil
+  let src = classifyType(operand).ty
+  var v = parseExpr(operand, preamble, ctx)
+  if src != nil and src.kind in {itFloat32, itFloat64} and src.kind != tgt.kind:
+    # RFC-0016 K2b: the width change first (`fp.to_fp`, RNE)
+    let op = if tgt.kind == itFloat32: "toFloat32" else: "toFloat64"
+    v = mkMathCall(admitFloatCall(op, 1), op, @[v])
+  mkFloatRangeCheck(v, tgt)
+
+proc augStoresThroughRange(op: NimNode): bool =
+  ## RFC-0016 int6. Whether system's `x op= y`, resolved to the routine `op`,
+  ## stores `x op y` through a conversion into a range: its body is `x = x op
+  ## y`, converted into its formal's type. The generic `+=`, `-=`, `*=` (and
+  ## float32's `/=`, `[T: float | float32]`) are instantiated at the range,
+  ## so the store checks (probed: `v += 2.0` raises); float64's `/=` is the
+  ## plain `(x: var float64, y: float64)` routine, the range local is passed
+  ## as a `float64`, and nothing checks (probed: `0.5 / 0.25` is stored).
+  ## The generic ones take `y: T` as well, so their operand is converted
+  ## into the range at the call (Nim's hidden conversion, checked by
+  ## `convIntoFloatRange` under the caller's options; probed: `v *= 2.0` at
+  ## `v == 0.5` raises on the operand). A signature that cannot be read is
+  ## taken as the generic one.
+  if op.kind != nnkSym: return true
+  let sig = op.getTypeInst
+  if sig.kind != nnkProcTy or sig.len == 0 or
+     sig[0].kind != nnkFormalParams or sig[0].len < 2 or
+     sig[0][1].kind != nnkIdentDefs or sig[0][1].len < 3:
+    return true
+  var t = sig[0][1][^2]
+  if t.kind == nnkVarTy and t.len == 1: t = t[0]
+  floatRangeOf(classifyType(t).ty) != nil
+
+proc augFloatRangeStore(n: NimNode; ty: IRType; v: IRExpr): IRExpr =
+  ## RFC-0016 int6. The value an augmented assignment `n` (`x op= y`) stores
+  ## into a slot of type `ty`: `v` itself, or `v` converted into `ty` where
+  ## `ty` is a float range and the routine checks (`augStoresThroughRange`).
+  ## That conversion is compiled in system's routine, so the build's range
+  ## check governs it, not a caller's `push` (probed: `v += 2.0` still
+  ## raises under `push rangeChecks: off`): the caller walks the store in
+  ## `systemStoreScope`, as every system routine's conversion is governed by
+  ## the scope it was compiled in, the build's.
+  let fr = floatRangeOf(ty)
+  if fr == nil or not augStoresThroughRange(n[0]): v
+  else: mkFloatRangeCheck(v, fr)
+
+proc augIsSystemStore(n: NimNode; ty: IRType): bool =
+  ## RFC-0016 int6. Whether `n` (`x op= y`) stores into a float range of type
+  ## `ty` through system's routine (`augFloatRangeStore` converts there).
+  floatRangeOf(ty) != nil and augStoresThroughRange(n[0])
+
+proc hoistAugOperand(n: NimNode; rhsIR: IRExpr; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): IRExpr =
+  ## RFC-0016 int6. The operand of system's `x op= y` (`rhsIR`, parsed from
+  ## `n[2]`), bound in the caller's scope: its hidden conversion into `y: T`
+  ## is compiled at the call, under the caller's options (probed: `v *= 1.5`
+  ## at `v == 0.5` stores 0.75 under `push rangeChecks: off`), while the store
+  ## is system's (`systemStoreScope`).
+  let tmp = freshSynth(ctx, "augop")
+  preamble.add mkLet(tmp, classifyType(n[2]).ty, rhsIR)
+  mkVar(tmp)
+
+proc systemStoreScope(store: IRStmt): IRStmt =
+  ## RFC-0016 int6. `store`, the conversion-checked store of system's `x op=
+  ## y` (`x = T(x op y)`), walked as code of a system routine: a routine block
+  ## with the build's arithmetic (default facts) and the build's check scope.
+  ## A system routine's conversion is governed by the scope it was compiled
+  ## in, which is the build's, never a caller's `push` (probed: `v *= 4` at
+  ## `v == 3` in a `range[0..10]` raises under `push rangeChecks: off`, and
+  ## `v *= 3` keeps 30 under `push rangeChecks: on` in an off build).
+  mkRoutineBlock(RoutineArithFacts(), @[store]).withCheckScope(
+    buildSemantics.checks * scopeChecks)
 
 proc isFloatWidthChange(operand, conv: NimNode): bool =
   ## RFC-0016 W1-e. Both sides are builtin floats of different widths.
@@ -13645,6 +13758,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let tt = classifyType(n).ty
       if tt != nil and tt.kind in {itRef, itPtr}:
         return mkNil(tt)
+    # RFC-0016 int6: `U(a)` into a float range is checked.
+    let floatRanged = convIntoFloatRange(n, operand, preamble, ctx)
+    if floatRanged != nil: return floatRanged
     # RFC-0005 S8bc: an inlined iterator's parameter is its typed formal
     # symbol (the S8at untyped-ident decline here is gone with the
     # substitution that produced the ident).
@@ -13965,6 +14081,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # `classifyType` on it aborted the compile.
       if isIntLiteralNode(wrapped) or n.kind == nnkHiddenAddr:
         parseExpr(wrapped, preamble, ctx)
+      elif floatRangeOf(classifyType(n).ty) != nil:
+        # RFC-0016 int6: the conversion into a float range (`v = a`).
+        convIntoFloatRange(n, wrapped, preamble, ctx)
       elif isFloatWidthChange(wrapped, n):
         # RFC-0016 K2b (W-04): a compiler-inserted float32 <-> float64.
         convertFloatWidth(n, wrapped, preamble, ctx)
@@ -19577,8 +19696,7 @@ proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
   result = parseJumpedBody(forBodyNode, ctx)
   discard ctx.checkScopes.pop()
   ctx.iterBodies.add entry
-  if hasCheckOff():
-    result = mkBlock(@[result]).withCheckScope(caller)
+  result = mkBlock(@[result]).withCheckScope(caller)
 
 proc enterDupCopy(yieldNode: NimNode; ctx: ParseCtx): int =
   ## RFC-0016 PRC-48. The `yield` `yieldNode` and the for-body at it: a copy
@@ -24251,9 +24369,10 @@ proc parseStmtInner(n: NimNode,
         # caller's (`parseForBody`). An inline iterator is expanded at the call
         # site and takes the caller's.
         let ownScope = isClosureIter
-        let callerTop = if ctx.checkScopes.len > 0: ctx.checkScopes[^1] else: {}
+        let callerTop = if ctx.checkScopes.len > 0: ctx.checkScopes[^1]
+                        else: buildSemantics.checks * scopeChecks
         ctx.iterBodies.add (own: ownScope, caller: callerTop)
-        if ownScope: ctx.checkScopes.add(pushedOn(iterChecks) + floatOn(iterChecks))
+        if ownScope: ctx.checkScopes.add(checkedIn(iterChecks) + floatOn(iterChecks))
         # RFC-0016 W3-z P13. The expansion is a block a for-body's `break`
         # leaves (`parseForBody`); the iterator's own loops bind their own.
         ctx.pushJumpTarget(isLoop = false)
@@ -24269,8 +24388,7 @@ proc parseStmtInner(n: NimNode,
         bodyIR = wrapJumpBlock(ctx.popJumpTarget().brkLabel, bodyIR)
         if ownScope:
           discard ctx.checkScopes.pop()
-          if hasCheckOff():
-            bodyIR = mkBlock(@[bodyIR]).withCheckScope(pushedOn(iterChecks))
+          bodyIR = mkBlock(@[bodyIR]).withCheckScope(checkedIn(iterChecks))
         discard ctx.iterBodies.pop()
         ctx.activeIterators.excl itSymName
         ctx.copiedIterFormals.setLen copiedMark
@@ -25237,26 +25355,36 @@ proc parseStmtInner(n: NimNode,
                     "`: the bounds of its type are not modelled -- path " &
                     "degraded to sxUnknown"),
             "`" & augOp.strVal & "` on this receiver is not modelled")
-        let opIR = siteBinop(bop, mkVar(nm), rhsIR, n)
         if augTy != nil:
           # RFC-0016 K9e: the other system `op=` on an integer is `*=`, the
           # routine `x = x * y`: the product is taken in the base type
           # (`OverflowDefect` there, `siteBinop`) and stored through the
           # range conversion Nim puts on it, `RangeDefect` outside the range
-          # (probed: `v *= 4` at `v == 3` in a `range[0..10]` raises). That
-          # conversion is compiled in system's routine, so the build's range
-          # check governs it and a caller's `push rangeChecks: off` does not
-          # (probed: it still raises), as `lowerConvIntRange`'s drain is
-          # gated. Any other operator on a range is no system routine.
+          # (probed: `v *= 4` at `v == 3` in a `range[0..10]` raises).
+          # RFC-0016 int6: a system routine's conversion is governed by the
+          # scope it was compiled in, the build's: the store is walked in
+          # `systemStoreScope`, so a caller's `push rangeChecks: off` leaves
+          # it checked and a `push rangeChecks: on` in an off build leaves it
+          # unchecked (probed, both). The operand's `y: T` conversion is the
+          # caller's (`hoistAugOperand`). Any other operator on a range is no
+          # system routine.
           if baseOpStr != "*":
             return ctx.declineAtSite(feUnsupportedOp,
               siteMsg(n, "`" & augOp.strVal & "` on `" & lhs.repr &
                       "`: the operator on a range is not modelled -- path " &
                       "degraded to sxUnknown"),
               "`" & augOp.strVal & "` on this receiver is not modelled")
-          return mkAssign(nm, mkConvIntWidth(opIR, augTy.width, augTy.signed,
-            augTy.width, augTy.signed, true, augTy.rangeLo, augTy.rangeHi))
-        return mkAssign(nm, opIR)
+          let y = hoistAugOperand(n, rhsIR, preamble, ctx)
+          let prod = siteBinop(bop, mkVar(nm), y, n)
+          return systemStoreScope(mkAssign(nm, mkConvIntWidth(prod,
+            augTy.width, augTy.signed, augTy.width, augTy.signed, true,
+            augTy.rangeLo, augTy.rangeHi)))
+        if augIsSystemStore(n, augCls.ty):
+          let y = hoistAugOperand(n, rhsIR, preamble, ctx)
+          return systemStoreScope(mkAssign(nm, augFloatRangeStore(n, augCls.ty,
+            siteBinop(bop, mkVar(nm), y, n))))
+        let opIR = siteBinop(bop, mkVar(nm), rhsIR, n)
+        return mkAssign(nm, augFloatRangeStore(n, augCls.ty, opIR))
       elif lhs.kind == nnkDerefExpr and lhs.len == 1 and
            augOp.strVal != "&=" and
            ((classifyType(lhs).ty.kind == itInt and
@@ -25267,10 +25395,14 @@ proc parseStmtInner(n: NimNode,
         # `ptr` formal bound to an `addr` cell is updated in place. A
         # ranged pointee declines (the write has no RangeDefect fork).
         let old = parseExpr(lhs, preamble, ctx)
-        let rhsIR = parseExpr(n[2], preamble, ctx)
-        let newVal = siteBinop(binopForInfix(augOp.strVal[0 .. ^2]), old, rhsIR, n)
-        return parseAsgn(nnkAsgn.newTree(lhs, newEmptyNode()), newVal,
-                         preamble, ctx)
+        var rhsIR = parseExpr(n[2], preamble, ctx)
+        let sys = augIsSystemStore(n, classifyType(lhs).ty)
+        if sys: rhsIR = hoistAugOperand(n, rhsIR, preamble, ctx)
+        let newVal = augFloatRangeStore(n, classifyType(lhs).ty,
+          siteBinop(binopForInfix(augOp.strVal[0 .. ^2]), old, rhsIR, n))
+        let st = parseAsgn(nnkAsgn.newTree(lhs, newEmptyNode()), newVal,
+                           preamble, ctx)
+        return (if sys: systemStoreScope(st) else: st)
       else:
         # RFC-0005 S8p: `o.a += v` on a value tuple / object field -- the
         # same rebuilt-root write as `o.a = o.a + v` (`valueFieldWrite`).
@@ -25291,12 +25423,15 @@ proc parseStmtInner(n: NimNode,
                 fieldTy.kind in {itFloat32, itFloat64}
           if fits:
             let old = parseExpr(lhs, preamble, ctx)
-            let rhsIR = parseExpr(n[2], preamble, ctx)
+            var rhsIR = parseExpr(n[2], preamble, ctx)
+            let sys = baseOpStr != "&" and augIsSystemStore(n, fieldTy)
+            if sys: rhsIR = hoistAugOperand(n, rhsIR, preamble, ctx)
             let newVal =
               if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
-              else: siteBinop(binopForInfix(baseOpStr), old, rhsIR, n)
+              else: augFloatRangeStore(n, fieldTy,
+                      siteBinop(binopForInfix(baseOpStr), old, rhsIR, n))
             let fw = valueFieldWrite(lhs, newVal, preamble, ctx)
-            return fw.toStmt
+            return (if sys: systemStoreScope(fw.toStmt) else: fw.toStmt)
         # RFC-0005 S8am (S8z's remainder, item 1): `s[i] += v` (and -=, *=,
         # &=) on a SEQ ELEMENT. `valueFieldTy`/`fieldStep` has no `itSeq`
         # case -- a seq element is a REAL `isIndexAssign` store (a Z3
@@ -25337,11 +25472,15 @@ proc parseStmtInner(n: NimNode,
                 preamble.add mkIndexStmt(checkSynth, mkVar(seqRecv.strVal),
                                          idxIR, seqElemTy, siteLoc(n))
                 let old = mkVar(checkSynth)
-                let rhsIR = parseExpr(n[2], preamble, ctx)
+                var rhsIR = parseExpr(n[2], preamble, ctx)
+                let sys = baseOpStr != "&" and augIsSystemStore(n, seqElemTy)
+                if sys: rhsIR = hoistAugOperand(n, rhsIR, preamble, ctx)
                 let newVal =
                   if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
-                  else: siteBinop(binopForInfix(baseOpStr), old, rhsIR, n)
-                return mkIndexAssignStmt(seqRecv.strVal, idxIR, newVal, siteLoc(n))
+                  else: augFloatRangeStore(n, seqElemTy,
+                          siteBinop(binopForInfix(baseOpStr), old, rhsIR, n))
+                let st = mkIndexAssignStmt(seqRecv.strVal, idxIR, newVal, siteLoc(n))
+                return (if sys: systemStoreScope(st) else: st)
         # RFC-0005 S8bc (item 7): `a[i] += v` on an ARRAY element not
         # reached above, `t[k] += v` on a TABLE value, and `t.mgetOrPut(k,
         # d) += v` on the cell `mgetOrPut` returns a reference to -- the
@@ -25361,14 +25500,18 @@ proc parseStmtInner(n: NimNode,
           if eltFits:
             let oldTmp = freshSynth(ctx, "augElt")
             preamble.add mkLet(oldTmp, eltTy, parseExpr(n[1], preamble, ctx))
-            let rhsIR = parseExpr(n[2], preamble, ctx)
+            var rhsIR = parseExpr(n[2], preamble, ctx)
+            let sys = baseOpStr != "&" and augIsSystemStore(n, eltTy)
+            if sys: rhsIR = hoistAugOperand(n, rhsIR, preamble, ctx)
             let newVal =
               if baseOpStr == "&":
                 mkStrOp(iekStrConcat, "&", @[mkVar(oldTmp), rhsIR])
-              else: siteBinop(binopForInfix(baseOpStr), mkVar(oldTmp), rhsIR, n)
-            return parseAsgn(nnkAsgn.newTree(elemLvalueBracket(n[1]),
-                                             newEmptyNode()),
-                             newVal, preamble, ctx)
+              else: augFloatRangeStore(n, eltTy,
+                      siteBinop(binopForInfix(baseOpStr), mkVar(oldTmp), rhsIR, n))
+            let st = parseAsgn(nnkAsgn.newTree(elemLvalueBracket(n[1]),
+                                               newEmptyNode()),
+                               newVal, preamble, ctx)
+            return (if sys: systemStoreScope(st) else: st)
         return ctx.declineMarker(
           feUnsupportedStmtKind, &"augmented assign: LHS `{n[1].repr}` is not a simple variable " &
           &"(kind={n[1].kind}); degrade to sxUnknown (sound, Invariant 3)")

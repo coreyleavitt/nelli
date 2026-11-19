@@ -83,7 +83,7 @@ suite "S8co item 7: (*ANY) in UTF mode under the JIT's scan":
     check jitOn > 0
 
   test "the walker decides a symbolic call":
-    check parseInt(symexWalkerVersion) >= 380
+    check parseInt(symexWalkerVersion) >= 419
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
     check pinFind(anyHit, tLabel("co_any_hit")).status == sxSat

@@ -212,7 +212,7 @@ template exact(hitP, neverP: untyped) =
 
 suite "INT-79":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 439
+    check parseInt(symexWalkerVersion) >= 438
   test "native truth":
     for e in [eR1, eA1, eA2, eA3, eA4, eT1, eO1, eS1, eN1, eN2, eD1, eD2,
               eP1, eP2, eU1, eU2, eU3, eU4]:

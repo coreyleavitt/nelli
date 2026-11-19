@@ -50,7 +50,7 @@ suite "S8co item 4: the automata read a kept ignore_skip_arg under a limit (1-5)
     check r.errs > 0
 
   test "the walker decides a symbolic call":
-    check parseInt(symexWalkerVersion) >= 397
+    check parseInt(symexWalkerVersion) >= 419
     check "abab".find(re"(*LIMIT_MATCH=5)(?:a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x)+|c") == -1
     check pinFind(worldSym, tLabel("co_world")).status == sxSat
     check pinFind(worldSymNo, tLabel("co_world_no")).status == sxUnsat

@@ -56,7 +56,7 @@ proc unanchoredKeeps(s: string) =
 
 suite "S8co item 10: a single attempt that stops only on a miss":
   test "walker floor":
-    check parseInt(symexWalkerVersion) >= 380
+    check parseInt(symexWalkerVersion) >= 419
 
   test "native":
     symexCaptureBegin()

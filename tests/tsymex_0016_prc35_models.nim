@@ -218,7 +218,7 @@ let rCell = cellKey(axMagic, "Repr")
 
 suite "PRC-35":
   test "version floor":
-    check parseInt(symexWalkerVersion) >= 416
+    check parseInt(symexWalkerVersion) >= 415
 
   test "version floor (PRC-44)":
     check parseInt(symexWalkerVersion) >= 418

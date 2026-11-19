@@ -75,7 +75,7 @@ suite "S8co: OP_BRAMINZERO's count on the 8.37 JIT":
       check not n.ok and "OP_BRAMINZERO" in n.why
 
   test "the walker reads the count, and declines an unread unit":
-    check parseInt(symexWalkerVersion) >= 380
+    check parseInt(symexWalkerVersion) >= 419
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
     check pinFind(bzSym, tLabel("co_bz")).status == sxSat

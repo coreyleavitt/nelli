@@ -114,7 +114,7 @@ suite "S8co item 5: detect_repeat group repeats on the JIT":
       check initLimitOracle(lz).execInterp("abababc", 0) == (1, 0, 7)
 
   test "the walker reads a fold, and declines a crashing one":
-    check parseInt(symexWalkerVersion) >= 380
+    check parseInt(symexWalkerVersion) >= 419
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
     check pinFind(foldSym, tLabel("co_fold")).status == sxSat

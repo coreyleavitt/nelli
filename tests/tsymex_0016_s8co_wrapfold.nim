@@ -113,7 +113,7 @@ suite "S8co item 4c: a literal group with a wrapper's bytes on the JIT":
       check stops > 0
 
   test "the walker counts a literal wrapper's fold":
-    check parseInt(symexWalkerVersion) >= 393
+    check parseInt(symexWalkerVersion) >= 419
     # read before the override: std/re's own engine, the native oracle
     let nativeJit = pcreSearchEngine() == peJit837
     overridePcreLib("8.37 2015-04-28", true)

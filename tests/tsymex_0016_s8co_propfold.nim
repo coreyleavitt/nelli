@@ -121,7 +121,7 @@ suite "S8co item 4b: detect_repeat folds next to a character property":
       check find("a1a1a1", re"(*LIMIT_MATCH=3)(?:\p{L}+1){3}") == -8
 
   test "the walker decides a fold next to a property":
-    check parseInt(symexWalkerVersion) >= 393
+    check parseInt(symexWalkerVersion) >= 419
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
     check pinFind(propSym, tLabel("co_propfold")).status == sxSat

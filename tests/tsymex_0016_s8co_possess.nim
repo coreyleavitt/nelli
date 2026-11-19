@@ -111,8 +111,8 @@ suite "S8co item 3: auto-possession next to a property or an XCLASS":
       check stops > 0
 
   test "the walker reads them":
-    # Walker 380 is the version that reads them.
-    check parseInt(symexWalkerVersion) >= 380
+    # Walker 419 (S8co) is the version that reads them.
+    check parseInt(symexWalkerVersion) >= 419
     check "abc1".matchLen(re"(*LIMIT_MATCH=3)(*UTF)\p{L}+\p{N}") == 4
     check "aab".matchLen(re"(*LIMIT_MATCH=3)(*UTF)a+[\x{100}b]") == 3
     check pinFind(propSym, tLabel("co_prop")).status == sxSat

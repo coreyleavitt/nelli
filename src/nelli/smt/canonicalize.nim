@@ -771,6 +771,15 @@ const renderAsChoicesVersion* = "12"
   ##   a wide enum no longer forks over every declared arm (or declines past
   ##   `maxVariantConstructorForks`). Verdicts that were `sxUnknown` there
   ##   resolve. No key bytes change.
+  ## - RFC-0016 CRH-07 (369->372; 370 and 371 are the integration head's):
+  ##   `strutils.count`'s value is a fresh `v` with its definition in
+  ##   `regexRecDefConds`, as `replace`'s is, so step 0 decides on the facts
+  ##   alone; S8cf had inlined the term to avoid a crash. The crash was
+  ##   `checkExact` holding an unowned `Z3_substitute` result while resolving
+  ##   one definition against another (`count` over a `replace` value): the
+  ##   roots built over the freed term read stale nodes (a false `sxUnsat` on
+  ##   a satisfiable `count`) and were later released into them (SIGSEGV).
+  ##   The query a count reaches changes shape; no key bytes change.
   ## - RFC-0016 K9c follow-up (371->373; 372 is CRH-07's): (1) an element
   ##   read, store, `pop` or `del` on a seq whose element type the model does
   ##   not back, that is not a placeholder (an empty literal, the stand-in of
@@ -834,6 +843,12 @@ const renderAsChoicesVersion* = "12"
   ##   name fewer kinds: no `ubTailUnverified` from a budget earlier
   ##   candidates spent, and no proc-value sites from their tails in its
   ##   settle's lift. No key bytes change.
+  ## - RFC-0016 S8ci (374->379; 375-378 are Wave 4 lanes in flight): a
+  ##   query's own context (`ownContextSolver`) makes its terms in Z3's own
+  ##   translation order of the roots, not S8by's `queryTermOrder` (roots in
+  ##   order, arguments last to first). Verdicts are unchanged; Z3 units on
+  ##   a query move (`lastNl`: 1,026,624 to 498,821 on Z3 5.1), so a walk
+  ##   cut by its budget can cut elsewhere. No key bytes change.
   ## - RFC-0016 W4 perf (378->381; 379-380 are reserved for other W4 work):
   ##   a branch ask's `std/re` calls whose operands the pins fix to literals
   ##   take their value from the automaton (`foldPinnedRegexCalls`), and
@@ -841,24 +856,6 @@ const renderAsChoicesVersion* = "12"
   ##   memberships over a ground subject; a branch it left open is decided,
   ##   so a tail or a replay can fork less and name fewer kinds. No key
   ##   bytes change.
-  ## - RFC-0016 F1 hotfix (381->401; 382-400 are reserved for in-flight W4
-  ##   work): `searchDfa` reads its verifiers' `vok` after its state loop
-  ##   too. A verifier that declined while the last state was expanded left
-  ##   a built search language that is wrong (PRC-33 item 6b; an `skNoOcc`
-  ##   one could be empty); the search now declines instead. No key bytes
-  ##   change.
-  ## - RFC-0016 F2 hotfix (401->412; 402-411 are reserved for in-flight W4
-  ##   work): a SKIP:NAME that can run without its MARK under
-  ##   `(*LIMIT_RECURSION=n)` declines (`pcre_select.buildNfa`, the concrete
-  ##   call too). Its re-run's depths were not modelled, and a call on a
-  ##   literal or pinned subject read -21 for -1 or a match and the other
-  ##   way round (SND-16); such a call is now unknown. No key bytes change.
-  ## - RFC-0016 S8ci (374->379; 375-378 are Wave 4 lanes in flight): a
-  ##   query's own context (`ownContextSolver`) makes its terms in Z3's own
-  ##   translation order of the roots, not S8by's `queryTermOrder` (roots in
-  ##   order, arguments last to first). Verdicts are unchanged; Z3 units on
-  ##   a query move (`lastNl`: 1,026,624 to 498,821 on Z3 5.1), so a walk
-  ##   cut by its budget can cut elsewhere. No key bytes change.
   ## - RFC-0016 S8ci follow-up (379->384; 380-383 are Wave 4 lanes in
   ##   flight): an own-context search (`ownContextSolver`) runs Z3's
   ##   defaults under the first half of its bound; only one that half ran
@@ -875,15 +872,6 @@ const renderAsChoicesVersion* = "12"
   ##   lost to the bound (`s8aq_rfind_before_piece`, `grow_stale_dead`), and
   ##   at three quarters the first still was. A search cut by its bound can
   ##   cut elsewhere than at 384. No key bytes change.
-  ## - RFC-0016 CRH-07 (369->372; 370 and 371 are the integration head's):
-  ##   `strutils.count`'s value is a fresh `v` with its definition in
-  ##   `regexRecDefConds`, as `replace`'s is, so step 0 decides on the facts
-  ##   alone; S8cf had inlined the term to avoid a crash. The crash was
-  ##   `checkExact` holding an unowned `Z3_substitute` result while resolving
-  ##   one definition against another (`count` over a `replace` value): the
-  ##   roots built over the freed term read stale nodes (a false `sxUnsat` on
-  ##   a satisfiable `count`) and were later released into them (SIGSEGV).
-  ##   The query a count reaches changes shape; no key bytes change.
   ## - RFC-0016 W4 S8cp-r (381->391; 382-390 are reserved for other W4
   ##   work), PRC-34: system's `==` on two tuples or plain objects of atom
   ##   fields lowers to the conjunction of the fields' `==` (was `eqBV` on a
@@ -911,6 +899,12 @@ const renderAsChoicesVersion* = "12"
   ##   through its inner seq, the outer index checked first; a seq of seqs
   ##   parameter, or a field of one, has a witness reader (`swrTree`), so its
   ##   verdicts decide (was `feUnsupportedWitnessType`, declined).
+  ## - RFC-0016 F1 hotfix (381->401; 382-400 are reserved for in-flight W4
+  ##   work): `searchDfa` reads its verifiers' `vok` after its state loop
+  ##   too. A verifier that declined while the last state was expanded left
+  ##   a built search language that is wrong (PRC-33 item 6b; an `skNoOcc`
+  ##   one could be empty); the search now declines instead. No key bytes
+  ##   change.
   ## - RFC-0016 W4 rv0005-lows (381->404; 382-403 are reserved for other W4
   ##   work): a replay's child ends otherwise for a few SUTs. A re-executed
   ##   child that never took its witness (a failed `execve`, a report it
@@ -941,11 +935,29 @@ const renderAsChoicesVersion* = "12"
   ##   raise per type is stored, not the first; a winner is lossy by its own
   ##   extraction only. Entries an earlier walker stored are stale. No key
   ##   bytes change.
+  ## - RFC-0016 F2 hotfix (401->412; 402-411 are reserved for in-flight W4
+  ##   work): a SKIP:NAME that can run without its MARK under
+  ##   `(*LIMIT_RECURSION=n)` declines (`pcre_select.buildNfa`, the concrete
+  ##   call too). Its re-run's depths were not modelled, and a call on a
+  ##   literal or pinned subject read -21 for -1 or a match and the other
+  ##   way round (SND-16); such a call is now unknown. No key bytes change.
   ## - RFC-0016 W4 rv0005-lows part 5 (408->413; 409-412 are reserved;
   ##   INT-36): a statement's stray lowering taint reaches the findings it
   ##   filed, so a hit solved mid-statement before the stray was found is a
   ##   candidate, not a clean winner. Entries an earlier walker stored are
   ##   stale. No key bytes change.
+  ## - RFC-0016 PRC-35 (401->414; 402-413 are reserved for in-flight W4
+  ##   work): `toInt`/`toBiggestInt`, `$` of a float on its faithful
+  ##   sub-domain, `repr` of an integer, float, char and string, and `$` of an
+  ##   enum hole ("") are modelled where they declined. No key bytes change.
+  ## - RFC-0016 PRC-35 (414->415; 416 is rv0005-lows part 6's):
+  ##   `repr` of a string is exact only where no byte is escaped and declines
+  ##   elsewhere (the `str.replace_all` form was `unknown` for every escape);
+  ##   a user `=dup` that is not the plain copy no longer declines every read
+  ##   when no sink position runs it: an explicit call walks the hook, a copy
+  ##   is the plain copy, and a sink position on its source's provable last
+  ##   read is the move. Any other sink position declines (PRC-44). No key
+  ##   bytes change.
   ## - RFC-0016 W4 rv0005-lows part 6 (413->416; 414-415 are reserved;
   ##   INT-34): a key starts with the walker version that wrote it
   ##   (`symexCacheKeyPrefixFor`, `w416:`), not the fixed `sx2:`, so every
@@ -959,155 +971,10 @@ const renderAsChoicesVersion* = "12"
   ##   value folds to its element count wherever it is used (it declined
   ##   `feUnsupportedOp` as an arithmetic operand). Verdicts change from
   ##   `sxUnknown` to exact. No key bytes change.
-  ## - RFC-0016 INT-64 (417->422; 418-421 are reserved for other W4 work):
-  ##   `for a, b in items(c)` over a seq or an array of tuples binds each
-  ##   element to a fresh name and each variable to its field, so
-  ##   `tables.toTable` (`for key, val in items(pairs)`) is walked; it
-  ##   declined `feUnsupportedStmtKind`. Verdicts change from `sxUnknown` to
-  ##   exact. No key bytes change.
-  ## - RFC-0016 INT-66 / INT-67 / INT-70 (422->423): a call of a routine the
-  ##   program declares with a binary `{.magic.}` and no body is the infix of
-  ##   the system routine of that magic and signature (`userMagicRewrite`);
-  ##   a field read through a distinct object that borrows `.` is the base
-  ##   object's field read; a type a template body in the routine declares
-  ##   (no type until expanded) is skipped by the route scan, which stopped
-  ##   the compile ("node has no type"). Verdicts change from `sxUnknown` to
-  ##   exact; a program that did not compile does. No key bytes change.
-  ## - RFC-0016 INT-65 (423->434; 424-433 are reserved for other W4 work): a
-  ##   `pointer` holds the address it was converted from (`addr`, a `cast` or
-  ##   conversion of a `ptr`/`ref`) or its nil (`pointerNilTy`, also an
-  ##   uninitialised one), and `refEq` compares addresses of different
-  ##   pointee sorts (nil against either side decides; two non-nil ones
-  ##   decline `heUnresolvedRef`); a `ptr` cast from a `pointer` declines
-  ##   `heUnsafeCast`. A proc value is its routine or closure or nil
-  ##   (`nilClosure`, also an uninitialised proc variable): compared with nil
-  ##   it is decided (`closureEq`), a call through nil declines
-  ##   `ceUnsupportedHof`. Verdicts change from `sxUnknown` to exact. No key
-  ##   bytes change.
-  ## - RFC-0016 INT-76 (434->435): a `c_longdouble` value (a declared local,
-  ##   initialised or not, or an expression of the type) declines
-  ##   `feUnsupportedParamType` and halts the path (`declineLongDouble`, a
-  ##   halting `isUnsupported`, `unHalt`); its reads were a
-  ##   `weInternalWalkerFault` (`eqBV`/`cmpBV`, a field's `FieldDefect`), and
-  ##   an initialised local was walked as an IEEE double, a trusted answer
-  ##   on a type whose value is the C target's. Verdicts change from a fault or a trusted
-  ##   answer to `sxUnknown`. Key bytes change for a halting marker only
-  ##   (`;halt` in its `St<Un:...>`).
-  ## - RFC-0016 INT-59 / INT-61 / INT-62 (417->421; 418-420 are reserved for
-  ##   other W4 work): a query a float interval argument refutes is asked as
-  ##   `false` (`fpIntervalRefutes`), and a string length bounded by its
-  ##   term's structure gets that bound beside the query
-  ##   (`seqLenBoundFacts`), so a rounded division's range side and a
-  ##   char-built string's overflow side are decided in a few units
-  ##   instead of millions; `pointCheck` and `limitWorldRefuted` cut a solve
-  ##   by their clocks only under a run clock, so under the pin settings
-  ##   their answers are the step bound's; and a query that counts a
-  ##   builtin set's members is asked first with each count a free variable
-  ##   beside the ranges of its `int` views (`cardFreeAbstraction`,
-  ##   `bvViewRangeFacts`), so a packed program's queries after a set row
-  ##   no longer bit-blast the set again (six rows: past 16.5M units, now
-  ##   about 6 times the rows' sum). Verdicts can change from
-  ##   `sxUnknown` to exact. Key bytes change: the default
-  ##   `queryTimeoutMs` is `1_200_000` (was `600_000`), which the default
-  ##   settings' canonical form names.
-  ## - RFC-0016 INT-71 (421->425; 422-424 are reserved for other W4 work):
-  ##   the global-route scan reads an `IdentDefs`' type slot as the type its
-  ##   names' symbols carry, not as code. A template's `var x {.gensym.}:
-  ##   seq[int]` keeps `seq[int]` as `[]` over the open choice of every `[]`
-  ##   in scope at the template; the scan took each as a callee, walked into
-  ##   an imported library's hooks and declined every read
-  ##   (`feGlobalRouteUnproved`). Verdicts change from `sxUnknown` to exact.
-  ##   No key bytes change.
-  ## - RFC-0016 INT-57 (425->428; 426-427 are reserved for other W4 work):
-  ##   the rendering `$v` of a bit-vector is registered, and its length and
-  ##   its order or equality against another rendering lower to bit-vector
-  ##   formulas over `v` (`strLenOf`, `renderCmp`; a merged `$b` compares by
-  ##   cases, `litCmp`), so the sequence solver no longer decides them and
-  ##   Z3's step counter no longer stalls on them. With no run clock
-  ##   (`queryTimeoutMs = 0`) every step-bounded solve runs under the solver
-  ##   stall backstop (`stallBackstopMs`), a wall deadline for the whole run:
-  ##   a solve it ends is `beSolverUndef` naming it, the walk stops, and the
-  ##   run is `rdQueryTimeout`, not cached. Verdicts change from a hang to
-  ## - RFC-0016 INT-57 / INT-74 (428->431; 429-430 are reserved for other W4
-  ##   work): a fixed-index byte of a rendering, and of a slice or a
-  ##   concatenation over one, lowers to a bit-vector formula (`strByteAt`),
-  ##   and a slice's length to SMT-LIB's definition over its base's length
-  ##   (`strLenOf`), so `($t & "ab")[0 .. 1][0]` holds no string. Verdicts
-  ##   change from `sxUnknown` (the stall backstop) to exact. No key bytes
-  ##   change.
-  ## - RFC-0016 PRC-35 (401->414; 402-413 are reserved for in-flight W4
-  ##   work): `toInt`/`toBiggestInt`, `$` of a float on its faithful
-  ##   sub-domain, `repr` of an integer, float, char and string, and `$` of an
-  ##   enum hole ("") are modelled where they declined. No key bytes change.
-  ## - RFC-0016 PRC-35 (414->416; 415 is reserved for in-flight W4 work):
-  ##   `repr` of a string is exact only where no byte is escaped and declines
-  ##   elsewhere (the `str.replace_all` form was `unknown` for every escape);
-  ##   a user `=dup` that is not the plain copy no longer declines every read
-  ##   when no sink position runs it: an explicit call walks the hook, a copy
-  ##   is the plain copy, and a sink position on its source's provable last
-  ##   read is the move. Any other sink position declines (PRC-44). No key
-  ##   bytes change.
   ## - RFC-0016 PRC-44 (416->418; 417 is reserved for in-flight W4 work): a
   ##   sink position a read of its source is surely reachable from runs the
   ##   type's user `=dup` (the parse walks the hook there, staged behind the
   ##   hook probes), where it declined. No key bytes change.
-  ## - RFC-0016 PRC-45 (418->420; 419 is S8co's): a sink position whose source
-  ##   is read in an `except` branch or a `finally`, a parameter that is not
-  ##   `sink`, and a generic routine's site run the user `=dup` as the
-  ##   compiler's graph has them; a source no read is reachable from moves;
-  ##   a `sink` parameter read after the site is copied only when its type's
-  ##   destructor is not trivial; a value holding the hooked type runs the
-  ##   hook per hooked field and element; a copy of a local is a cursor as
-  ##   the compiler's inference has it. No key bytes change.
-  ## - RFC-0016 PRC-46 (420->424; 421-423 are taken): a `seq` of the hooked
-  ##   type runs the hook per element (a `map`), a generic routine's `sink`
-  ##   parameter read after the site is copied when its instance's type has
-  ##   `tfHasAsgn`, and the cursor inference follows tied last reads, loops,
-  ##   `try`, `defer` and nested routines. No key bytes change.
-  ## - RFC-0016 PRC-47 (424->427; 425-426 are taken): a `seq` of a length the
-  ##   walk does not know runs the hook per element as the compiler's loop,
-  ##   a hook writing a global is folded in index order, a hook or field in
-  ##   another module is bound before the main module, a `sink` tuple or
-  ##   array alias has its flag where it is declared, `except E as e` and
-  ##   iterators and templates are followed by the cursor inference. No key
-  ##   bytes change.
-  ## - RFC-0016 PRC-48 (427->429; 428 is taken): a sink position in the loop
-  ##   body of a `for` over an inline iterator is classified per inlined copy
-  ##   (the compiler's cursor inference reads the inlined tree), and a `for`
-  ##   over a closure iterator is a loop. No key bytes change.
-  ## - RFC-0016 PRC-49 (429->430): a loop variable the compiler makes a
-  ##   cursor (`transf.isSimpleIteratorVar`) is copied at every sink position,
-  ##   a sink of a formal in the yielded expression is keyed by its `yield`,
-  ##   and an iterator with a `try` or a scalar `openArray` formal is read
-  ##   inlined. No key bytes change.
-  ## - RFC-0016 PRC-50 (430->432; 431 is taken): a loop variable every
-  ##   `yield` gives a value made there owns it, `let b = o` of an inlined
-  ##   loop variable owns, and a magic call mutates no argument through a
-  ##   pointer in the cursor inference. No key bytes change.
-  ## - RFC-0016 INT-75 / PRC-51 (432->433): a parenthesised `for`
-  ##   destructuring is read as the flat one and `items`/`pairs` destructure
-  ##   their element (INT-75); the `=dup` shapes PRC-50 left declining are
-  ##   modelled (PRC-51). No key bytes change.
-  ## - RFC-0016 INT-78 (433->437; 434-436 are taken): an `int` part of a seq's
-  ##   tuple or object element is held as the bit-vector of its width, as a
-  ##   `seq[int]` element is, not as an Int. No key bytes change.
-  ## - RFC-0016 INT-79 (437->438): a seq operand of a `for` that is not a
-  ##   variable or a field chain over one (a seq literal) is bound to a
-  ##   temporary once and the loop indexes it; an inline iterator's formal
-  ##   bound as a copy is a local of the expansion to the S8cn `lent` check;
-  ##   `mgetOrPut` with a computed key evaluates it once in the model. No key
-  ##   bytes change.
-  ## - RFC-0016 INT-80 (438->439): seq `&` (`seq & seq`, `seq & T`, `T & seq`)
-  ##   and `add` of an `openArray` (`&=`) are modelled as a concatenation
-  ##   (`iekSeqConcat`, an array lambda per data array) where they declined
-  ##   (`feUnsupportedOp`) or faulted (`add` of a seq). It keys as
-  ##   `Ex<SCC:left:right>`; no existing key bytes change.
-  ## - RFC-0016 INT-80 (439->441; 440 is taken): `sequtils.concat(a, b, ...)`
-  ##   over a varargs bracket is a left fold of `iekSeqConcat`, its elements
-  ##   read in order, where its body was walked; `concat[T]()`, the empty
-  ##   seq, was a compile-time parse error.
-  ##   Self-append (`s.add(s)`, `s &= s`) is pinned as doubling. No existing
-  ##   key bytes change.
   ## - RFC-0016 S8co (PRC-33; 412->419, 413-418 are reserved for other
   ##   branches): item 3:
   ##   auto-possessification next to a character property or an extended
@@ -1172,12 +1039,180 @@ const renderAsChoicesVersion* = "12"
   ##   longer takes a non-final U+0085 / U+2028 / U+2029 lead after it: the
   ##   marked languages (`lkMark`, `skFirst`) had `$` hold before
   ##   `\r\xC2\x85\n`.
-  ## - RFC-0016 INT-85 float (445->446, provisional): a zero-initialised
-  ##   slot of a float `range` excluding 0.0 (`newSeq`, `setLen` growth,
-  ##   `new`'s fields) holds +0.0: a float read site goes through
-  ##   `readRangeConds` as an ordinal one does, so INT-77's interval bounds
-  ##   only a caller's value. "It holds 0.0" was a false `sxUnsat`. No key
+  ## - RFC-0016 PRC-45 (418->420; 419 is S8co's): a sink position whose source
+  ##   is read in an `except` branch or a `finally`, a parameter that is not
+  ##   `sink`, and a generic routine's site run the user `=dup` as the
+  ##   compiler's graph has them; a source no read is reachable from moves;
+  ##   a `sink` parameter read after the site is copied only when its type's
+  ##   destructor is not trivial; a value holding the hooked type runs the
+  ##   hook per hooked field and element; a copy of a local is a cursor as
+  ##   the compiler's inference has it. No key bytes change.
+  ## - RFC-0016 INT-59 / INT-61 / INT-62 (417->421; 418-420 are reserved for
+  ##   other W4 work): a query a float interval argument refutes is asked as
+  ##   `false` (`fpIntervalRefutes`), and a string length bounded by its
+  ##   term's structure gets that bound beside the query
+  ##   (`seqLenBoundFacts`), so a rounded division's range side and a
+  ##   char-built string's overflow side are decided in a few units
+  ##   instead of millions; `pointCheck` and `limitWorldRefuted` cut a solve
+  ##   by their clocks only under a run clock, so under the pin settings
+  ##   their answers are the step bound's; and a query that counts a
+  ##   builtin set's members is asked first with each count a free variable
+  ##   beside the ranges of its `int` views (`cardFreeAbstraction`,
+  ##   `bvViewRangeFacts`), so a packed program's queries after a set row
+  ##   no longer bit-blast the set again (six rows: past 16.5M units, now
+  ##   about 6 times the rows' sum). Verdicts can change from
+  ##   `sxUnknown` to exact. Key bytes change: the default
+  ##   `queryTimeoutMs` is `1_200_000` (was `600_000`), which the default
+  ##   settings' canonical form names.
+  ## - RFC-0016 INT-64 (417->422; 418-421 are reserved for other W4 work):
+  ##   `for a, b in items(c)` over a seq or an array of tuples binds each
+  ##   element to a fresh name and each variable to its field, so
+  ##   `tables.toTable` (`for key, val in items(pairs)`) is walked; it
+  ##   declined `feUnsupportedStmtKind`. Verdicts change from `sxUnknown` to
+  ##   exact. No key bytes change.
+  ## - RFC-0016 INT-66 / INT-67 / INT-70 (422->423): a call of a routine the
+  ##   program declares with a binary `{.magic.}` and no body is the infix of
+  ##   the system routine of that magic and signature (`userMagicRewrite`);
+  ##   a field read through a distinct object that borrows `.` is the base
+  ##   object's field read; a type a template body in the routine declares
+  ##   (no type until expanded) is skipped by the route scan, which stopped
+  ##   the compile ("node has no type"). Verdicts change from `sxUnknown` to
+  ##   exact; a program that did not compile does. No key bytes change.
+  ## - RFC-0016 PRC-46 (420->424; 421-423 are taken): a `seq` of the hooked
+  ##   type runs the hook per element (a `map`), a generic routine's `sink`
+  ##   parameter read after the site is copied when its instance's type has
+  ##   `tfHasAsgn`, and the cursor inference follows tied last reads, loops,
+  ##   `try`, `defer` and nested routines. No key bytes change.
+  ## - RFC-0016 INT-71 (421->425; 422-424 are reserved for other W4 work):
+  ##   the global-route scan reads an `IdentDefs`' type slot as the type its
+  ##   names' symbols carry, not as code. A template's `var x {.gensym.}:
+  ##   seq[int]` keeps `seq[int]` as `[]` over the open choice of every `[]`
+  ##   in scope at the template; the scan took each as a callee, walked into
+  ##   an imported library's hooks and declined every read
+  ##   (`feGlobalRouteUnproved`). Verdicts change from `sxUnknown` to exact.
+  ##   No key bytes change.
+  ## - RFC-0016 INT-72 (412->426; 413-425 are reserved for in-flight W4
+  ##   work): a free `Rune` ranges over int32, its native domain, not
+  ##   [0, 0x10FFFF]: `r.ord > 0x10FFFF` and `r.ord < 0` on a Rune parameter
+  ##   were a false `sxUnsat`. `$r` and `toUTF8(r)` encode as std/unicode
+  ##   does out of range (4/5/6 bytes up to 0x1FFFFF/0x3FFFFFF/0x7FFFFFFF, a
+  ##   negative Rune ""); `size(r)` is modelled (it declined); `Rune(n)`
+  ##   checks int32 (`RangeDefect`, it was a false `sxSat`); an int
+  ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
+  ##   the identity). No key bytes change.
+  ## - RFC-0016 PRC-47 (424->427; 425-426 are taken): a `seq` of a length the
+  ##   walk does not know runs the hook per element as the compiler's loop,
+  ##   a hook writing a global is folded in index order, a hook or field in
+  ##   another module is bound before the main module, a `sink` tuple or
+  ##   array alias has its flag where it is declared, `except E as e` and
+  ##   iterators and templates are followed by the cursor inference. No key
   ##   bytes change.
+  ## - RFC-0016 INT-57 (425->428; 426-427 are reserved for other W4 work):
+  ##   the rendering `$v` of a bit-vector is registered, and its length and
+  ##   its order or equality against another rendering lower to bit-vector
+  ##   formulas over `v` (`strLenOf`, `renderCmp`; a merged `$b` compares by
+  ##   cases, `litCmp`), so the sequence solver no longer decides them and
+  ##   Z3's step counter no longer stalls on them. With no run clock
+  ##   (`queryTimeoutMs = 0`) every step-bounded solve runs under the solver
+  ##   stall backstop (`stallBackstopMs`), a wall deadline for the whole run:
+  ##   a solve it ends is `beSolverUndef` naming it, the walk stops, and the
+  ##   run is `rdQueryTimeout`, not cached. Verdicts change from a hang to
+  ## - RFC-0016 PRC-48 (427->429; 428 is taken): a sink position in the loop
+  ##   body of a `for` over an inline iterator is classified per inlined copy
+  ##   (the compiler's cursor inference reads the inlined tree), and a `for`
+  ##   over a closure iterator is a loop. No key bytes change.
+  ## - RFC-0016 PRC-49 (429->430): a loop variable the compiler makes a
+  ##   cursor (`transf.isSimpleIteratorVar`) is copied at every sink position,
+  ##   a sink of a formal in the yielded expression is keyed by its `yield`,
+  ##   and an iterator with a `try` or a scalar `openArray` formal is read
+  ##   inlined. No key bytes change.
+  ## - RFC-0016 INT-57 / INT-74 (428->431; 429-430 are reserved for other W4
+  ##   work): a fixed-index byte of a rendering, and of a slice or a
+  ##   concatenation over one, lowers to a bit-vector formula (`strByteAt`),
+  ##   and a slice's length to SMT-LIB's definition over its base's length
+  ##   (`strLenOf`), so `($t & "ab")[0 .. 1][0]` holds no string. Verdicts
+  ##   change from `sxUnknown` (the stall backstop) to exact. No key bytes
+  ##   change.
+  ## - RFC-0016 PRC-50 (430->432; 431 is taken): a loop variable every
+  ##   `yield` gives a value made there owns it, `let b = o` of an inlined
+  ##   loop variable owns, and a magic call mutates no argument through a
+  ##   pointer in the cursor inference. No key bytes change.
+  ## - RFC-0016 INT-75 / PRC-51 (432->433): a parenthesised `for`
+  ##   destructuring is read as the flat one and `items`/`pairs` destructure
+  ##   their element (INT-75); the `=dup` shapes PRC-50 left declining are
+  ##   modelled (PRC-51). No key bytes change.
+  ## - RFC-0016 INT-65 (423->434; 424-433 are reserved for other W4 work): a
+  ##   `pointer` holds the address it was converted from (`addr`, a `cast` or
+  ##   conversion of a `ptr`/`ref`) or its nil (`pointerNilTy`, also an
+  ##   uninitialised one), and `refEq` compares addresses of different
+  ##   pointee sorts (nil against either side decides; two non-nil ones
+  ##   decline `heUnresolvedRef`); a `ptr` cast from a `pointer` declines
+  ##   `heUnsafeCast`. A proc value is its routine or closure or nil
+  ##   (`nilClosure`, also an uninitialised proc variable): compared with nil
+  ##   it is decided (`closureEq`), a call through nil declines
+  ##   `ceUnsupportedHof`. Verdicts change from `sxUnknown` to exact. No key
+  ##   bytes change.
+  ## - RFC-0016 INT-76 (434->435): a `c_longdouble` value (a declared local,
+  ##   initialised or not, or an expression of the type) declines
+  ##   `feUnsupportedParamType` and halts the path (`declineLongDouble`, a
+  ##   halting `isUnsupported`, `unHalt`); its reads were a
+  ##   `weInternalWalkerFault` (`eqBV`/`cmpBV`, a field's `FieldDefect`), and
+  ##   an initialised local was walked as an IEEE double, a trusted answer
+  ##   on a type whose value is the C target's. Verdicts change from a fault or a trusted
+  ##   answer to `sxUnknown`. Key bytes change for a halting marker only
+  ##   (`;halt` in its `St<Un:...>`).
+  ## - RFC-0016 INT-77 (426->436; 427-435 are reserved for in-flight
+  ##   work): a float `range` (`range[0.0 .. 1.0]`, `range[-1.5'f32 ..
+  ##   2.5'f32]`, anonymous or named) is classified (it did not compile:
+  ##   `parseRangeBracket` read its bounds as integers) and modelled as the
+  ##   closed IEEE interval in its width wherever the type lands, NaN
+  ##   excluded, -0.0 admitted with 0.0, as Nim's range check is. Its bounds
+  ##   enter a type's key (`Ty<F64:r[..]>`, by bits); a key without a float
+  ##   range is unchanged.
+  ## - RFC-0016 INT-78 (433->437; 434-436 are taken): an `int` part of a seq's
+  ##   tuple or object element is held as the bit-vector of its width, as a
+  ##   `seq[int]` element is, not as an Int. No key bytes change.
+  ## - RFC-0016 INT-79 (437->438): a seq operand of a `for` that is not a
+  ##   variable or a field chain over one (a seq literal) is bound to a
+  ##   temporary once and the loop indexes it; an inline iterator's formal
+  ##   bound as a copy is a local of the expansion to the S8cn `lent` check;
+  ##   `mgetOrPut` with a computed key evaluates it once in the model. No key
+  ##   bytes change.
+  ## - RFC-0016 INT-80 (438->439): seq `&` (`seq & seq`, `seq & T`, `T & seq`)
+  ##   and `add` of an `openArray` (`&=`) are modelled as a concatenation
+  ##   (`iekSeqConcat`, an array lambda per data array) where they declined
+  ##   (`feUnsupportedOp`) or faulted (`add` of a seq). It keys as
+  ##   `Ex<SCC:left:right>`; no existing key bytes change.
+  ## - RFC-0016 INT-82 (436->440, provisional; 437-439 are reserved for
+  ##   in-flight work): an allocation (`new`, `T(...)`) is distinct from
+  ##   every object of the walk's entry state -- a ref parameter, a ref
+  ##   reached through one's fields or seq / table elements, a global's
+  ##   entry value -- (`refProvenanceRoots`, heap_model.nim). `p == n` for a
+  ##   caller's `p` and a fresh `n` was a false `sxSat`. No key bytes change.
+  ## - RFC-0016 INT-80 (439->441; 440 is taken): `sequtils.concat(a, b, ...)`
+  ##   over a varargs bracket is a left fold of `iekSeqConcat`, its elements
+  ##   read in order, where its body was walked; `concat[T]()`, the empty
+  ##   seq, was a compile-time parse error.
+  ##   Self-append (`s.add(s)`, `s &= s`) is pinned as doubling. No existing
+  ##   key bytes change.
+  ## - RFC-0016 INT-83 (440->443, provisional; 441-442 are reserved for
+  ##   in-flight work): Nim's `pointer` is modelled (a parameter, a field,
+  ##   a local: it was `feUnsupportedParamType`): an address of its own sort
+  ##   (`Ref_pointer`), related to each typed sort by the casts
+  ##   (`iekPtrCast`: `cast[pointer](r)`, `pointer(q)`, `cast[ptr T](p)`),
+  ##   which keep the address both ways; objects of two types are two
+  ##   addresses; a location read at two types declines
+  ##   (`heUnresolvedRef`). A `pointer` enters a type's key as `ptr` of its
+  ##   placeholder pointee, and a cast as `Ex<PtrCast:..>`.
+  ## - RFC-0016 INT-84 (443->444, provisional): a holey enum input (a
+  ##   parameter, its fields, elements, table values, set members, a ref
+  ##   cell's fields) ranges over its declared ordinals, not `[low, high]`:
+  ##   a target only a hole reaches was a trusted `sxSat` whose witness no
+  ##   caller can pass. A read site asserts the declared ordinals and 0 (a
+  ##   zero-initialised slot) until the walk lowers a hole it does not see
+  ##   made (a conversion to a holey enum, an opaque call;
+  ##   `enumHolesMade`). A holey enum's ordinals enter a type's key
+  ##   (`Ty<I:..:eo@[..]>`), a conversion to one `Ex<CIW:..h:..>`.
   ## - RFC-0016 INT-85 (444->445, provisional): a zero-initialised slot of
   ##   an enum or `range` whose declared values exclude 0 (`newSeq`,
   ##   `setLen` growth, `new`'s cells, a read through a container) holds 0:
@@ -1187,6 +1222,21 @@ const renderAsChoicesVersion* = "12"
   ##   (`defaultZeroTotal`; `newSeq` of one declined). "It holds 0" was a
   ##   false `sxUnsat`; a caller's value still lies in the domain. No key
   ##   bytes change.
+  ## - RFC-0016 INT-85 float (445->446, provisional): a zero-initialised
+  ##   slot of a float `range` excluding 0.0 (`newSeq`, `setLen` growth,
+  ##   `new`'s fields) holds +0.0: a float read site goes through
+  ##   `readRangeConds` as an ordinal one does, so INT-77's interval bounds
+  ##   only a caller's value. "It holds 0.0" was a false `sxUnsat`. No key
+  ##   bytes change.
+  ## - RFC-0016 INT-86 (444->447, provisional; 445-446 are reserved for
+  ##   in-flight work): a discarded read the C compiler does not load (a
+  ##   path through `.`/`[]`, a comparison, an unchecked conversion or
+  ##   arithmetic: `discard p.n`, `discard p[]`) is not a dereference; a
+  ##   nil `ref`/`ptr` there was a false `sxRaised(NilAccessDefect)` and the
+  ##   label behind it a false refutation. A read into a dead C variable (an
+  ##   unused `let`, `let _ =`, a discarded tuple or `len`) faults at `-O0`
+  ##   and not at `-O2`: a nil on its path declines (`feUnsupportedOp`). A
+  ##   read whose value is used or checked still faults. No key bytes change.
   ## - RFC-0016 INT-87 (444->448, provisional; 445-447 reserved for the
   ##   in-flight INT-85/INT-86 lanes): a `cstring` is held by value
   ##   (`tCString`: nil or its bytes, no NUL) instead of declining
@@ -1197,56 +1247,6 @@ const renderAsChoicesVersion* = "12"
   ##   `cstring(s)` of a held string and a content read beside a possible
   ##   alias write decline by name. A cstring literal is a value of the
   ##   tuple (it was a plain string), so a key holding one changes.
-  ## - RFC-0016 INT-84 (443->444, provisional): a holey enum input (a
-  ##   parameter, its fields, elements, table values, set members, a ref
-  ##   cell's fields) ranges over its declared ordinals, not `[low, high]`:
-  ##   a target only a hole reaches was a trusted `sxSat` whose witness no
-  ##   caller can pass. A read site asserts the declared ordinals and 0 (a
-  ##   zero-initialised slot) until the walk lowers a hole it does not see
-  ##   made (a conversion to a holey enum, an opaque call;
-  ##   `enumHolesMade`). A holey enum's ordinals enter a type's key
-  ##   (`Ty<I:..:eo@[..]>`), a conversion to one `Ex<CIW:..h:..>`.
-  ## - RFC-0016 INT-83 (440->443, provisional; 441-442 are reserved for
-  ##   in-flight work): Nim's `pointer` is modelled (a parameter, a field,
-  ##   a local: it was `feUnsupportedParamType`): an address of its own sort
-  ##   (`Ref_pointer`), related to each typed sort by the casts
-  ##   (`iekPtrCast`: `cast[pointer](r)`, `pointer(q)`, `cast[ptr T](p)`),
-  ##   which keep the address both ways; objects of two types are two
-  ##   addresses; a location read at two types declines
-  ##   (`heUnresolvedRef`). A `pointer` enters a type's key as `ptr` of its
-  ##   placeholder pointee, and a cast as `Ex<PtrCast:..>`.
-  ## - RFC-0016 INT-82 (436->440, provisional; 437-439 are reserved for
-  ##   in-flight work): an allocation (`new`, `T(...)`) is distinct from
-  ##   every object of the walk's entry state -- a ref parameter, a ref
-  ##   reached through one's fields or seq / table elements, a global's
-  ##   entry value -- (`refProvenanceRoots`, heap_model.nim). `p == n` for a
-  ##   caller's `p` and a fresh `n` was a false `sxSat`. No key bytes change.
-  ## - RFC-0016 INT-77 (426->436; 427-435 are reserved for in-flight
-  ##   work): a float `range` (`range[0.0 .. 1.0]`, `range[-1.5'f32 ..
-  ##   2.5'f32]`, anonymous or named) is classified (it did not compile:
-  ##   `parseRangeBracket` read its bounds as integers) and modelled as the
-  ##   closed IEEE interval in its width wherever the type lands, NaN
-  ##   excluded, -0.0 admitted with 0.0, as Nim's range check is. Its bounds
-  ##   enter a type's key (`Ty<F64:r[..]>`, by bits); a key without a float
-  ##   range is unchanged.
-  ## - RFC-0016 INT-72 (412->426; 413-425 are reserved for in-flight W4
-  ##   work): a free `Rune` ranges over int32, its native domain, not
-  ##   [0, 0x10FFFF]: `r.ord > 0x10FFFF` and `r.ord < 0` on a Rune parameter
-  ##   were a false `sxUnsat`. `$r` and `toUTF8(r)` encode as std/unicode
-  ##   does out of range (4/5/6 bytes up to 0x1FFFFF/0x3FFFFFF/0x7FFFFFFF, a
-  ##   negative Rune ""); `size(r)` is modelled (it declined); `Rune(n)`
-  ##   checks int32 (`RangeDefect`, it was a false `sxSat`); an int
-  ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
-  ##   the identity). No key bytes change.
-  ## - RFC-0016 INT-86 (444->447, provisional; 445-446 are reserved for
-  ##   in-flight work): a discarded read the C compiler does not load (a
-  ##   path through `.`/`[]`, a comparison, an unchecked conversion or
-  ##   arithmetic: `discard p.n`, `discard p[]`) is not a dereference; a
-  ##   nil `ref`/`ptr` there was a false `sxRaised(NilAccessDefect)` and the
-  ##   label behind it a false refutation. A read into a dead C variable (an
-  ##   unused `let`, `let _ =`, a discarded tuple or `len`) faults at `-O0`
-  ##   and not at `-O2`: a nil on its path declines (`feUnsupportedOp`). A
-  ##   read whose value is used or checked still faults. No key bytes change.
   ## - RFC-0016 INT-89 (447->449, provisional; 448 is reserved for
   ##   in-flight work): a discarded call returning `var T`/`lent T` computes
   ##   an address, not a read: its callee (registered `#viewaddr`) runs its
@@ -1266,6 +1266,17 @@ const renderAsChoicesVersion* = "12"
   ##   `sxRaised(NilAccessDefect)`); an unused local copying a view's
   ##   location is the optimiser's (`#viewdead`: a nil on it declines; it
   ##   was a nil-access claim, `-O2` returns). No key bytes change.
+  ## - RFC-0016 INT-90 (448->451; 449-450 are reserved for in-flight K9d
+  ##   work; provisional): two typed views of one address agree byte-wise.
+  ##   A read or a write of an exact-layout view (a fixed-width integer, a
+  ##   float, a flat padding-free object of those) at an address the run
+  ##   also holds at another such sort of the `pointer` space relates the two
+  ##   sorts' heaps at that address (`crossSortLink`, `crossSortPropagate`,
+  ##   runtime_heap.nim; the design is at `crossSortDesyncKey`,
+  ##   heap_model.nim): `a[] == 5 and b[] > 1.0` over a `ptr int` and a
+  ##   `ptr float` at one address is `sxUnsat` (it was an untrusted, lossy
+  ##   `sxSat`), and a write at one sort is read at the other. No key bytes
+  ##   change.
   ## - RFC-0016 INT-92 (450->452, provisional; 451 is reserved): INT-86's
   ##   optimiser class across a call. A call whose value nothing reads (a
   ##   discard, a dead local) registers its callee under `#resultdead`; if
@@ -1281,17 +1292,6 @@ const renderAsChoicesVersion* = "12"
   ##   object's other fields: `#resultdead:<f>`), and a call forwarded into
   ##   such a result. Each was a false `sxRaised(NilAccessDefect)` (`-O0`
   ##   faults, `-O2` returns); a nil there now declines. No key bytes change.
-  ## - RFC-0016 INT-90 (448->451; 449-450 are reserved for in-flight K9d
-  ##   work; provisional): two typed views of one address agree byte-wise.
-  ##   A read or a write of an exact-layout view (a fixed-width integer, a
-  ##   float, a flat padding-free object of those) at an address the run
-  ##   also holds at another such sort of the `pointer` space relates the two
-  ##   sorts' heaps at that address (`crossSortLink`, `crossSortPropagate`,
-  ##   runtime_heap.nim; the design is at `crossSortDesyncKey`,
-  ##   heap_model.nim): `a[] == 5 and b[] > 1.0` over a `ptr int` and a
-  ##   `ptr float` at one address is `sxUnsat` (it was an untrusted, lossy
-  ##   `sxSat`), and a write at one sort is read at the other. No key bytes
-  ##   change.
   ## - RFC-0016 INT-90b (451->454; 452-453 reserved; provisional): a view
   ##   object is laid out at the offsets the compiler gives its fields for
   ##   the target (`IRType.cFieldOffsets`, `macros.getOffset`), so a padded

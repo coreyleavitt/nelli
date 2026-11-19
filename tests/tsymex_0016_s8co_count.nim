@@ -110,7 +110,7 @@ suite "S8co item 9: count of a set[char], overlapping count":
     check runs > 1000
 
   test "a set[char] count":
-    check parseInt(symexWalkerVersion) >= 387
+    check parseInt(symexWalkerVersion) >= 419
     check pinFind(setPinned, tLabel("co_cnt_set_pin")).status == sxUnsat
     check pinFind(setPinnedSat, tLabel("co_cnt_set_pin_sat")).status == sxSat
     check symexFind(setAgrees, tLabel("co_cnt_set_ref")).status != sxSat

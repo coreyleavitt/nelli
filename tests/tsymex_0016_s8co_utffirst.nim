@@ -128,7 +128,7 @@ suite "S8co item 9: replace's first bytes in UTF mode":
     check anyPre == {'\xc2'}
 
   test "the walker decides a symbolic call":
-    check parseInt(symexWalkerVersion) >= 388
+    check parseInt(symexWalkerVersion) >= 419
     check pinFind(utfFirst, tLabel("co_utf_first")).status == sxUnsat
     check pinFind(utfFirstSat, tLabel("co_utf_first_sat")).status == sxSat
     check pinFind(utfRange, tLabel("co_utf_range")).status == sxUnsat

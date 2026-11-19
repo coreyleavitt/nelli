@@ -120,7 +120,7 @@ suite "S8co item 9: replace's facts with an unmarked SKIP:NAME":
       check "abc".replace(re(carry), "-") == "ab-"
 
   test "the walker decides a symbolic call":
-    check parseInt(symexWalkerVersion) >= 390
+    check parseInt(symexWalkerVersion) >= 419
     check pinFind(skipSure, tLabel("co_skn_sure")).status == sxUnsat
     check pinFind(skipFirst, tLabel("co_skn_first")).status == sxUnsat
     check pinFind(skipSat, tLabel("co_skn_sat")).status == sxSat

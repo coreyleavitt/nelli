@@ -103,7 +103,7 @@ suite "S8co item 4: a kept ignore_skip_arg under a limit":
     check kept > 0
 
   test "the walker reads them":
-    check parseInt(symexWalkerVersion) >= 380
+    check parseInt(symexWalkerVersion) >= 419
     let rx = re"(*LIMIT_MATCH=5)(?:a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x)+|c"
     check "abab".find(rx) == -1
     check pinFind(keptSym, tLabel("co_kept")).status == sxSat

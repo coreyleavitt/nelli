@@ -1413,7 +1413,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## owner; 452-453 reserved; provisional): 451->454.
     ## RFC-0016 int6 + INT-93 (a local's address is an object of its own;
     ## INT-80's seq & T element fix): 454->455.
-    check symexWalkerVersion == "455"
+    ## RFC-0016 INT-90d (a view's fact and splice at the program's own
+    ## alias; a splice's bit-vector recorded): 455->456.
+    check symexWalkerVersion == "456"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

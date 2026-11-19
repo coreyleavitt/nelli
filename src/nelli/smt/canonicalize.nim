@@ -1318,8 +1318,16 @@ const renderAsChoicesVersion* = "12"
   ##   INT-83 met INT-65; so was a `ptr float` parameter's `pointer` equal
   ##   to a local's, and a local's equal to a `new` object's. The key adds `;frame=<off>` to such an `isNew`. Also INT-80's
   ##   `seq & T` tells a seq element from a whole seq operand (9bb7738c).
+  ## - RFC-0016 INT-90d (455->456): a cross-sort view's read fact and splice
+  ##   are made at the program's own alias where the path condition holds
+  ##   it (`crossSortAddr`, runtime_heap.nim: the fact guarded by that
+  ##   equality), and a splice into an Int-sorted cell records its
+  ##   bit-vector (`bitsAsLeaf`, `intOfBV`), so a store through one view
+  ##   read back through the other is ground bit-vector terms, not an array
+  ##   alias under `int2bv(bv2int(..))` (a padded object's store-then-read
+  ##   was 143-198 s and `sxUnknown`). No key bytes change.
 
-const symexWalkerVersion* = "455"
+const symexWalkerVersion* = "456"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

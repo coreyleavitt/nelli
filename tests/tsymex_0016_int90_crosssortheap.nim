@@ -21,6 +21,15 @@
 ## below. A pair the model cannot relate exactly (a bool, an enum, a ref, a
 ## string, an object with padding or a run-type header) keeps INT-88's lossy,
 ## untrusted verdict.
+##
+## INT-90d (456): the padded object's store-then-read (`padWrite`) and its
+## free padding (`padGap`) took 143-198 s to an `sxUnknown` and over 345 s
+## to no answer: the splice was stored at the mapped address
+## `@fromAddr_U(@toAddr_T(p))` while the program read `q`, so the read was
+## an array alias Z3 had to search for under an `int2bv` of a `bv2int`.
+## A view's fact and splice now use the program's own alias where the path
+## holds it (`crossSortAddr`), and a splice into an Int-sorted cell records
+## its bit-vector (`bitsAsLeaf`): both answer in well under a second.
 import std/[unittest, strutils]
 import nelli/symex
 import ./s8cu_helpers
@@ -444,4 +453,4 @@ suite "INT-90: two sorts' heaps at one address":
     check r.status == sxSat
 
   test "the walker's version floor":
-    check parseInt(symexWalkerVersion) >= 454
+    check parseInt(symexWalkerVersion) >= 456

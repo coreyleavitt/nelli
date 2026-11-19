@@ -2093,6 +2093,18 @@ proc leafBits(ctx: Z3Context; v: SymVal; size: int): Z3AnyAst =
   of svFloat64:
     wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fpa_to_ieee_bv(ctx.raw, v.fp64.raw))
   of svInt:
+    # RFC-0016 INT-90d: an Int a bit-vector was converted to (a splice's
+    # leaf, `bitsAsLeaf`; a stored bit-vector, `heapStoreValue`) is that
+    # bit-vector's bytes, unconverted (`intOfBV`): `int2bv(bv2int(v))` is
+    # exact but Z3 decides it by search. Either signedness spells the same
+    # bytes at the bit-vector's own width.
+    let k = cast[uint](cast[pointer](v.zi.raw))
+    if k in intOfBV:
+      let e = intOfBV[k]
+      if cast[pointer](e.zi.raw) == cast[pointer](v.zi.raw) and
+         e.bv.kind in {svBV8, svBV16, svBV32, svBV64} and
+         svScalarSize(e.bv) == size:
+        return wrap[Z3AnyAst](ctx, rawAnyAstOf(e.bv))
     wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int2bv(ctx.raw, cuint(size * 8),
                                                    v.zi.raw))
   else: wrap[Z3AnyAst](ctx, rawAnyAstOf(v))
@@ -2145,6 +2157,15 @@ proc bitsAsLeaf(ctx: Z3Context; bits: Z3AnyAst; size: int; ty: IRType): SymVal =
     else: liftBV(wrap[Z3BitVec[64]](ctx, bits.raw), false)
   var scratch: seq[Z3Bool]
   let proto = allocateSym(ty, "__xsortProto", scratch)
+  if intHeapCell(ty):
+    # RFC-0016 INT-90d: an Int-sorted cell holds the bits' signed value
+    # through `heapStoreValue`, which records the conversion (`intOfBV`),
+    # so a later read of the cell meets these bits again, unconverted
+    # (`leafBits`, `stampedIntToBV`), and a store-then-read through the
+    # other view is ground bit-vector terms.
+    var sbv = bv
+    sbv.signed = true
+    return heapStoreValue(sbv, proto, ty)
   heapStoreValue(ptrReinterpret(ctx, bv, proto), proto, ty)
 
 proc crossSortOthers(typeId: string):
@@ -2166,6 +2187,52 @@ proc crossSortDesynced(p: Path): bool =
     if k == crossSortDesyncKey or k.startsWith(heapEpochPrefix): return true
   false
 
+const crossSortAliasScan = 4096
+  ## RFC-0016 INT-90d. The most path-condition subterms `crossSortAddr`
+  ## visits looking for an alias; past it, the mapped address is used.
+
+proc crossSortAddr(ctx: Z3Context; p: Path; refAst: Z3AnyAst;
+                   fromTy, toTy: IRType):
+    tuple[at: Z3AnyAst; guard: Option[Z3Bool]] =
+  ## RFC-0016 INT-90d. The address `refAst` (of `fromTy`'s sort) as an
+  ## address of `toTy`'s sort on `p`. Where the path condition holds, as a
+  ## conjunct, the program's own comparison of the two as `pointer`s
+  ## (`@toAddr_T(refAst) == @toAddr_U(r)`, either way round), it is `r`,
+  ## and `guard` is that equality: under it `r` IS
+  ## `@fromAddr_U(@toAddr_T(refAst))` (`pointerAddrOf`'s round-trip fact
+  ## for `r`), so a store or a read at `r` is one at the mapped address, and
+  ## the program's own reads at `r` meet the spliced value as a ground
+  ## `select(store(h, r, v), r)` (`storedAt`) instead of an array alias Z3
+  ## must search for, under an `int2bv` of a `bv2int` (the F5 shape: 143 s
+  ## and `unknown` for the padded object's store-then-read). Otherwise the
+  ## mapped address (`pointerMapAddr`), no guard.
+  let tT = "@toAddr_" & refPointeeTypeId(fromTy)
+  let tU = "@toAddr_" & refPointeeTypeId(toTy)
+  let refId = astId(ctx, refAst.raw)
+  proc unaryOf(t: Z3AnyAst; name: string): Option[Z3AnyAst] =
+    if getAstKind(t) != akApp: return
+    let (d, args) = unpackApp(t)
+    if args.len == 1 and declName(ctx, d) == name: return some(args[0])
+  var open: seq[Z3AnyAst]
+  for c in p.pc: open.add wrap[Z3AnyAst](ctx, c.raw)
+  var seen = 0
+  while open.len > 0 and seen < crossSortAliasScan:
+    let t = open.pop()
+    inc seen
+    if getAstKind(t) != akApp: continue
+    let (d, args) = unpackApp(t)
+    let nm = declName(ctx, d)
+    if nm == "and":
+      for x in args: open.add x
+    elif nm == "=" and args.len == 2:
+      for (x, y) in [(args[0], args[1]), (args[1], args[0])]:
+        let mine = unaryOf(x, tT)
+        if mine.isNone or astId(ctx, mine.get.raw) != refId: continue
+        let other = unaryOf(y, tU)
+        if other.isSome:
+          return (other.get, some(wrap[Z3Bool](ctx, t.raw)))
+  (pointerMapAddr(ctx, refAst, fromTy, toTy), none(Z3Bool))
+
 proc crossSortLink(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
                    refAst: Z3AnyAst) =
   ## RFC-0016 INT-90. At a read of the sort `typeId` at `refAst` on `p`: the
@@ -2182,7 +2249,10 @@ proc crossSortLink(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
   if others.len == 0 or crossSortDesynced(p): return
   let refSort = allocRefSort(ctx, ty)
   for o in others:
-    let mapped = pointerMapAddr(ctx, refAst, ty, o.ty)
+    # RFC-0016 INT-90d: at the program's own alias where the path has one
+    # (`crossSortAddr`); the fact is then that alias's consequence, true
+    # wherever the unguarded fact at the mapped address is.
+    let (mapped, guard) = crossSortAddr(ctx, p, refAst, ty, o.ty)
     let oSort = allocRefSort(ctx, o.ty)
     for a in mine:
       for b in o.leaves:
@@ -2195,7 +2265,8 @@ proc crossSortLink(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
                                 mapped, b.ty)
         let ba = bitsAt(ctx, leafBits(ctx, va, a.size), a.off, a.size, lo, hi)
         let bb = bitsAt(ctx, leafBits(ctx, vb, b.size), b.off, b.size, lo, hi)
-        addCrossSortFact(ctx, wrap[Z3Bool](ctx, checkedEq(ctx, ba.raw, bb.raw)))
+        let eq = wrap[Z3Bool](ctx, checkedEq(ctx, ba.raw, bb.raw))
+        addCrossSortFact(ctx, if guard.isSome: implies(guard.get, eq) else: eq)
 
 proc crossSortPropagate(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
                         refAst: Z3AnyAst; leafKey: string; valSV: SymVal;
@@ -2220,7 +2291,10 @@ proc crossSortPropagate(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
   let a = leaf.get
   let newBits = leafBits(ctx, valSV, a.size)
   for o in others:
-    let mapped = pointerMapAddr(ctx, refAst, ty, o.ty)
+    # RFC-0016 INT-90d: the store is on `p`, whose condition holds the
+    # alias where `crossSortAddr` finds one, so it writes the program's own
+    # address and a read there meets the spliced value (`storedAt`).
+    let mapped = crossSortAddr(ctx, p, refAst, ty, o.ty).at
     let oSort = allocRefSort(ctx, o.ty)
     for b in o.leaves:
       let lo = max(a.off, b.off)

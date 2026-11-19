@@ -791,8 +791,7 @@ suite "RFC-0016 CRH-07: raw-handle census (synthetic sources)":
           inc declared
           check t.split({' ', '*'})[0] in rawTypes
       check declared > 20
-    else:
-      skip()
+    # no `_deps/z3` (a checkout without its dependencies): nothing to read
 
 suite "RFC-0016 CRH-07: raw-handle census (the tree)":
   test "every raw-handle site of src/nelli is audited and every entry exists":

@@ -16587,7 +16587,7 @@ const compoundStmtKinds = {isBlock, isIf, isWhile, isTry}
   ## bare, never reconciled over their span (`reconcileCells`).
 proc evalCondSynced(p: Path; cond: IRExpr;
                     w: var WalkCtx): (Z3Bool, seq[Path])
-  ## RFC-0016 review R5-2 fwd decl (defined beside `walkCapSynced`).
+  ## RFC-0016 review R5-2 fwd decl (defined beside `walk`).
 proc evalReturnSynced(p: Path; value: IRExpr; proto: Option[SymVal];
                       w: var WalkCtx): seq[Path]
   ## RFC-0016 review R7-1 fwd decl (defined beside `evalCondSynced`).
@@ -23290,7 +23290,7 @@ func indexesInto(src: CellProducer; name: string): bool =
 
 func producerOf(stmt: IRStmt): CellProducer =
   ## RFC-0016 review R6. The facts `reconcileCells` reads of a leaf statement
-  ## (`walkCapSynced`); a compound one is never reconciled.
+  ## (`walk`, `leaveStmt`); a compound one is never reconciled.
   doAssert stmt.kind notin compoundStmtKinds   # `reconcileCells`
   case stmt.kind
   of isCall:
@@ -24146,7 +24146,7 @@ proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
   ## reconcile points are every place the walker evaluates source code in a
   ## frame:
   ##
-  ## * every leaf statement (`walkCapSynced`): every `IRStmtKind` outside
+  ## * every leaf statement (`walk`, `leaveStmt`): every `IRStmtKind` outside
   ##   `compoundStmtKinds`, `isCall` included (a callee's effects reach the
   ##   caller's cells only through its statement);
   ## * every guard a compound evaluates itself (`evalCondSynced`): each
@@ -24245,54 +24245,6 @@ proc reconcileCells(src: CellProducer; outs0: seq[Path]; depth: int;
   if w.frame.addrCells.len > 0:
     result = syncAddrCells(src, result, depth, w)   # RFC-0005 S8ax
     result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
-
-proc walkCapSynced(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
-  ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
-  ## current frame (`CallFrameCtx.capCells`) equal to its env cell.
-  ##
-  ## Nim keeps a variable a closure captures by reference in a heap env the
-  ## closure shares with its frame: a write through either is seen by the
-  ## other, wherever the closure is applied. The walk keeps the local as
-  ## the frame's own binding and the cell (`capCellName`, a `__gl:` name, so
-  ## every call threads it as it threads a global) as the one the closure
-  ## reads and writes away from the frame. After each statement the side
-  ## that changed since it began wins: a write to the local is copied to
-  ## the cell; a write to the cell (a call applied the closure) is copied
-  ## to the local. Declined (`ceCaptureByRefUnmodelled`), the local's value
-  ## winning:
-  ##
-  ## * both written, to different values: two writes the walk cannot order;
-  ## * the cell written by anything but a call statement (an expression's
-  ##   closure call applied the closure away from here): the statement may
-  ##   have read the local before the write;
-  ## * a call statement passing a capture by address (`var`, `addr`): Nim's
-  ##   parameter IS the cell, which the callee's copy is not.
-  ##
-  ## A raise resuming here takes the cell's value (`syncCapCellsFromCells`).
-  ##
-  ## Likewise each address-taken variable and its heap cell
-  ## (`syncAddrCells`), and each element cell and its element
-  ## (`syncElemCells`, RFC-0005 S8be). Reconciled where an effect is
-  ## produced: each leaf statement (here), each guard (`evalCondSynced`) and
-  ## each `return` value (`evalReturnSynced`).
-  ## Only a leaf statement is bracketed: a compound one is walked bare, its
-  ## leaves and guards reconciling themselves (`reconcileCells`). It still takes a depth, so a path that
-  ## leaves it early (a `break`) carrying an inner leaf's snapshots rejoins
-  ## where every snapshot is shallower, and the next one drops them
-  ## (`dropSnapshots`) rather than reading them as its own.
-  if stmt == nil or paths.len == 0 or not frameHasCells(paths, w):
-    return walkStmt(stmt, paths, w).live
-  if stmt.kind in compoundStmtKinds:
-    inc w.capSyncDepth
-    result = walkStmt(stmt, paths, w).live
-    dec w.capSyncDepth
-    return
-  inc w.capSyncDepth
-  let depth = w.capSyncDepth
-  let ins = snapCells(paths, depth, w)
-  let outs0 = walkStmt(stmt, ins, w).live
-  dec w.capSyncDepth
-  reconcileCells(producerOf(stmt), outs0, depth, w)
 
 template evalReconciled(p: Path; w: var WalkCtx; producer: CellProducer;
                         q, lowering: untyped): seq[Path] =
@@ -24501,9 +24453,89 @@ proc taintAll(paths: seq[Path]; taint: Taint;
   for p in paths:
     result.add forkPathTainted(p, p.pc, p.env, carriedDegrade(taint, ub))
 
+type
+  StmtShape = enum
+    ## RFC-0016 INT-34. How `enterStmt` bracketed a statement's capture cells.
+    ssBare       ## the frame keeps no cells (or nothing to walk): bare
+    ssCompound   ## a compound statement: a depth, no snapshot, no reconcile
+    ssLeaf       ## a leaf statement: snapshotted, then reconciled
+
+  StmtBracket = object
+    ## RFC-0016 INT-34 (0005 review R2-14). What `enterStmt` set aside and
+    ## set up around one statement, for `leaveStmt` to settle and put back.
+    outerPending: PendingDegrade
+      ## The lowering queue the enclosing statement left (`setAsidePending`).
+    outerStray: Taint
+    outerStrayUb: set[UbKind]
+      ## The enclosing statement's stray (`w.stmtStrayTaint`/`stmtStrayUb`).
+    since: StmtMark
+      ## Where the statement began: its exits and findings are those after.
+    shape: StmtShape
+    depth: int
+      ## The capture-sync depth of the snapshot (`ssLeaf` only).
+    ins: seq[Path]
+      ## The paths the statement walks: the entry paths with the set-aside
+      ## queue joined, and snapshotted (`ssLeaf`).
+
+proc enterStmt(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): StmtBracket =
+  ## RFC-0016 INT-34. The opening half of `walk`'s statement bracket, in
+  ## order: set the caller's lowering queue and stray aside, mark where the
+  ## statement began, taint the entry paths with the set-aside queue, and
+  ## snapshot the frame's cells for a leaf statement (`snapCells`). A nil
+  ## statement, no path, or a frame with no cells is walked bare; a compound
+  ## statement takes a depth but no snapshot (`walk` says why).
+  result.outerPending = setAsidePending()
+  result.outerStray = w.stmtStrayTaint
+  result.outerStrayUb = w.stmtStrayUb
+  w.stmtStrayTaint = {}
+  w.stmtStrayUb = {}
+  result.since = w.stmtMark
+  result.ins =
+    if result.outerPending.taint == {}: paths
+    else: taintAll(paths, result.outerPending.taint, result.outerPending.ub)
+  if stmt == nil or result.ins.len == 0 or not frameHasCells(result.ins, w):
+    result.shape = ssBare
+  elif stmt.kind in compoundStmtKinds:
+    inc w.capSyncDepth
+    result.shape = ssCompound
+  else:
+    inc w.capSyncDepth
+    result.shape = ssLeaf
+    result.depth = w.capSyncDepth
+    result.ins = snapCells(result.ins, result.depth, w)
+
+proc leaveStmt(stmt: IRStmt; b: StmtBracket; outs: seq[Path];
+               w: var WalkCtx): seq[Path] =
+  ## RFC-0016 INT-34. The closing half of `walk`'s statement bracket, in
+  ## order: reconcile a leaf statement's cells against its snapshot
+  ## (`reconcileCells`), take the stray (the statement's own plus whatever
+  ## is still queued, which picks up anything the reconcile queued, e.g.
+  ## `syncAddrCells`' `mkTableSet` lowering), put the caller's queue and
+  ## stray back, and stamp the stray on every path the statement produced.
+  result = outs
+  case b.shape
+  of ssBare: discard
+  of ssCompound: dec w.capSyncDepth
+  of ssLeaf:
+    dec w.capSyncDepth
+    result = reconcileCells(producerOf(stmt), outs, b.depth, w)
+  let left = takePending()
+  let stray = w.stmtStrayTaint + left.taint
+  let strayUb = w.stmtStrayUb + left.ub
+  restorePending(b.outerPending)
+  w.stmtStrayTaint = b.outerStray
+  w.stmtStrayUb = b.outerStrayUb
+  if stray != {}:
+    result = taintAll(result, stray, strayUb)
+    stampStatementSince(w, b.since, stray, strayUb)
+
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
-  ## RFC-0005 review R1-04, R2 (SD1/SD2), R3 (T1). `walkCapSynced`, with the
-  ## statement as the unit of the pending-lowering-taint discipline. A
+  ## `walkStmt`, bracketed as one statement (`enterStmt`, `leaveStmt`;
+  ## RFC-0016 INT-34 folded `walkCapSynced` into it, 0005 review R2-14). The
+  ## bracket keeps two disciplines.
+  ##
+  ## **The lowering queue** (RFC-0005 review R1-04, R2 (SD1/SD2), R3 (T1)).
+  ## The statement is the unit of the pending-lowering-taint discipline. A
   ## lowering decline cannot fork a path from inside `lower`: it queues its
   ## taint (`queueDegrade`) for the walk arm that called `lower` to
   ## drain onto the path it lowered for.
@@ -24540,25 +24572,44 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0016 INT-36 (R3-17): and the findings it filed (`stampStatementSince`):
   ## a hit solved mid-statement, before the stray was found, was filed from a
   ## path that did not carry it yet.
-  let outerPending = setAsidePending()
-  let outerStray = w.stmtStrayTaint
-  let outerStrayUb = w.stmtStrayUb
-  w.stmtStrayTaint = {}
-  w.stmtStrayUb = {}
-  let since = w.stmtMark
-  result =
-    if outerPending.taint == {}: walkCapSynced(stmt, paths, w)
-    else: walkCapSynced(stmt, taintAll(paths, outerPending.taint,
-                                       outerPending.ub), w)
-  let left = takePending()
-  let stray = w.stmtStrayTaint + left.taint
-  let strayUb = w.stmtStrayUb + left.ub
-  restorePending(outerPending)
-  w.stmtStrayTaint = outerStray
-  w.stmtStrayUb = outerStrayUb
-  if stray != {}:
-    result = taintAll(result, stray, strayUb)
-    stampStatementSince(w, since, stray, strayUb)
+  ##
+  ## **The capture cells** (RFC-0005 S8ax). Each by-reference capture of the
+  ## current frame (`CallFrameCtx.capCells`) is kept equal to its env cell.
+  ##
+  ## Nim keeps a variable a closure captures by reference in a heap env the
+  ## closure shares with its frame: a write through either is seen by the
+  ## other, wherever the closure is applied. The walk keeps the local as
+  ## the frame's own binding and the cell (`capCellName`, a `__gl:` name, so
+  ## every call threads it as it threads a global) as the one the closure
+  ## reads and writes away from the frame. After each statement the side
+  ## that changed since it began wins: a write to the local is copied to
+  ## the cell; a write to the cell (a call applied the closure) is copied
+  ## to the local. Declined (`ceCaptureByRefUnmodelled`), the local's value
+  ## winning:
+  ##
+  ## * both written, to different values: two writes the walk cannot order;
+  ## * the cell written by anything but a call statement (an expression's
+  ##   closure call applied the closure away from here): the statement may
+  ##   have read the local before the write;
+  ## * a call statement passing a capture by address (`var`, `addr`): Nim's
+  ##   parameter IS the cell, which the callee's copy is not.
+  ##
+  ## A raise resuming here takes the cell's value (`syncCapCellsFromCells`).
+  ##
+  ## Likewise each address-taken variable and its heap cell
+  ## (`syncAddrCells`), and each element cell and its element
+  ## (`syncElemCells`, RFC-0005 S8be). Reconciled where an effect is
+  ## produced: each leaf statement (`leaveStmt`), each guard
+  ## (`evalCondSynced`) and each `return` value (`evalReturnSynced`).
+  ## Only a leaf statement is snapshotted and reconciled: a compound one is
+  ## walked bare, its leaves and guards reconciling themselves
+  ## (`reconcileCells`). It still takes a depth, so a path that leaves it
+  ## early (a `break`) carrying an inner leaf's snapshots rejoins where
+  ## every snapshot is shallower, and the next one drops them
+  ## (`dropSnapshots`) rather than reading them as its own.
+  var b = enterStmt(stmt, paths, w)
+  let outs = walkStmt(stmt, move b.ins, w).live
+  leaveStmt(stmt, b, outs, w)
 
 # ---- Statement exit-taint test hook (H1 pattern) -----------------------------
 # `Path`/`WalkCtx` are private to the runtime unit, so -- as

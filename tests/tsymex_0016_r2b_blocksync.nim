@@ -240,8 +240,20 @@ suite "R5-2: reconciled only where effects are produced":
       check procBody(p).contains("src: CellProducer")
       check not procBody(p).contains("IRStmt")
     check procBody("producerOf").contains("doAssert stmt.kind notin compoundStmtKinds")
-    check procBody("walkCapSynced").contains("reconcileCells(producerOf(stmt),")
-    check procBody("walkCapSynced").contains("if stmt.kind in compoundStmtKinds:")
+    # RFC-0016 INT-34: the statement's own reconcile is `walk`'s bracket.
+    # `leaveStmt` reconciles only a statement `enterStmt` shaped `ssLeaf`,
+    # and `enterStmt` shapes one so only once a compound is ruled out.
+    let enter = procBody("enterStmt")
+    let leave = procBody("leaveStmt")
+    check leave.count("reconcileCells(") == 1
+    check leave.contains("reconcileCells(producerOf(stmt),")
+    check leave.contains("of ssLeaf:")
+    check leave.find("of ssLeaf:") < leave.find("reconcileCells(producerOf(stmt),")
+    check enter.count("result.shape = ssLeaf") == 1
+    check enter.contains("elif stmt.kind in compoundStmtKinds:")
+    check enter.find("elif stmt.kind in compoundStmtKinds:") <
+          enter.find("result.shape = ssLeaf")
+    check not procBody("walk").contains("reconcileCells(")
   test "the per-span machinery is gone":
     for id in ["reconciledHere", "joinedExitMask", "blockJoinedExits"]:
       check id notin runtimeCode

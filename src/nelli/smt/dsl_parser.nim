@@ -28239,7 +28239,7 @@ proc dupExpand(n: NimNode): NimNode =
       if dupDirectArg(a): direct.add (d[j], a)
       else: result.add newTree(nnkFastAsgn, d[j], copyNimTree(a))
       inc k
-  proc subst(x: NimNode): NimNode =
+  proc substYield(x: NimNode): NimNode =
     if x.kind == nnkSym:
       for (f, a) in direct:
         if x == f: return copyNimTree(a)
@@ -28253,14 +28253,14 @@ proc dupExpand(n: NimNode): NimNode =
                newTree(nnkPragmaExpr, copyNimTree(n[0]),
                        newTree(nnkPragma, ident(dupOwnsPragma)))
              else: copyNimTree(n[0])),
-            newEmptyNode(), subst(x[0])))
-        else: newTree(nnkFastAsgn, copyNimTree(n[0]), subst(x[0])),
+            newEmptyNode(), substYield(x[0])))
+        else: newTree(nnkFastAsgn, copyNimTree(n[0]), substYield(x[0])),
         copyNimTree(n[^1]))
       result.copyLineInfo(x)
       return
     result = copyNimNode(x)
-    for c in x: result.add subst(c)
-  result.add subst(impl[6])
+    for c in x: result.add substYield(c)
+  result.add substYield(impl[6])
   result.copyLineInfo(n)
 
 proc dupClosureLoop(iter: NimNode): bool =

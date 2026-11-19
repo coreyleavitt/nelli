@@ -19,6 +19,7 @@
 import std/[unittest, sequtils, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinFind
 
 proc mapOnTwoPaths(xs: seq[int]; b: bool) =
   # Both paths lower the same lambda site, so the second takes the cached decl.
@@ -42,9 +43,9 @@ suite "RFC-0016 CRH-07: raw Z3 handles are owned":
     # The map's function symbol is unconstrained (`ceUnsupportedHof`), so the
     # verdict is `sxUnknown`; what is pinned is a verdict and no stale decl.
     for i in 0 ..< 3:
-      check symexFind(mapOnTwoPaths, tLabel("crh07_map_two")).status in
+      check pinFind(mapOnTwoPaths, tLabel("crh07_map_two")).status in
         {sxSat, sxUnknown}
-      check symexFind(mapTwiceInOnePath, tLabel("crh07_map_loop")).status in
+      check pinFind(mapTwiceInOnePath, tLabel("crh07_map_loop")).status in
         {sxSat, sxUnknown}
 
   test "walker version floor":

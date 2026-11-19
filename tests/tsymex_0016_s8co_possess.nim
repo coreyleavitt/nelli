@@ -115,6 +115,6 @@ suite "S8co item 3: auto-possession next to a property or an XCLASS":
     check parseInt(symexWalkerVersion) >= 380
     check "abc1".matchLen(re"(*LIMIT_MATCH=3)(*UTF)\p{L}+\p{N}") == 4
     check "aab".matchLen(re"(*LIMIT_MATCH=3)(*UTF)a+[\x{100}b]") == 3
-    check symexFind(propSym, tLabel("co_prop")).status == sxSat
-    check symexFind(propSymNo, tLabel("co_prop_no")).status == sxUnsat
-    check symexFind(xclassSym, tLabel("co_xclass")).status == sxSat
+    check pinFind(propSym, tLabel("co_prop")).status == sxSat
+    check pinFind(propSymNo, tLabel("co_prop_no")).status == sxUnsat
+    check pinFind(xclassSym, tLabel("co_xclass")).status == sxSat

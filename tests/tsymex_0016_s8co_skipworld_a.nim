@@ -16,6 +16,7 @@ import std/[unittest, re, strutils]
 import ./s8co_skipworld
 import nelli/smt/canonicalize
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 const langs: seq[Lang] = @[
   (1, 'M', @[2, 5, 6, 8]), (1, 'R', @[2, 3, 4, 5, 6]),
@@ -51,5 +52,5 @@ suite "S8co item 4: the automata read a kept ignore_skip_arg under a limit (1-5)
   test "the walker decides a symbolic call":
     check parseInt(symexWalkerVersion) >= 397
     check "abab".find(re"(*LIMIT_MATCH=5)(?:a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x)+|c") == -1
-    check symexFind(worldSym, tLabel("co_world")).status == sxSat
-    check symexFind(worldSymNo, tLabel("co_world_no")).status == sxUnsat
+    check pinFind(worldSym, tLabel("co_world")).status == sxSat
+    check pinFind(worldSymNo, tLabel("co_world_no")).status == sxUnsat

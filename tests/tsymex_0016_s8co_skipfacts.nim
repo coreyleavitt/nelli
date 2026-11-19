@@ -16,6 +16,7 @@ import nelli/symex
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
+from ./s8cu_helpers import pinFind
 
 const
   # An attempt that leaves `ignore_skip_arg` for the next one: at `a` the
@@ -120,6 +121,6 @@ suite "S8co item 9: replace's facts with an unmarked SKIP:NAME":
 
   test "the walker decides a symbolic call":
     check parseInt(symexWalkerVersion) >= 390
-    check symexFind(skipSure, tLabel("co_skn_sure")).status == sxUnsat
-    check symexFind(skipFirst, tLabel("co_skn_first")).status == sxUnsat
-    check symexFind(skipSat, tLabel("co_skn_sat")).status == sxSat
+    check pinFind(skipSure, tLabel("co_skn_sure")).status == sxUnsat
+    check pinFind(skipFirst, tLabel("co_skn_first")).status == sxUnsat
+    check pinFind(skipSat, tLabel("co_skn_sat")).status == sxSat

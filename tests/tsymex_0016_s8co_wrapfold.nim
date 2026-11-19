@@ -114,8 +114,17 @@ suite "S8co item 4c: a literal group with a wrapper's bytes on the JIT":
 
   test "the walker counts a literal wrapper's fold":
     check parseInt(symexWalkerVersion) >= 393
+    # read before the override: std/re's own engine, the native oracle
+    let nativeJit = pcreSearchEngine() == peJit837
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
-    check symexFind(wrapSym, tLabel("co_wrap")).status == sxSat
-    check symexFind(wrapSymNo, tLabel("co_wrap_no")).status == sxUnsat
-    check symexFind(exactSym, tLabel("co_wrapx")).status == sxSat
+    # The wrapper's fold is the 8.37 JIT's: the interpreter's native count
+    # differs (RFC-0016 K9d), so these two are pinned natively on the JIT
+    # image (`pcre-8.37-jit`) and checked as walker verdicts elsewhere.
+    if nativeJit:
+      check pinFind(wrapSym, tLabel("co_wrap")).status == sxSat
+      check pinFind(wrapSymNo, tLabel("co_wrap_no")).status == sxUnsat
+    else:
+      check symexFind(wrapSym, tLabel("co_wrap")).status == sxSat
+      check symexFind(wrapSymNo, tLabel("co_wrap_no")).status == sxUnsat
+    check pinFind(exactSym, tLabel("co_wrapx")).status == sxSat

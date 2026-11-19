@@ -17,6 +17,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/runtime
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinFind
 
 proc sutCubes(x, y, z: int) =
   ## S8bu's cubes query: Z3 does not answer it in 2 s.
@@ -115,7 +116,7 @@ suite "RFC-0016 INT-57 (A): the stall backstop with the wall clock off":
     check secs < 7.0
 
   test "a query the step bound decides keeps its exact verdict":
-    let r = symexFind(sutEasy, tLabel("easy"), noClock)
+    let r = pinFind(sutEasy, tLabel("easy"), noClock)
     check r.status == sxSat
     check r.trusted
     check r.soundness.runDependence == {}

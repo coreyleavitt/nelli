@@ -124,5 +124,5 @@ suite "S8co item 4b: detect_repeat folds next to a character property":
     check parseInt(symexWalkerVersion) >= 393
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
-    check symexFind(propSym, tLabel("co_propfold")).status == sxSat
-    check symexFind(propSymNo, tLabel("co_propfold_no")).status == sxUnsat
+    check pinFind(propSym, tLabel("co_propfold")).status == sxSat
+    check pinFind(propSymNo, tLabel("co_propfold_no")).status == sxUnsat

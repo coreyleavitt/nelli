@@ -117,6 +117,6 @@ suite "S8co item 5: detect_repeat group repeats on the JIT":
     check parseInt(symexWalkerVersion) >= 380
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
-    check symexFind(foldSym, tLabel("co_fold")).status == sxSat
-    check symexFind(foldSymNo, tLabel("co_fold_no")).status == sxUnsat
+    check pinFind(foldSym, tLabel("co_fold")).status == sxSat
+    check pinFind(foldSymNo, tLabel("co_fold_no")).status == sxUnsat
     check symexFind(crashSym, tLabel("co_crash")).status notin {sxSat, sxUnsat}

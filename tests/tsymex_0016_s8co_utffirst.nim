@@ -16,6 +16,7 @@ import nelli/symex
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
+from ./s8cu_helpers import pinFind
 
 const
   pats = ["(*UTF)a", "(*UTF)\\x{e9}", "(*UTF)\\x{e9}+b", "(*UTF).", "(*UTF)..",
@@ -128,6 +129,6 @@ suite "S8co item 9: replace's first bytes in UTF mode":
 
   test "the walker decides a symbolic call":
     check parseInt(symexWalkerVersion) >= 388
-    check symexFind(utfFirst, tLabel("co_utf_first")).status == sxUnsat
-    check symexFind(utfFirstSat, tLabel("co_utf_first_sat")).status == sxSat
-    check symexFind(utfRange, tLabel("co_utf_range")).status == sxUnsat
+    check pinFind(utfFirst, tLabel("co_utf_first")).status == sxUnsat
+    check pinFind(utfFirstSat, tLabel("co_utf_first_sat")).status == sxSat
+    check pinFind(utfRange, tLabel("co_utf_range")).status == sxUnsat

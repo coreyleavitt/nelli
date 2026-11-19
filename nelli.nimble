@@ -2084,8 +2084,12 @@ task test, "Run the test suite":
             "tsymex_0016_k9e_kill_ovf_checksoff",
             # RFC-0016 INT-72: a free Rune ranges over int32; $r, toUTF8, size and Rune(n) follow std/unicode out of range; decoded runes are the decoder's.
             "tsymex_0016_int72_runedomain",
-            # RFC-0016 INT-77: a float range is the closed IEEE interval in its width, NaN excluded.
+            # RFC-0016 INT-77: a float range is the closed IEEE interval in its width; int6: NaN is a value of it.
             "tsymex_0016_int77_floatrange",
+            # RFC-0016 int6: a store into a float range is checked as Nim checks it (v = a, U(a), +=, -=, *=, float32's /=).
+            "tsymex_0016_int6p_floatrange_store",
+            # RFC-0016 int6: the same stores under --rangeChecks:off keep their value.
+            "tsymex_0016_int6p_floatrange_checksoff",
             # RFC-0016 K2: a c_longdouble value from an element, slot, dereference or cast declines, never faults.
             "tsymex_0016_k2_longdouble_sentinel",
             # RFC-0016 INT-82: an allocation is distinct from every object of the walk's entry state (parameters, what they reach, globals).

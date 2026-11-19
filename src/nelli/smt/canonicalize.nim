@@ -1354,8 +1354,17 @@ const renderAsChoicesVersion* = "12"
   ##   it, are `c_longdouble` values (`isLongDoubleTyped`): they declined as
   ##   a `weInternalWalkerFault` where the other sites decline
   ##   `feUnsupportedParamType`. No key bytes change.
+  ## - RFC-0016 int6 float range stores (460->463; 461 and 462 are reserved
+  ##   by sibling branches): a conversion into a float range is checked
+  ##   (`iekConvFloatRange`, its one owner, key `Ex<CFR:`): `v = a`, `U(a)`,
+  ##   an argument, and the store system's `+=`, `-=`, `*=` and float32's
+  ##   `/=` make into the range they are instantiated at. Each was stored
+  ##   unchecked, a false `sxUnsat` for its `RangeDefect`; float64's `/=` is
+  ##   a plain `float64` routine and stays unchecked. Nim's check is `x < lo
+  ##   or x > hi`, so NaN is a value of a float range (`rangeCondsIfNeeded`),
+  ##   which INT-77 had excluded.
 
-const symexWalkerVersion* = "460"
+const symexWalkerVersion* = "463"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -7291,6 +7300,10 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       (if e.ciwHasRange: $e.ciwLo & ".." & $e.ciwHi & ":" else: "") &
       (if e.ciwHoley: "h:" else: "") &   # RFC-0016 INT-84
       canonicalize(e.ciwOperand, env) & ">"
+  of iekConvFloatRange:
+    # RFC-0016 int6: the bounds by their bits (a float's `$` rounds).
+    "Ex<CFR:" & $e.cfrWidth & ":" & toHex(cast[uint64](e.cfrLo)) & "," &
+      toHex(cast[uint64](e.cfrHi)) & ":" & canonicalize(e.cfrOperand, env) & ">"
   of iekConvIntReinterpret:
     # A1 adjudication: width + target signedness are both part of the key
     # (mirrors iekConvIntWidth) so a signed vs. unsigned reinterpret of the

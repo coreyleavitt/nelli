@@ -1816,6 +1816,10 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     of 16: some(SymVal(kind: svBV16, signed: e.cirTgtSigned, bv16: mkBitVec[16](0)))
     of 32: some(SymVal(kind: svBV32, signed: e.cirTgtSigned, bv32: mkBitVec[32](0)))
     else:  some(SymVal(kind: svBV64, signed: e.cirTgtSigned, bv64: mkBitVec[64](0'i64)))
+  of iekConvFloatRange:
+    # RFC-0016 int6: a float of the range's width, as `lower` returns.
+    if e.cfrWidth == 32: some(SymVal(kind: svFloat32, fp32: mkFloat32(0'f32)))
+    else: some(SymVal(kind: svFloat64, fp64: mkFloat64(0.0)))
   of iekMathCall:
     # Phase 15 F6: predicates produce svBool; float ops produce a float of
     # the first arg's width; deferred ops have no proto (they raise on lower).
@@ -5867,7 +5871,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       coerceIntLit(proto.get, e.ival)
     else:
       bvConst(tInt(64, true), e.ival)
-  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekMathCall:
+  of iekFloatLit, iekConvIntToFloat, iekConvFloatToInt, iekMathCall,
+     iekConvFloatRange:
     # Stage 7 (CR-7) Cluster F: float literal, int→float, float→int, math
     # arms extracted into `lowerFloatArm` (defined above, before this proc body).
     lowerFloatArm(env, e)
@@ -7635,9 +7640,10 @@ proc clampWitnessField(w: var RawWitness, path: string, fty: IRType) =
       w.uintVals[path] = uint64(clampToDeclaredRange(int64(w.uintVals[path]), fty))
   elif fty.kind in {itFloat32, itFloat64} and fty.floatRange:
     # RFC-0016 INT-77: an unread float-range cell, as an unread int one; a
-    # value outside the interval (NaN included) is replaced by its low bound
+    # value outside the interval is replaced by its low bound. NaN is a value
+    # of the range (int6: Nim's check, `x < lo or x > hi`, passes it).
     template clampF(x, lo, hi: untyped): untyped =
-      (if x >= lo and x <= hi: x else: lo)
+      (if x < lo or x > hi: lo else: x)
     if fty.kind == itFloat64 and w.float64Vals.hasKey(path):
       w.float64Vals[path] = clampF(w.float64Vals[path], fty.floatLo, fty.floatHi)
     elif fty.kind == itFloat32 and w.float32Vals.hasKey(path):

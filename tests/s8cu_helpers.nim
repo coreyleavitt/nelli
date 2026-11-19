@@ -1091,7 +1091,8 @@ proc pairsExceed*(sizes: seq[int]; limit: int): bool =
 #   float32's smallest subnormal and half of it (a narrowing conversion's
 #   overflow and underflow edges).
 #
-# A float `range` keeps the values inside it (NaN is never inside). A float
+# A float `range` keeps the values inside it and NaN, which Nim's range check
+# (`x < lo or x > hi`) passes (RFC-0016 int6). A float
 # thinned to cross with other fields keeps its first `stringCore` values:
 # the specials and the leading literals with their neighbours.
 
@@ -2096,7 +2097,8 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
     for i in 0 ..< domLen(base):
       let x = base[i]
       when T is range:
-        if float64(x) >= float64(low(T)) and float64(x) <= float64(high(T)):
+        # Nim's check rejects `x < lo or x > hi`: NaN is a value (int6)
+        if not (float64(x) < float64(low(T)) or float64(x) > float64(high(T))):
           domPut(result.values, T(x))
       else:
         domPut(result.values, T(x))

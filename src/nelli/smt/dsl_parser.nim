@@ -427,6 +427,11 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekConvIntReinterpret:
     newCall(bindSym"mkConvIntReinterpret", emitExpr(e.cirOperand),
             newLit(e.cirWidth), newLit(e.cirTgtSigned))
+  of iekConvFloatRange:
+    newCall(bindSym"mkConvFloatRange", emitExpr(e.cfrOperand),
+            newLit(e.cfrWidth),
+            newCall(bindSym"floatOfBits", newLit(cast[uint64](e.cfrLo))),
+            newCall(bindSym"floatOfBits", newLit(cast[uint64](e.cfrHi))))
   of iekMathCall:
     var argLit = newTree(nnkBracket)
     for a in e.mathArgs: argLit.add emitExpr(a)
@@ -2421,6 +2426,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     ## A1 adjudication: a same-width tag flip has no inline raise fork of
     ## its own either — only its operand can carry one.
     result = rhsHasInlineDefectFork(e.cirOperand)
+  of iekConvFloatRange:
+    ## RFC-0016 int6: the float range check forks `RangeDefect`.
+    result = true
   of iekMathCall:
     for a in e.mathArgs:
       if rhsHasInlineDefectFork(a): return true
@@ -2592,6 +2600,7 @@ proc irKids*(e: IRExpr): seq[IRExpr] =
   of iekConvIntToFloat, iekConvFloatToInt: @[e.convOperand]
   of iekConvIntWidth: @[e.ciwOperand]
   of iekConvIntReinterpret: @[e.cirOperand]
+  of iekConvFloatRange: @[e.cfrOperand]
   of iekMathCall: e.mathArgs
   of iekBinop: @[e.lhs, e.rhs]
   of iekUnop: @[e.operand]
@@ -7265,6 +7274,72 @@ proc convertFloatWidth(n, operand: NimNode, preamble: var seq[IRStmt],
   let op = if fltWidthOfKind(n.getTypeInst.typeKind) == 32: "toFloat32"
            else: "toFloat64"
   mkMathCall(admitFloatCall(op, 1), op, @[parseExpr(operand, preamble, ctx)])
+
+proc floatRangeOf(t: IRType): IRType =
+  ## RFC-0016 int6. `t` when it is a float `range[lo..hi]`, else nil.
+  if t != nil and t.kind in {itFloat32, itFloat64} and t.floatRange: t
+  else: nil
+
+proc mkFloatRangeCheck(v: IRExpr; tgt: IRType): IRExpr =
+  ## RFC-0016 int6. `v`, a float of `tgt`'s width, converted into the float
+  ## range `tgt` (`iekConvFloatRange`, the one owner of the check).
+  mkConvFloatRange(v, (if tgt.kind == itFloat32: 32 else: 64),
+                   tgt.floatLo, tgt.floatHi)
+
+proc convIntoFloatRange(conv, operand: NimNode; preamble: var seq[IRStmt];
+                        ctx: ParseCtx): IRExpr =
+  ## RFC-0016 int6. A conversion into a float range (`conv`, typed: an
+  ## explicit `U(a)` or the hidden conversion Nim puts on `v = a`, an
+  ## argument, a constructor field, a `return`), or nil when `conv`'s type is
+  ## no float range. Nim checks the value against the range's bounds
+  ## (`RangeDefect` outside them, NaN passing), after rounding it to the
+  ## range's width when the operand is of the other float width. Unlike the
+  ## int side, an operand of a float range inside the target is checked too
+  ## (probed: `w = v` with `v: range[0.0 .. 1.0]` holding 2.0, which
+  ## float64's `/=` stores, and `w: range[0.0 .. 1.5]` raises).
+  let tgt = floatRangeOf(classifyType(conv).ty)
+  if tgt == nil: return nil
+  let src = classifyType(operand).ty
+  var v = parseExpr(operand, preamble, ctx)
+  if src != nil and src.kind in {itFloat32, itFloat64} and src.kind != tgt.kind:
+    # RFC-0016 K2b: the width change first (`fp.to_fp`, RNE)
+    let op = if tgt.kind == itFloat32: "toFloat32" else: "toFloat64"
+    v = mkMathCall(admitFloatCall(op, 1), op, @[v])
+  mkFloatRangeCheck(v, tgt)
+
+proc augStoresThroughRange(op: NimNode): bool =
+  ## RFC-0016 int6. Whether system's `x op= y`, resolved to the routine `op`,
+  ## stores `x op y` through a conversion into a range: its body is `x = x op
+  ## y`, converted into its formal's type. The generic `+=`, `-=`, `*=` (and
+  ## float32's `/=`, `[T: float | float32]`) are instantiated at the range,
+  ## so the store checks (probed: `v += 2.0` raises); float64's `/=` is the
+  ## plain `(x: var float64, y: float64)` routine, the range local is passed
+  ## as a `float64`, and nothing checks (probed: `0.5 / 0.25` is stored).
+  ## The generic ones take `y: T` as well, so their operand is converted
+  ## into the range at the call (Nim's hidden conversion, checked by
+  ## `convIntoFloatRange` under the caller's options; probed: `v *= 2.0` at
+  ## `v == 0.5` raises on the operand). A signature that cannot be read is
+  ## taken as the generic one.
+  if op.kind != nnkSym: return true
+  let sig = op.getTypeInst
+  if sig.kind != nnkProcTy or sig.len == 0 or
+     sig[0].kind != nnkFormalParams or sig[0].len < 2 or
+     sig[0][1].kind != nnkIdentDefs or sig[0][1].len < 3:
+    return true
+  var t = sig[0][1][^2]
+  if t.kind == nnkVarTy and t.len == 1: t = t[0]
+  floatRangeOf(classifyType(t).ty) != nil
+
+proc augFloatRangeStore(n: NimNode; ty: IRType; v: IRExpr): IRExpr =
+  ## RFC-0016 int6. The value an augmented assignment `n` (`x op= y`) stores
+  ## into a slot of type `ty`: `v` itself, or `v` converted into `ty` where
+  ## `ty` is a float range and the routine checks (`augStoresThroughRange`).
+  ## That conversion is compiled in system's routine, so the build's range
+  ## check governs it, not a caller's `push` (probed: `v += 2.0` still
+  ## raises under `push rangeChecks: off`), as `lowerConvIntRange`'s drain.
+  let fr = floatRangeOf(ty)
+  if fr == nil or not augStoresThroughRange(n[0]): v
+  else: mkFloatRangeCheck(v, fr)
 
 proc isFloatWidthChange(operand, conv: NimNode): bool =
   ## RFC-0016 W1-e. Both sides are builtin floats of different widths.
@@ -13645,6 +13720,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let tt = classifyType(n).ty
       if tt != nil and tt.kind in {itRef, itPtr}:
         return mkNil(tt)
+    # RFC-0016 int6: `U(a)` into a float range is checked.
+    let floatRanged = convIntoFloatRange(n, operand, preamble, ctx)
+    if floatRanged != nil: return floatRanged
     # RFC-0005 S8bc: an inlined iterator's parameter is its typed formal
     # symbol (the S8at untyped-ident decline here is gone with the
     # substitution that produced the ident).
@@ -13965,6 +14043,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # `classifyType` on it aborted the compile.
       if isIntLiteralNode(wrapped) or n.kind == nnkHiddenAddr:
         parseExpr(wrapped, preamble, ctx)
+      elif floatRangeOf(classifyType(n).ty) != nil:
+        # RFC-0016 int6: the conversion into a float range (`v = a`).
+        convIntoFloatRange(n, wrapped, preamble, ctx)
       elif isFloatWidthChange(wrapped, n):
         # RFC-0016 K2b (W-04): a compiler-inserted float32 <-> float64.
         convertFloatWidth(n, wrapped, preamble, ctx)
@@ -25256,7 +25337,7 @@ proc parseStmtInner(n: NimNode,
               "`" & augOp.strVal & "` on this receiver is not modelled")
           return mkAssign(nm, mkConvIntWidth(opIR, augTy.width, augTy.signed,
             augTy.width, augTy.signed, true, augTy.rangeLo, augTy.rangeHi))
-        return mkAssign(nm, opIR)
+        return mkAssign(nm, augFloatRangeStore(n, augCls.ty, opIR))
       elif lhs.kind == nnkDerefExpr and lhs.len == 1 and
            augOp.strVal != "&=" and
            ((classifyType(lhs).ty.kind == itInt and
@@ -25268,7 +25349,8 @@ proc parseStmtInner(n: NimNode,
         # ranged pointee declines (the write has no RangeDefect fork).
         let old = parseExpr(lhs, preamble, ctx)
         let rhsIR = parseExpr(n[2], preamble, ctx)
-        let newVal = siteBinop(binopForInfix(augOp.strVal[0 .. ^2]), old, rhsIR, n)
+        let newVal = augFloatRangeStore(n, classifyType(lhs).ty,
+          siteBinop(binopForInfix(augOp.strVal[0 .. ^2]), old, rhsIR, n))
         return parseAsgn(nnkAsgn.newTree(lhs, newEmptyNode()), newVal,
                          preamble, ctx)
       else:
@@ -25294,7 +25376,8 @@ proc parseStmtInner(n: NimNode,
             let rhsIR = parseExpr(n[2], preamble, ctx)
             let newVal =
               if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
-              else: siteBinop(binopForInfix(baseOpStr), old, rhsIR, n)
+              else: augFloatRangeStore(n, fieldTy,
+                      siteBinop(binopForInfix(baseOpStr), old, rhsIR, n))
             let fw = valueFieldWrite(lhs, newVal, preamble, ctx)
             return fw.toStmt
         # RFC-0005 S8am (S8z's remainder, item 1): `s[i] += v` (and -=, *=,
@@ -25340,7 +25423,8 @@ proc parseStmtInner(n: NimNode,
                 let rhsIR = parseExpr(n[2], preamble, ctx)
                 let newVal =
                   if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
-                  else: siteBinop(binopForInfix(baseOpStr), old, rhsIR, n)
+                  else: augFloatRangeStore(n, seqElemTy,
+                          siteBinop(binopForInfix(baseOpStr), old, rhsIR, n))
                 return mkIndexAssignStmt(seqRecv.strVal, idxIR, newVal, siteLoc(n))
         # RFC-0005 S8bc (item 7): `a[i] += v` on an ARRAY element not
         # reached above, `t[k] += v` on a TABLE value, and `t.mgetOrPut(k,
@@ -25365,7 +25449,8 @@ proc parseStmtInner(n: NimNode,
             let newVal =
               if baseOpStr == "&":
                 mkStrOp(iekStrConcat, "&", @[mkVar(oldTmp), rhsIR])
-              else: siteBinop(binopForInfix(baseOpStr), mkVar(oldTmp), rhsIR, n)
+              else: augFloatRangeStore(n, eltTy,
+                      siteBinop(binopForInfix(baseOpStr), mkVar(oldTmp), rhsIR, n))
             return parseAsgn(nnkAsgn.newTree(elemLvalueBracket(n[1]),
                                              newEmptyNode()),
                              newVal, preamble, ctx)

@@ -315,9 +315,33 @@ proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
         inRange = inRange and bc
       syncRangeDefectCond(not inRange)
     value
+  of iekConvFloatRange:
+    # RFC-0016 int6. A float converted into a float `range[lo..hi]` of its
+    # width: a store into a range local (`v = a`), an explicit `U(a)`, the
+    # store system's `+=`, `-=`, `*=` (and float32's `/=`) make into the
+    # range they are instantiated at. Nim's generated check is `x < lo or x >
+    # hi` (`raiseRangeErrorF`), so NaN passes it and is stored (probed: `v =
+    # NaN` and `v *= NaN` run; `v = 2.0`, `v += Inf` raise "value out of
+    # range: 2.0 notin 0.0 .. 1.0"). The out-of-range side goes to the
+    # `rangeDefectConds` sink, acRange-gated in its drain as every range
+    # check is; the value is the operand's, which is what a build without the
+    # check stores.
+    let sv = lowerHooks.lower(env, e.cfrOperand, none(SymVal))
+    # [range-invariant: range-defect-check -- the bounds are the CONDITION of
+    # a RangeDefect fork, not a constraint on the stored value, so
+    # `rangeCondsIfNeeded` does not apply.]
+    case sv.kind
+    of svFloat64:
+      syncRangeDefectCond(sv.fp64 < mkFloat64(e.cfrLo) or
+                          sv.fp64 > mkFloat64(e.cfrHi))
+    of svFloat32:
+      syncRangeDefectCond(sv.fp32 < mkFloat32(float32(e.cfrLo)) or
+                          sv.fp32 > mkFloat32(float32(e.cfrHi)))
+    else: raise newException(ValueError, "range[float](): operand is not a float")  # [raise-audited: category-c: the parser emits iekConvFloatRange only over a float-typed operand of the range's width, which lowers to svFloat32/svFloat64]
+    sv
   of iekMathCall:
     lowerMathCall(env, e)
   else:
-    raise newException(ValueError,  # [raise-audited: category-c: `lower` dispatches only iekFloatLit/iekConvIntToFloat/iekConvFloatToInt/iekMathCall to lowerFloatArm (runtime.nim, the single call site), all handled above]
+    raise newException(ValueError,  # [raise-audited: category-c: `lower` dispatches only iekFloatLit/iekConvIntToFloat/iekConvFloatToInt/iekConvFloatRange/iekMathCall to lowerFloatArm (runtime.nim, the single call site), all handled above]
       "lowerFloatArm: unexpected e.kind=" & $e.kind &
-      " (not iekFloatLit/iekConvIntToFloat/iekConvFloatToInt/iekMathCall)")
+      " (not iekFloatLit/iekConvIntToFloat/iekConvFloatToInt/iekConvFloatRange/iekMathCall)")

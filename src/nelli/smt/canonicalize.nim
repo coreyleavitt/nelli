@@ -1395,8 +1395,16 @@ const renderAsChoicesVersion* = "12"
   ##   routine (the build's arithmetic), as its range store was. Key bytes
   ##   change: such a body renders `@asPushedOff:`, and an integer `*=`
   ##   gains a block (its operand a `let`).
+  ## - RFC-0016 int6-w scan text (467->468): the check-option scan reads a
+  ##   module's text from disk when a macro first asks, after the compiler
+  ##   parsed it. A file edited in between was read against the old
+  ##   positions: two lines added above a `push overflowChecks: off` routine
+  ##   read it checked, and its overflow came back a trusted `sxRaised` the
+  ##   binary never raises. A user routine whose text on disk ends before
+  ##   its position, or defines its name but not starting there
+  ##   (`textDisagrees`), now declines `feCheckOption`. No key bytes change.
 
-const symexWalkerVersion* = "467"
+const symexWalkerVersion* = "468"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

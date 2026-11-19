@@ -16,11 +16,12 @@
 ## C, undefined on overflow). The control module is not rewritten, so each
 ## regime is walked as int6-o walks it in the same process, in the order that
 ## tripped (checked first, then pushed off).
-import std/[unittest, strutils, os]
+import std/[unittest, strutils, os, tables]
 import nelli
 import nelli/symex
 import ./s0016_int6w_scantext_ctl
 import ./s0016_int6w_scantext_sut
+import nelli/smt/check_scan
 
 const shiftMark = "## int6-w: a line written while the compile ran"
 const sutPath = currentSourcePath().parentDir / "s0016_int6w_scantext_sut.nim"
@@ -53,9 +54,35 @@ proc show(tag: string; r: auto): string =
   for e in r.errors: ks.add $e.kind
   tag & ": " & $r.status & " trusted=" & $r.trusted & " errors=" & ks.join(",")
 
+var memFiles {.compileTime.}: Table[string, string]
+proc memExists(p: string): bool = p in memFiles
+proc memRead(p: string): string = memFiles[p]
+proc memAnchor(p: string): string = p
+const memEnv = SourceEnv(exists: memExists, read: memRead, anchor: memAnchor)
+
+const
+  # `textDisagrees` on a literal text: the pure scan, no disk.
+  memScan = scanModuleText("mem/x.nim",
+    "proc foo*() = discard\n\nproc `bar`() =\n  proc inner() = discard\n", memEnv)
+  pure = [textDisagrees(memScan, "mem/x.nim", "foo", 1),    # 0 where it is written
+          textDisagrees(memScan, "mem/x.nim", "bar", 3),    # 1 a quoted name
+          textDisagrees(memScan, "mem/x.nim", "inner", 4),  # 2 a nested routine
+          textDisagrees(memScan, "mem/x.nim", "f_oo", 1),   # 3 Nim's identifier equality
+          textDisagrees(memScan, "mem/x.nim", "made", 2),   # 4 a name the text never defines
+          textDisagrees(memScan, "mem/y.nim", "foo", 3),    # 5 a file the scan did not read
+          textDisagrees(memScan, "mem/x.nim", "foo", 3),    # 6 moved
+          textDisagrees(memScan, "mem/x.nim", "made", 9)]   # 7 past the text's end
+
 suite "int6-w: the scan reads the text the compiler parsed":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 468
+
+  test "pure: a routine is placed against the text the scan read":
+    for i in 0 .. 5:
+      checkpoint $i & ": " & pure[i]
+      check pure[i] == ""
+    check "defines `foo` at line 1, not at line 3" in pure[6]
+    check "has 4 lines" in pure[7]
 
   test "native: checked raises, pushed off does not":
     check raisesOverflow(chkSteady, high(int))

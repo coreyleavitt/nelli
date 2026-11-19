@@ -343,7 +343,7 @@ proc inRoutineChecks(n: NimNode; off, on: set[CheckOption]): string =
     if r.len > 0: return r
 
 proc positionUnreadable(impl: NimNode; file: string; line: int;
-                        st: CheckState): string =
+                        st: CheckState; m: ModuleScan): string =
   ## RFC-0016 PRC-07. Why the routine's check state at the four checks cannot be
   ## taken as one answer: "" when it can. The walker models a routine compiled
   ## with such an option off as unchecked and one compiled with it on as
@@ -359,8 +359,12 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   if both != {}:
     return "its position is both pushed on and off for " & $both
   if not isStdlibFile(file):
-    var ast: NimNode
-    if file in bodyAsts: ast = bodyAsts[file]
+    # RFC-0016 int6-w: the text the scan read (`m`), where it read this file:
+    # a second read from disk is another snapshot of a file that may be
+    # edited during the compile.
+    var ast = scannedAst(m, file)
+    if ast != nil: discard
+    elif file in bodyAsts: ast = bodyAsts[file]
     else:
       var text: string
       if readSource(compileTimeEnv(), file, text).len == 0:
@@ -411,6 +415,17 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if moduleScans[root].unknown.len > 0:
     return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
                          why: moduleScans[root].unknown)
+  # RFC-0016 int6-w: the scan's text is read from disk when a macro first asks,
+  # not when the compiler parsed the module; a file edited in between places
+  # the routine against pushes it was not compiled under. Not read, then.
+  if not isStdlibFile(file):
+    let stale = textDisagrees(moduleScans[root], file,
+                              nameOf(if impl[0].kind == nnkPostfix: impl[0][1]
+                                     else: impl[0]), li.line)
+    if stale.len > 0:
+      return RoutineChecks(checks: allChecks, assertsMaybeOff: true,
+        why: "the module's text on disk is not the text the compiler parsed: " &
+             stale)
   let st = stateAt(moduleScans[root], file, li.line, li.column)
   result.checks = deviation(st)
   result.assertsMaybeOff = coAssert in st.maybeOff or
@@ -455,7 +470,7 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
     result.infOn = true
     result.checks.excl coInf
   result.overflowOn = coOverflow notin result.checks
-  let unreadable = positionUnreadable(impl, file, li.line, st)
+  let unreadable = positionUnreadable(impl, file, li.line, st, moduleScans[root])
   if unreadable.len > 0:
     result.why = "the routine's range, bound, field, object or overflow checks differ " &
       "within it, not modelled as one setting: " & unreadable

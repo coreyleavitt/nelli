@@ -24,7 +24,7 @@
 ##
 ## A platform with neither runs no replay at all.
 
-import std/[strutils, monotimes, times, macros]
+import std/[strutils, monotimes, times, macros, atomics, cpuinfo]
 when defined(windows) or defined(nelliReplayReexec):
   import std/os
 import ../engine/markers
@@ -35,6 +35,10 @@ const
   replayForks* = defined(posix) and not defined(nelliReplayReexec)
   replayReexecs* = defined(windows) or
                    (defined(posix) and defined(nelliReplayReexec))
+  replayExecs* = replayReexecs and defined(posix)
+    ## RFC-0016 INT-29. The re-executed child is started by `fork` and
+    ## `execve`, so it can fail to start after the fork (`execve` refused) and
+    ## inherits the host's descriptors unless it closes them.
   hasMethodTable* = defined(nimHasMethodDispatchTable) and
                     buildIsExecutable
     ## RFC-0016 PRC-02b. The toolchain's method dispatch table exists, and this
@@ -50,6 +54,15 @@ const
     ## What a replay may allocate past the address space it starts with. An
     ## allocation loop then fails in the child ("out of memory", a real exit)
     ## instead of taking the machine's memory from the host.
+  replayProcessLimit* = 64
+    ## RFC-0016 INT-28. How many processes a replay's SUT may start beside the
+    ## child. Windows: the job's `ActiveProcessLimit`, counting the child.
+    ## Linux: `RLIMIT_NPROC`, which counts every thread of the user, so the
+    ## child's is the threads the system ran as it started plus this many.
+  replayFileSizeLimit* = 1'i64 shl 32
+    ## RFC-0016 INT-28. The largest file a replay may write (POSIX
+    ## `RLIMIT_FSIZE`). Past it the child is killed by `SIGXFSZ`, which the
+    ## host reads as a run stopped at a bound (`reTimedOut`), never a crash.
 
 type
   ReplayEnding* = enum
@@ -99,15 +112,40 @@ type
       ## could not read. Another run may decide these, so a verdict they leave
       ## undecided is not cached.
 
-var replayExecCount = 0
+var replayExecCount: Atomic[int]
   ## How many children the host has started: symex never runs `fn` itself, so
   ## this counts real executions. What a SUT does to the host's variables can no
-  ## longer count them.
+  ## longer count them. RFC-0016 INT-28: atomic, as replays may run on several
+  ## threads at once.
 
 proc replayExecutions*(): int =
   ## RFC-0005 S8ct. How many replays this process has run.
   {.cast(gcsafe).}:
-    replayExecCount
+    replayExecCount.load()
+
+proc countExecution() =
+  {.cast(gcsafe).}:
+    replayExecCount.atomicInc()
+
+type
+  ReplayLimits* = object
+    ## RFC-0016 INT-28. The limits the current process runs under, as
+    ## `replayLimitsHeld` reads them; -1 for none. A replay's child holds the
+    ## ones its platform applies: POSIX all four (`processes` on Linux only;
+    ## `memory` where the system enforces an address-space limit, so not on
+    ## macOS); Windows `memory` and `processes`, from its job object.
+    memory*: int64       ## bytes of address space (Windows: committed memory)
+    cpuSeconds*: int64   ## seconds of CPU time
+    fileSize*: int64     ## bytes of one file
+    processes*: int64    ## processes (POSIX: of the user, threads included)
+
+proc cpuBound(timeoutMs: int): int =
+  ## RFC-0016 INT-28. The CPU seconds a replay bounded at `timeoutMs` may use:
+  ## every processor busy for the whole bound, and a second more. Not stricter
+  ## than the bound itself on any SUT; it stops a child the host no longer
+  ## watches (the host gone where no death signal reaches the child). 0: none.
+  if timeoutMs <= 0: 0
+  else: ((timeoutMs + 999) div 1000) * max(1, countProcessors()) + 1
 
 func describe*(c: ReplayChild): string =
   ## How the child ended, in words, for a `feReplay*` hint (`replayresult.nim`).
@@ -540,29 +578,220 @@ proc statusLost(c: ReplayChild): ReplayChild =
     "before the host could read it (SIGCHLD is ignored, or another wait " &
     "reaped it), so how it ended is not known"
 
+# ---- POSIX: what both ways of starting a child share ---------------------------
+
+when defined(posix):
+  import std/posix
+
+  # At module scope: an `importc` var declared in a proc is emitted as a C
+  # local of that name, which shadows the constant with an uninitialised one.
+  var rlimitCore {.importc: "RLIMIT_CORE", header: "<sys/resource.h>".}: cint
+  var rlimitCpu {.importc: "RLIMIT_CPU", header: "<sys/resource.h>".}: cint
+  var rlimitFsize {.importc: "RLIMIT_FSIZE", header: "<sys/resource.h>".}: cint
+  var rlimitNproc {.importc: "RLIMIT_NPROC", header: "<sys/resource.h>".}: cint
+  var rlimInfinity {.importc: "RLIM_INFINITY", header: "<sys/resource.h>".}: int
+  when defined(openbsd):
+    # OpenBSD has no RLIMIT_AS; its data limit counts anonymous mappings.
+    var rlimitMem {.importc: "RLIMIT_DATA", header: "<sys/resource.h>".}: cint
+  else:
+    var rlimitMem {.importc: "RLIMIT_AS", header: "<sys/resource.h>".}: cint
+  var mapAnon {.importc: "MAP_ANON", header: "<sys/mman.h>".}: cint
+  var pPid {.importc: "P_PID", header: "<sys/wait.h>".}: cint
+  var wExited {.importc: "WEXITED", header: "<sys/wait.h>".}: cint
+  var wNoWait {.importc: "WNOWAIT", header: "<sys/wait.h>".}: cint
+
+  when defined(linux):
+    proc c_prctl(option: cint; arg: culong): cint
+      {.importc: "prctl", header: "<sys/prctl.h>".}
+    const prSetPdeathsig = cint(1)
+    proc c_syscall(n: clong): clong
+      {.importc: "syscall", header: "<unistd.h>", varargs.}
+  when defined(linux) or defined(freebsd) or defined(netbsd) or
+       defined(openbsd) or defined(dragonfly):
+    proc c_pipe2(fds: var array[2, cint]; flags: cint): cint
+      {.importc: "pipe2", header: "<unistd.h>".}
+
+  proc finite(v: int): bool = v != rlimInfinity and v >= 0
+
+  proc lowerSoft(res: cint; v: int) =
+    ## RFC-0016 INT-28. The soft limit `res` to `v`, unless it is already
+    ## lower, and never past the hard one.
+    var r: RLimit
+    if getrlimit(res, r) != 0: return
+    var x = v
+    if finite(r.rlim_max) and x > r.rlim_max: x = r.rlim_max
+    if finite(r.rlim_cur) and r.rlim_cur <= x: return
+    r.rlim_cur = x
+    discard setrlimit(res, r)
+
+  proc mapsUnder(limit: int; saved: RLimit; page: int): int =
+    ## 1: one more page maps under an address-space limit of `limit`; 0: it
+    ## does not; -1: the limit could not be set.
+    var r = saved
+    r.rlim_cur = limit
+    if setrlimit(rlimitMem, r) != 0: return -1
+    let p = mmap(nil, page, PROT_READ or PROT_WRITE, MAP_PRIVATE or mapAnon,
+                 -1, 0)
+    if p == MAP_FAILED: return 0
+    discard munmap(p, page)
+    1
+
+  proc memoryInUse(): int =
+    ## RFC-0016 INT-28 (R1-31). The address space this process maps, to a
+    ## page, found by halving the least limit under which one more page maps:
+    ## the same on every POSIX system that enforces the limit, where Linux's
+    ## `/proc/self/statm` was read before and the others had no cap at all.
+    ## 0 where the system does not enforce it (a page maps under a limit of
+    ## one page: macOS) or a limit cannot be set. It allocates nothing, so it
+    ## may run between `fork` and the SUT.
+    var saved: RLimit
+    if getrlimit(rlimitMem, saved) != 0: return 0
+    let page = int(sysconf(SC_PAGESIZE))
+    var lo = page
+    var hi =
+      if finite(saved.rlim_max): saved.rlim_max
+      else: (when sizeof(int) >= 8: 1 shl 47 else: high(int) div 2)
+    result = 0
+    if mapsUnder(lo, saved, page) == 0 and mapsUnder(hi, saved, page) == 1:
+      result = -1
+      while hi - lo > page:
+        let mid = lo + (hi - lo) div 2
+        case mapsUnder(mid, saved, page)
+        of 1: hi = mid
+        of 0: lo = mid
+        else:
+          result = 0
+          break
+      if result != 0: result = hi - page
+    discard setrlimit(rlimitMem, saved)
+
+  proc limitMemory() =
+    ## The replay's memory limit, relative to what this process maps now.
+    let used = memoryInUse()
+    if used > 0: lowerSoft(rlimitMem, used + replayMemoryLimit)
+
+  proc limitChild(cpuSeconds, processes: int) =
+    ## RFC-0016 INT-28 (R1-31). No core file, and the CPU, file-size and
+    ## process limits (`cpuBound`, `replayFileSizeLimit`, `processBound`).
+    ## Inherited across `exec`.
+    var noCore = RLimit(rlim_cur: 0, rlim_max: 0)
+    discard setrlimit(rlimitCore, noCore)
+    if cpuSeconds > 0: lowerSoft(rlimitCpu, cpuSeconds)
+    lowerSoft(rlimitFsize, int(replayFileSizeLimit))
+    if processes > 0: lowerSoft(rlimitNproc, processes)
+
+  proc replayLimitsHeld*(): ReplayLimits =
+    ## RFC-0016 INT-28. The soft limits this process runs under.
+    proc soft(res: cint): int64 =
+      var r: RLimit
+      if getrlimit(res, r) == 0 and finite(r.rlim_cur): int64(r.rlim_cur)
+      else: -1
+    ReplayLimits(memory: soft(rlimitMem), cpuSeconds: soft(rlimitCpu),
+                 fileSize: soft(rlimitFsize), processes: soft(rlimitNproc))
+
+  proc processBound(): int =
+    ## RFC-0016 INT-28. The child's `RLIMIT_NPROC`: the threads the system
+    ## runs now (`/proc/loadavg`, at least the user's, which the limit
+    ## counts) and `replayProcessLimit` more. 0, none, off Linux: no other
+    ## system reads the count without a privileged interface.
+    when defined(linux):
+      try:
+        let f = readFile("/proc/loadavg")
+        let slash = f.find('/')
+        if slash < 0: return 0
+        var n = 0
+        var i = slash + 1
+        while i < f.len and f[i] in {'0' .. '9'}:
+          n = n * 10 + (ord(f[i]) - ord('0'))
+          inc i
+        if n > 0: n + replayProcessLimit else: 0
+      except CatchableError:
+        0
+    else:
+      0
+
+  proc limitEnding(status: cint; cpuSeconds: int): string =
+    ## RFC-0016 INT-28. Why a child a resource limit stopped was stopped, or
+    ## "": `SIGXCPU` past the CPU limit, `SIGXFSZ` past the file-size limit.
+    ## Such a run is undecided (`reTimedOut`), not a crash of the SUT.
+    if not WIFSIGNALED(status): return ""
+    let sig = WTERMSIG(status)
+    if sig == SIGXCPU and cpuSeconds > 0:
+      "it used the replay's CPU-time limit (" & $cpuSeconds &
+        " s) and was stopped"
+    elif sig == SIGXFSZ:
+      "it wrote a file past the replay's file-size limit (" &
+        $replayFileSizeLimit & " bytes) and was stopped"
+    else: ""
+
+  proc hasEnded(pid: Pid): int =
+    ## RFC-0016 INT-28 (R1-24). 1: the child has ended and is not yet
+    ## waited for, so its pid and the group it leads are still the host's,
+    ## and the group can still be killed. 0: it runs. -1: it is no longer
+    ## the host's child (`SIGCHLD` ignored, or another wait took it).
+    var info: SigInfo
+    while true:
+      zeroMem(addr info, sizeof(info))
+      if waitid(pPid, Id(pid), info, wExited or WNOHANG or wNoWait) == 0:
+        return (if info.si_pid == pid: 1 else: 0)
+      if errno != EINTR: return -1
+
+  proc killGroup(pid: Pid) =
+    ## The child and its group: what the SUT started. Only for a child not
+    ## yet waited for (`hasEnded`): until then its pid, and the group it
+    ## leads, are this process's and cannot name another.
+    discard kill(-pid, SIGKILL)
+    discard kill(pid, SIGKILL)
+
+  proc enterGroup(hostPid: Pid) =
+    ## In a child, before anything else: it leads a group of its own, so
+    ## that what the SUT starts is killed with it (every POSIX system, not
+    ## Linux alone: R2-25), and on Linux it dies with the host. The host may
+    ## have died between the `fork` and the `prctl`, when no signal comes, so
+    ## the parent is checked after (R1-32).
+    discard setpgid(0, 0)
+    when defined(linux):
+      discard c_prctl(prSetPdeathsig, culong(SIGKILL))
+      if getppid() != hostPid: exitnow(125)
+
+  proc closeFrom(low: cint) =
+    ## RFC-0016 INT-29 (R2-24). Every descriptor from `low` up, in a child
+    ## about to `exec`: what the host opened without `O_CLOEXEC` is not the
+    ## program's to inherit.
+    when defined(linux):
+      if c_syscall(clong(436), cuint(low), high(cuint), cuint(0)) == 0:
+        return   # close_range(2)
+    var r: RLimit
+    var top = 65536
+    if getrlimit(RLIMIT_NOFILE, r) == 0 and finite(r.rlim_max) and
+       r.rlim_max < top:
+      top = r.rlim_max
+    for fd in low ..< cint(top): discard close(fd)
+
+proc replayLimitSignals*(): seq[tuple[signal: int, limit: string]] =
+  ## RFC-0016 INT-28. The signals a replay child's resource limits stop it
+  ## with, and the word for the limit each names in `ReplayChild.why`: a run
+  ## one stops is undecided (`reTimedOut`). None on Windows, where the job's
+  ## limits end the process and the replay's deadline bounds its time.
+  when defined(posix):
+    @[(int(SIGXCPU), "CPU"), (int(SIGXFSZ), "file-size")]
+  else:
+    @[]
+
 # ---- fork ---------------------------------------------------------------------
 
 when replayForks:
-  import std/posix
-
   proc c_fflush(f: pointer): cint {.importc: "fflush", header: "<stdio.h>".}
   proc c_signal(sig: cint; handler: pointer): pointer
     {.importc: "signal", header: "<signal.h>".}
   proc c_atexit(f: proc () {.noconv.}): cint
     {.importc: "atexit", header: "<stdlib.h>".}
 
-  var rlimitCore {.importc: "RLIMIT_CORE", header: "<sys/resource.h>".}: cint
-  var rlimitAs {.importc: "RLIMIT_AS", header: "<sys/resource.h>".}: cint
-
   const hasOnExit = defined(linux) and not defined(musl)
   when hasOnExit:
     proc c_on_exit(f: proc (status: cint; arg: pointer) {.noconv.};
                    arg: pointer): cint
       {.importc: "on_exit", header: "<stdlib.h>".}
-  when defined(linux):
-    proc c_prctl(option: cint; arg: culong): cint
-      {.importc: "prctl", header: "<sys/prctl.h>".}
-    const prSetPdeathsig = cint(1)
 
   var childFd = cint(-1)
 
@@ -612,28 +841,12 @@ when replayForks:
       childWrite(['\n'])
       exitnow(120)
 
-  proc enterChild() =
+  proc enterChild(hostPid: Pid; cpuSeconds, processes: int) =
     ## Everything that keeps the child's ending from touching the host's world.
-    when defined(linux):
-      # Dies with the host, and starts its own group so that a kill at the
-      # bound reaches what the SUT started.
-      discard c_prctl(prSetPdeathsig, culong(SIGKILL))
-      discard setpgid(0, 0)
-    var noCore = RLimit(rlim_cur: 0, rlim_max: 0)
-    discard setrlimit(rlimitCore, noCore)
-    when defined(linux):
-      # The host's own mappings count against the limit, so it is relative.
-      var pages = 0
-      try:
-        pages = parseInt(readFile("/proc/self/statm").splitWhitespace()[0])
-      except CatchableError:
-        pages = 0
-      if pages > 0:
-        let total = pages * int(sysconf(SC_PAGESIZE)) + replayMemoryLimit
-        var r: RLimit
-        if getrlimit(rlimitAs, r) == 0:
-          r.rlim_cur = total
-          discard setrlimit(rlimitAs, r)
+    enterGroup(hostPid)
+    limitChild(cpuSeconds, processes)
+    # The host's own mappings count against the limit, so it is relative.
+    limitMemory()
     # Nim's handlers turn a fault into `exit(1)` after a trace; the report must
     # say what happened. A SUT's own handler installed later still wins.
     for s in [SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT]:
@@ -651,8 +864,9 @@ when replayForks:
     hostOomHook = outOfMemHook   # the SUT runs under the host's, after ours
     outOfMemHook = childOom
 
-  proc runChildBody(body: proc (): ReplayReport {.closure, gcsafe.}) =
-    enterChild()
+  proc runChildBody(body: proc (): ReplayReport {.closure, gcsafe.};
+                    hostPid: Pid; cpuSeconds, processes: int) =
+    enterChild(hostPid, cpuSeconds, processes)
     hitOut = childOut
     var rep: ReplayReport
     try:
@@ -663,22 +877,40 @@ when replayForks:
     childWrite(['E', flagsChar(rep)])
     exitnow(0)
 
-  proc killChild(pid: Pid) =
-    ## Only for a child not yet waited for: until then its pid, and the group
-    ## it leads, are still this process's and cannot name another.
-    when defined(linux):
-      discard kill(-pid, SIGKILL)   # its group: what the SUT started with it
-    discard kill(pid, SIGKILL)
+  proc reportPipe(fds: var array[2, cint]): bool =
+    ## The report's pipe, close-on-exec from birth where the system can
+    ## (`pipe2`, R1-32: another thread's `fork` and `exec` between `pipe` and
+    ## `fcntl` would hand its program both ends; macOS has no `pipe2`).
+    ## RFC-0016 INT-29 (R2-26): neither end is one of fd 0-2, which a host
+    ## that closed them is handed here, and over which the child puts
+    ## `/dev/null`, closing its end of the report.
+    when declared(c_pipe2):
+      if c_pipe2(fds, O_CLOEXEC) != 0: return false
+    else:
+      if pipe(fds) != 0: return false
+      discard fcntl(fds[0], F_SETFD, FD_CLOEXEC)
+      discard fcntl(fds[1], F_SETFD, FD_CLOEXEC)
+    for i in 0 .. 1:
+      if fds[i] < 3:
+        let d = fcntl(fds[i], F_DUPFD_CLOEXEC, cint(3))
+        if d < 0:
+          discard close(fds[0])
+          discard close(fds[1])
+          return false
+        discard close(fds[i])
+        fds[i] = d
+    true
 
   proc runReplayForked*(body: proc (): ReplayReport {.closure, gcsafe.};
                         timeoutMs: int): ReplayChild =
     ## RFC-0005 S8ct. `body` in a forked child, killed at `timeoutMs` (`<= 0`: no
     ## bound).
     var fds: array[2, cint]
-    if pipe(fds) != 0:
+    if not reportPipe(fds):
       return refused("a pipe could not be created for the replay's child")
-    discard fcntl(fds[0], F_SETFD, FD_CLOEXEC)
-    discard fcntl(fds[1], F_SETFD, FD_CLOEXEC)
+    let cpuSeconds = cpuBound(timeoutMs)
+    let processes = processBound()
+    let hostPid = getpid()
     # Whatever the host has buffered must not be written twice.
     discard c_fflush(nil)
     let pid = fork()
@@ -690,17 +922,16 @@ when replayForks:
     if pid == 0:
       childFd = fds[1]
       discard close(fds[0])
-      runChildBody(body)
+      runChildBody(body, hostPid, cpuSeconds, processes)
       exitnow(122)   # not reached
-    {.cast(gcsafe).}:
-      inc replayExecCount
+    countExecution()
     discard close(fds[1])
-    when defined(linux):
-      discard setpgid(pid, pid)   # either side may run first
+    discard setpgid(pid, pid)   # either side may run first
     let start = getMonoTime()
     var rd: ReportReader
     var eof = false
     var reaped = false       # waited for: its pid is no longer the host's
+    var ended = false        # ended, and not yet waited for
     var haveStatus = false   # and `status` is what it ended with
     var status: cint = 0
     var killed = false
@@ -726,7 +957,7 @@ when replayForks:
         elif n == 0 or errno != EINTR:
           eof = true
       got
-    while not (rd.done or rd.corrupt or reaped):
+    while not (rd.done or rd.corrupt or reaped or ended):
       var wait = cint(50)
       if timeoutMs > 0:
         let left = timeoutMs - (getMonoTime() - start).inMilliseconds
@@ -740,12 +971,18 @@ when replayForks:
         discard usleep(cuint(wait) * 1000)
       if not (rd.done or rd.corrupt):
         # A child's own children may hold the pipe open past its end, and the
-        # pipe may be closed while it still runs.
-        reap(WNOHANG)
+        # pipe may be closed while it still runs. RFC-0016 INT-28 (R1-24):
+        # an ended child is left unwaited for, so its group is still the
+        # host's to kill below.
+        case hasEnded(pid)
+        of 1: ended = true
+        of -1: reaped = true
+        else: discard
     if not reaped:
-      # Timed out, flooding, or finished and about to `_exit`: either way
-      # nothing more is read from it. Not yet waited for, so its pid is ours.
-      killChild(pid)
+      # Timed out, flooding, finished, or ended by itself: either way nothing
+      # more is read from it, and what the SUT started dies with it. Not yet
+      # waited for, so its pid and its group are ours.
+      killGroup(pid)
       while not reaped: reap(0)
     # What a child wrote before it ended, up to the cap: a SUT's children
     # outside its group may still be writing.
@@ -755,6 +992,7 @@ when replayForks:
     if rd.corrupt:
       return stopped("")
     var c = ReplayChild(reached: rd.reached, outOfMemory: rd.outOfMemory)
+    let limit = if haveStatus: limitEnding(status, cpuSeconds) else: ""
     if rd.finished:
       readFlags(rd.flags, c)
       c.ending = reFinished
@@ -763,6 +1001,9 @@ when replayForks:
       c.code = rd.code
     elif killed:
       c.ending = reTimedOut
+    elif limit.len > 0:
+      c.ending = reTimedOut
+      c.why = limit
     elif haveStatus and WIFSIGNALED(status):
       c.ending = reSignalled
       c.code = int(WTERMSIG(status))
@@ -798,7 +1039,7 @@ when replayReexecs:
       ## have, and no more, whatever the witness file says.
 
   type ChildRole = object
-    site, payload, output: string
+    site, payload, output, input: string
 
   var childRoleRead = false
   var childRoleVal: ChildRole
@@ -846,11 +1087,11 @@ when replayReexecs:
     if siteLen <= 0 or siteLen > int64(data.len - head): return
     result = ChildRole(site: data[head ..< head + int(siteLen)],
                        payload: data[head + int(siteLen) .. ^1],
-                       output: dir / "out")
+                       output: dir / "out", input: dir / "in")
     # One child: a process the SUT starts must not take itself for it.
+    # RFC-0016 INT-29: `in` is removed when the child takes the witness
+    # (`replayChildEntry`), not here.
     delEnv(replayChildEnv)
-    try: removeFile(dir / "in")
-    except CatchableError: discard
 
   proc childRole(): ChildRole =
     {.cast(gcsafe).}:
@@ -886,6 +1127,8 @@ when replayReexecs:
     const
       jobObjectExtendedLimitInformation = 9'i32
       jobObjectLimitProcessMemory = 0x100'u32
+      jobObjectLimitActiveProcess = 0x8'u32
+      jobObjectLimitProcessTime = 0x2'u32
       jobObjectLimitKillOnJobClose = 0x2000'u32
       jobObjectLimitDieOnUnhandledException = 0x400'u32
       createSuspendedFlag = 0x4'i32
@@ -917,6 +1160,26 @@ when replayReexecs:
       {.importc: "AssignProcessToJobObject", stdcall, dynlib: "kernel32".}
     proc terminateJobObject(job: Handle; code: uint32): int32
       {.importc: "TerminateJobObject", stdcall, dynlib: "kernel32".}
+    proc queryInformationJobObjectR(job: Handle; cls: int32; info: pointer;
+                                    size: uint32; got: ptr uint32): int32
+      {.importc: "QueryInformationJobObject", stdcall, dynlib: "kernel32".}
+    proc resumeThreadR(thread: Handle): uint32
+      {.importc: "ResumeThread", stdcall, dynlib: "kernel32".}
+    proc getCurrentProcessR(): Handle
+      {.importc: "GetCurrentProcess", stdcall, dynlib: "kernel32".}
+    proc localFreeR(p: pointer): pointer
+      {.importc: "LocalFree", stdcall, dynlib: "kernel32".}
+    proc openProcessTokenR(process: Handle; access: uint32; token: ptr Handle):
+        int32 {.importc: "OpenProcessToken", stdcall, dynlib: "advapi32".}
+    proc getTokenInformationR(token: Handle; cls: int32; info: pointer;
+                              size: uint32; got: ptr uint32): int32
+      {.importc: "GetTokenInformation", stdcall, dynlib: "advapi32".}
+    proc convertSidToStringSidW(sid: pointer; str: ptr WideCString): int32
+      {.importc: "ConvertSidToStringSidW", stdcall, dynlib: "advapi32".}
+    proc convertStringSdToSdW(sddl: WideCString; revision: uint32;
+                              sd: ptr pointer; size: ptr uint32): int32
+      {.importc: "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+        stdcall, dynlib: "advapi32".}
     proc setErrorModeR(mode: uint32): uint32
       {.importc: "SetErrorMode", stdcall, dynlib: "kernel32".}
     proc createFileWR(name: WideCString; access, share: uint32; attrs: pointer;
@@ -976,14 +1239,67 @@ when replayReexecs:
     type OutHandle = Handle
     const noOut = Handle(-1)
 
-    proc makePrivateDir(): string =
+    proc ownerOnlySddl(): string =
+      ## RFC-0016 INT-29 (R2-23). A protected DACL granting this process's
+      ## user, and no one else, full access, inherited by what is created in
+      ## the directory: "" when the user cannot be read.
+      const tokenQuery = 0x8'u32
+      const tokenUserClass = 1'i32
+      var token: Handle
+      if openProcessTokenR(getCurrentProcessR(), tokenQuery, addr token) == 0:
+        return ""
+      var buf: array[256, byte]
+      var got: uint32
+      let ok = getTokenInformationR(token, tokenUserClass, addr buf[0],
+                                    uint32(buf.len), addr got)
+      discard closeHandle(token)
+      if ok == 0: return ""
+      # TOKEN_USER: its first field is the user's SID.
+      let sid = cast[ptr pointer](addr buf[0])[]
+      var str: WideCString
+      if convertSidToStringSidW(sid, addr str) == 0: return ""
+      let sidText = $str
+      discard localFreeR(cast[pointer](str))
+      "D:P(A;OICI;FA;;;" & sidText & ")"
+
+    proc replayPrivateDir*(): string =
       ## A directory of this host's own, by a name no one can guess, which
       ## `CreateDirectoryW` refuses to reuse. "" when none could be made.
+      ## RFC-0016 INT-29 (R2-23): its DACL is this user's alone and protected,
+      ## so it does not inherit what the temporary directory grants others;
+      ## the files the host creates in it inherit it.
       var r: array[16, byte]
       if not urandom(r): return ""
+      let sddl = ownerOnlySddl()
+      if sddl.len == 0: return ""
+      var sd: pointer
+      if convertStringSdToSdW(newWideCString(sddl), 1, addr sd, nil) == 0:
+        return ""
+      var sa = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
+                                   lpSecurityDescriptor: sd,
+                                   bInheritHandle: 0)
       let dir = getTempDir() / ("nelli-replay-" & toHexString(r))
-      if createDirectoryWR(newWideCString(dir), nil) == 0: return ""
+      let made = createDirectoryWR(newWideCString(dir), addr sa)
+      discard localFreeR(sd)
+      if made == 0: return ""
       dir
+
+    proc replayLimitsHeld*(): ReplayLimits =
+      ## RFC-0016 INT-28. The limits of the job this process runs in.
+      result = ReplayLimits(memory: -1, cpuSeconds: -1, fileSize: -1,
+                            processes: -1)
+      var lim: JobExtendedLimits
+      if queryInformationJobObjectR(Handle(0),
+                                    jobObjectExtendedLimitInformation,
+                                    addr lim, uint32(sizeof(lim)), nil) == 0:
+        return
+      let f = lim.basic.limitFlags
+      if (f and jobObjectLimitProcessMemory) != 0:
+        result.memory = int64(lim.processMemoryLimit)
+      if (f and jobObjectLimitActiveProcess) != 0:
+        result.processes = int64(lim.basic.activeProcessLimit)
+      if (f and jobObjectLimitProcessTime) != 0:
+        result.cpuSeconds = lim.basic.perProcessUserTime div 10_000_000
 
     proc writeNew(path, data: string): bool =
       ## `data` to `path`, which must not exist yet (`CREATE_NEW`).
@@ -1074,8 +1390,12 @@ when replayReexecs:
       var lim: JobExtendedLimits
       lim.basic.limitFlags = jobObjectLimitProcessMemory or
                              jobObjectLimitKillOnJobClose or
-                             jobObjectLimitDieOnUnhandledException
+                             jobObjectLimitDieOnUnhandledException or
+                             jobObjectLimitActiveProcess
       lim.processMemoryLimit = uint(replayMemoryLimit)
+      # RFC-0016 INT-28 (R1-31): the child and what the SUT starts, which
+      # the job holds (no breakaway) and kills when it is closed.
+      lim.basic.activeProcessLimit = uint32(replayProcessLimit + 1)
       if setInformationJobObject(job, jobObjectExtendedLimitInformation,
                                  addr lim, uint32(sizeof(lim))) == 0:
         discard closeHandle(job)
@@ -1143,10 +1463,18 @@ when replayReexecs:
         discard closeHandle(job)
         c.why = "the replay's child could not join its job object"
         return false
-      discard resumeThread(pi.hThread)
+      # RFC-0016 INT-28 (R1-32): a child left suspended would run into the
+      # bound, or, with none, hold the host forever.
+      if resumeThreadR(pi.hThread) == high(uint32):
+        let rerr = getLastError()
+        discard terminateJobObject(job, 1)
+        discard closeHandle(pi.hThread)
+        discard closeHandle(pi.hProcess)
+        discard closeHandle(job)
+        c.why = "the replay's child could not be resumed (error " & $rerr & ")"
+        return false
       discard closeHandle(pi.hThread)
-      {.cast(gcsafe).}:
-        inc replayExecCount
+      countExecution()
       # In slices, so the report's size is watched and no bound wraps an
       # `int32`.
       let start = getMonoTime()
@@ -1206,10 +1534,18 @@ when replayReexecs:
       f.body()
       switchToFiberR(f.mainFiber)
 
+    const fiberSafe = defined(gcArc) or defined(gcOrc) or defined(gcAtomicArc)
+      ## RFC-0016 INT-30 (R2-28). A tracing collector (refc, mark-and-sweep,
+      ## Boehm) scans the thread's stack from where it runs to the bottom it
+      ## recorded at the thread's start: run on a fiber's stack, elsewhere in
+      ## memory, that scan spans whatever lies between the two, and misses
+      ## the references on the fiber's own. ARC and ORC scan no stack. So
+      ## only they run the SUT on a fiber; the others run it on the thread.
+
     proc runOnStack(stack: int; body: proc () {.closure.}) =
       ## `body` on a fiber whose stack reserve is the calling thread's size in
       ## the host. `body` catches what it raises.
-      if stack <= 0:
+      if stack <= 0 or not fiberSafe:
         body()
         return
       let mainFiber = convertThreadToFiberR(nil)
@@ -1237,19 +1573,13 @@ when replayReexecs:
   else:
     # -d:nelliReplayReexec on POSIX: the same protocol with the same files, to
     # run this path where it can be debugged.
-    import std/posix
-
     proc c_exit_now(code: cint) {.importc: "_exit", header: "<unistd.h>".}
-    # At module scope: an `importc` var declared in a proc is emitted as a C
-    # local of that name, which shadows the enum constant with an
-    # uninitialised one, and `setrlimit` then fails without a word.
-    var rlimitAsReexec {.importc: "RLIMIT_AS", header: "<sys/resource.h>".}: cint
     var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
 
     type OutHandle = cint
     const noOut = cint(-1)
 
-    proc makePrivateDir(): string =
+    proc replayPrivateDir*(): string =
       ## A directory only this user can enter, by a name `mkdtemp` chose and
       ## created. "" when none could be made.
       var tmpl = getTempDir() / "nelli-replay-XXXXXX"
@@ -1308,10 +1638,18 @@ when replayReexecs:
                       c: var ReplayChild; lost, flooded: var bool): bool =
       ## As the Windows one. The child leads a process group of its own, and
       ## is signalled, it and its group, only while it is not yet waited for:
-      ## until then its pid cannot name another process (R1-19).
-      let exe = getAppFilename()
-      let args = allocCStringArray([exe])
+      ## until then its pid cannot name another process (R1-19). RFC-0016
+      ## INT-28 (R1-24): that holds when it ended by itself too, so what the
+      ## SUT started is killed then as well.
+      # RFC-0016 INT-28 (R1-32): on Linux the running image itself, which
+      # `exec` reaches when its file was deleted or replaced since it started
+      # (`getAppFilename` then names " (deleted)", or another program).
+      let exe = when defined(linux): "/proc/self/exe" else: getAppFilename()
+      let args = allocCStringArray([getAppFilename()])
       let envp = allocCStringArray(childEnvironment(spec))
+      let cpuSeconds = cpuBound(timeoutMs)
+      let processes = processBound()
+      let hostPid = getpid()
       let pid = fork()
       if pid < 0:
         let err = errno
@@ -1320,35 +1658,33 @@ when replayReexecs:
         c.why = "fork failed (errno " & $err & ")"
         return false
       if pid == 0:
-        discard setpgid(0, 0)
+        enterGroup(hostPid)
+        limitChild(cpuSeconds, processes)
         let null = open("/dev/null", O_RDWR)
         if null >= 0:
           discard dup2(null, 0)
           discard dup2(null, 1)
           discard dup2(null, 2)
+        closeFrom(3)
         discard execve(exe.cstring, args, envp)
+        # The witness is not taken: the host reads that as no run
+        # (`runReplayReexec`), whatever this status says.
         c_exit_now(127)
       deallocCStringArray(args)
       deallocCStringArray(envp)
       discard setpgid(pid, pid)   # either side may run first
-      {.cast(gcsafe).}:
-        inc replayExecCount
+      countExecution()
       let start = getMonoTime()
       var status: cint
-      var reaped = false       # waited for: its pid is no longer the host's
+      var gone = false         # no longer the host's child: its status is lost
       var haveStatus = false
       var killed = false
       var nap = 1
       while true:
-        let w = waitpid(pid, status, WNOHANG)
-        if w == pid:
-          reaped = true
-          haveStatus = true
-          break
-        if w < 0:
-          if errno == EINTR: continue
-          # ECHILD: the host ignores SIGCHLD, or another wait took it.
-          reaped = true
+        let e = hasEnded(pid)
+        if e == 1: break       # ended, not yet waited for: its group is ours
+        if e < 0:
+          gone = true
           break
         if outputSize(output) > replayReportCap:
           flooded = true
@@ -1361,9 +1697,8 @@ when replayReexecs:
             break
         discard usleep(cuint(min(int64(nap), left)) * 1000)
         nap = min(nap * 2, 20)
-      if not reaped:
-        discard kill(-pid, SIGKILL)   # its group: what the SUT started with it
-        discard kill(pid, SIGKILL)
+      if not gone:
+        killGroup(pid)
         while true:
           let w = waitpid(pid, status, 0)
           if w == pid:
@@ -1371,10 +1706,14 @@ when replayReexecs:
             break
           if w < 0 and errno == EINTR: continue
           break
+      let limit = if haveStatus: limitEnding(status, cpuSeconds) else: ""
       if flooded:
         discard
       elif killed:
         c.ending = reTimedOut
+      elif limit.len > 0:
+        c.ending = reTimedOut
+        c.why = limit
       elif haveStatus and WIFSIGNALED(status):
         c.ending = reSignalled
         c.code = int(WTERMSIG(status))
@@ -1395,10 +1734,9 @@ when replayReexecs:
         var sa: Sigaction
         sa.sa_handler = SIG_DFL
         discard sigaction(s, sa, nil)
-      var r: RLimit
-      if getrlimit(rlimitAsReexec, r) == 0:
-        r.rlim_cur = replayMemoryLimit
-        discard setrlimit(rlimitAsReexec, r)
+      # Relative to this image, as the fork path's (RFC-0016 INT-28); the
+      # other limits were set before the `exec`.
+      limitMemory()
 
     proc endChild(code: int) =
       c_exit_now(cint(code))
@@ -1436,8 +1774,9 @@ when replayReexecs:
 
   proc childOut(b: char) {.nimcall, gcsafe.} =
     {.cast(gcsafe).}:
-      childOutput.write(b)
-      childOutput.flushFile()
+      if childOutput != nil:
+        childOutput.write(b)
+        childOutput.flushFile()
 
   proc inReplayChild*(): bool =
     ## RFC-0005 S8ct. This process is a replay's child. It starts no child of
@@ -1460,7 +1799,7 @@ when replayReexecs:
     if not urandom(r):
       return refused("no random bytes for the replay's private directory")
     let nonce = toHexString(r)
-    let dir = makePrivateDir()
+    let dir = replayPrivateDir()
     if dir.len == 0:
       return refused("a private directory could not be created for the " &
                      "replay's child")
@@ -1489,6 +1828,13 @@ when replayReexecs:
     rd.feed(readOutput(output, replayReportCap + 1))
     if flooded or rd.corrupt:
       return stopped("")
+    if rd.total == 0 and c.ending != reTimedOut and fileExists(input):
+      # RFC-0016 INT-29 (R2-21, R2-22). The child ended without taking its
+      # witness: the program could not be started (a failed `execve` ends
+      # its fork with 127), or it could not open its report, or no site of
+      # it took the marker. The SUT did not run, so this is no crash of it.
+      return refused("the re-executed child ended before it took its " &
+                     "witness (" & describe(c) & "), so the SUT did not run")
     c.reached = rd.reached
     c.outOfMemory = rd.outOfMemory and c.ending != reTimedOut
     if rd.finished and c.ending != reTimedOut:
@@ -1511,12 +1857,20 @@ when replayReexecs:
     let role = childRole()
     if role.site.len == 0 or role.site != site: return false
     quietChild()
+    # RFC-0016 INT-29 (R2-22). The report first: a child that cannot write
+    # one ends here, its witness not taken (`in` left), which the host reads
+    # as no run. Before, the SUT ran and its ending was written to nil.
+    try:
+      childOutput = open(role.output, fmWrite)
+    except CatchableError:
+      endChild(124)
+    try: removeFile(role.input)
+    except CatchableError: discard
     hostOomHookR = outOfMemHook
     outOfMemHook = childOomR
     var rep: ReplayReport
     var failed = false
     try:
-      childOutput = open(role.output, fmWrite)
       hitOut = childOut
       let payload = role.payload
       var stack = (if payload.len >= 8: getInt64(payload, 0) else: 0'i64)

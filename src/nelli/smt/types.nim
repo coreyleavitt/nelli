@@ -2247,6 +2247,13 @@ type
                                      ## only as a name. Keys the program;
                                      ## the walker never reads it. Empty
                                      ## where the SUT calls none.
+    implOpen*: string
+                                     ## RFC-0016 INT-31. Why some body the
+                                     ## SUT reaches natively is not in
+                                     ## `implDigest` (a foreign body, a proc
+                                     ## variable's target); "" when every
+                                     ## one is. A claim a replay settled is
+                                     ## then not cached.
 
   CallStat* = object
     name*:      string

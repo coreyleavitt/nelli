@@ -146,6 +146,54 @@ func constructRows(): seq[ConstructKey] =
     "system's `==` on two seqs of an atom element (RFC-0016 PRC-34): equal " &
     "lengths and element-wise `==`, quantifier free (an unrolled bound, or " &
     "masked data arrays)")
+  # --- cache/ and db/: what the verdict cache serves and what `forAll` does
+  # with a failing database (RFC-0016 INT-31, INT-33). Not a verdict the walk
+  # gives; each stays as fixed (`pinNever`).
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["cache/key/impl"], none(SymexErrorKind),
+    "a claim a replay settled is never served after a body the key cannot " &
+    "see changes: a foreign body or a proc variable's target keeps it out of " &
+    "the cache, and the walk declines what else it cannot read (INT-31)",
+    iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["cache/key/toolchain"], none(SymexErrorKind),
+    "a claim made under one toolchain is never served to a build under " &
+    "another: the key's `|tc=` segment is a digest of the compiler's `lib/` " &
+    "tree and binary, so a republish under the same `NimVersion` moves it " &
+    "(INT-31)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["concolic/flip/roots"], none(SymexErrorKind),
+    "a concolic flip's solve asserts the run-wide facts every walker query " &
+    "does (`globalRoots`) under the walker's caps (`checkCapped`), so a " &
+    "closure call's result is not free there (INT-33)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["db/secondary/guard"], none(SymexErrorKind),
+    "a failing secondary-corpus write is reported in `dbErrors` (and ends a " &
+    "`strictDb` run with a report), never raised out of `forAll` (INT-33)",
+    iNever, nrByDesign)
+  # --- replay/: the replay child and its wire (RFC-0016 INT-28..INT-30). Not a
+  # verdict the walk gives: how the process that confirms a witness behaves.
+  # Each stays as hardened (`pinNever`, the host's native fact).
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/child/lifecycle"], none(SymexErrorKind),
+    "a replay child's lifecycle: what the SUT starts dies with the child " &
+    "however it ends and with the host, and the replay count is exact under " &
+    "threads (INT-28)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/child/limits"], none(SymexErrorKind),
+    "a replay child runs under memory, process, CPU and file-size limits, " &
+    "and a run a limit stops is undecided, not a crash (INT-28)", iNever,
+    nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/child/startup"], none(SymexErrorKind),
+    "a replay child's start-up: a child that never took its witness is no " &
+    "run, the private directory admits its owner alone, no descriptor leaks " &
+    "into the re-executed child (INT-29)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["replay/wire/codec"], none(SymexErrorKind),
+    "the replay wire codec reads a zero-size element, allocates and nests " &
+    "only as its bytes and `wireDepthLimit` allow (INT-30)", iNever,
+    nrByDesign)
   result.add declines(some(feUncheckedDiscBytes), ["uncheckedAssign/diff"],
     "a discriminator written under an unchecked assignment reinterprets the " &
     "object's bytes")

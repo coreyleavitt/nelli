@@ -1292,6 +1292,15 @@ suite "Phase 15 CR-2 — version bumps":
     ## masked data arrays; 395-398 reserved): 394->399.
     ## RFC-0016 W4 S8cp-r (PRC-34 / PRC-23: a store through a seq of
     ## seqs; a seq of seqs parameter's witness reader): 399->400.
+    ## RFC-0016 W4 rv0005-lows (a replay's child that never took its
+    ## witness, or a resource limit stopped, is no crash; a value nested
+    ## past the wire's depth declines; 382-403 reserved): 381->404.
+    ## RFC-0016 W4 rv0005-lows part 2 (a replay-settled claim of a program
+    ## whose foreign body or proc-variable target the key cannot see is not
+    ## stored; 405 reserved): 404->406.
+    ## RFC-0016 W4 rv0005-lows part 3 (the key carries the toolchain's
+    ## `lib/` and binary digest, `|tc=`; a concolic flip solves with the
+    ## walker's run-wide facts): 406->407.
     check symexWalkerVersion == "412"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

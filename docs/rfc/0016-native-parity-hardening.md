@@ -1005,7 +1005,7 @@ state (§8.2).
 | W-17 | `nimOldCaseObjects`/`strictCaseObjects` unread | K5a (`caseObjects` field) | |
 | W-22 | `parseBool` with `len 4` hangs | K2-0 (with CRH-09) | K2-0 (2026-11-08) reproduces: the walk is still running after 25 s (child process, marker file shows it entered `symexFind`); pinned in `tests/tsymex_0016_k20_probes_child.nim` (CRH-08 hangs the same way). |
 | W-23 | `--mm:refc` stops the compile | W1-c1b (refusal) | |
-| W-24 | `filterIt` raises `weInternalWalkerFault` | K2-0 (with CRH-09) | closed (K2-0, 2026-11-08): `filterIt` no longer raises `weInternalWalkerFault`; it is a named `feUnsupportedExprKind` decline (`nnkCommand`), pinned in `tests/tsymex_0016_k20_probes.nim`. Precision stays W-36's neighbour. |
+| W-24 | `filterIt` raises `weInternalWalkerFault` | K2-0 (with CRH-09) | closed (K2-0, 2026-11-08): `filterIt` no longer raises `weInternalWalkerFault`; it is a named `feUnsupportedExprKind` decline (`nnkCommand`), pinned in `tests/tsymex_0016_k20_probes.nim`. Precision stays W-36's neighbour. int6 D1 (73e91183) reads that command as a call, so `filterIt` is walked; the row is re-pinned through `pinFind` (the sat witness `@[1]` replays natively; a never-reached label is an untrusted `sxUnknown` past the k-unroll bound, never a sat). |
 | W-27 | macro `error()` sites reachable from SUTs | K2a | |
 | W-50 | the build profile keyed and read | W1-c1a, K5a | |
 | W-51 | per-build memory pins | K5b | closed |

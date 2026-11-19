@@ -220,6 +220,11 @@ proc filterSut(s: seq[int]) =
   let r = s.filterIt(it > 0)
   if r.len > 0: symexTarget("hit")
 
+proc filterNever(s: seq[int]) =
+  ## Every element `filterIt(it > 0)` keeps is positive.
+  let r = s.filterIt(it > 0)
+  if r.len > 0 and r[0] <= 0: symexTarget("hit")
+
 proc small(k: int) =
   if k * 3 == 21: symexTarget("hit")
 
@@ -340,10 +345,23 @@ suite "RFC-0016 K2-0: closure probes (W-19c)":
                      domain = sampled([0, 3, 5]))
 
 suite "RFC-0016 K2-0: CRH-09 items":
-  test "W-24: filterIt is a named decline, not a walker fault":
+  test "W-24: filterIt is walked, its verdicts agree with native":
+    # K2-0 pinned a named feUnsupportedExprKind decline: Nim 2.2.10's
+    # filterIt ends in `move result`, a command the walker's parseExpr did not
+    # read. int6 D1 (73e91183) reads a command as a call, so filterIt is
+    # walked: the sat witness replays natively (pinFind judges it). The
+    # never-reached label has no witness; past the k-unroll bound it is an
+    # untrusted sxUnknown, never a sat.
     check "hit" in nativeRun(filterSut(@[1])).hits
-    pinDecline(filterSut, cellKey(axStdlibBody, "sequtils.filterIt"), feUnsupportedExprKind,
-               excluding = {weInternalWalkerFault})
+    let r = pinFind(filterSut, tLabel("hit"), pinSettingsConst)
+    checkpoint show(r.errors)
+    check r.status == sxSat and r.trusted
+    check not r.errors.named(weInternalWalkerFault)
+    check not r.errors.named(feUnsupportedExprKind)
+    let u = pinFind(filterNever, tLabel("hit"), pinSettingsConst)
+    checkpoint show(u.errors)
+    check u.status != sxSat
+    check u.status == sxUnsat or not u.trusted
 
   test "HRV-45: cast[int32] over a helper's result is a named decline":
     pinDecline(cast32, cellKey(axTypeOp, "cast/int32"), feUnsupportedExprKind)

@@ -7668,14 +7668,34 @@ proc convIntoFloatRange(conv, operand: NimNode; preamble: var seq[IRStmt];
   ## int side, an operand of a float range inside the target is checked too
   ## (probed: `w = v` with `v: range[0.0 .. 1.0]` holding 2.0, which
   ## float64's `/=` stores, and `w: range[0.0 .. 1.5]` raises).
+  ##
+  ## The check is handed a float of the range's own width, always (the
+  ## lowering's case over the operand's kind relies on it): an integer
+  ## operand (`U(i)`, legal Nim) is converted to the range's base first, as
+  ## the C backend's `(double)i` does (`iekConvIntToFloat`, RNE), and an
+  ## operand of any other kind is declined here. int6 had passed the
+  ## integer through, and its lowering raised "operand is not a float".
   let tgt = floatRangeOf(classifyType(conv).ty)
   if tgt == nil: return nil
-  let src = classifyType(operand).ty
+  let src = distinctGround(classifyType(operand).ty)
   var v = parseExpr(operand, preamble, ctx)
-  if src != nil and src.kind in {itFloat32, itFloat64} and src.kind != tgt.kind:
-    # RFC-0016 K2b: the width change first (`fp.to_fp`, RNE)
-    let op = if tgt.kind == itFloat32: "toFloat32" else: "toFloat64"
-    v = mkMathCall(admitFloatCall(op, 1), op, @[v])
+  if src != nil and src.kind in {itFloat32, itFloat64}:
+    if src.kind != tgt.kind:
+      # RFC-0016 K2b: the width change first (`fp.to_fp`, RNE)
+      let op = if tgt.kind == itFloat32: "toFloat32" else: "toFloat64"
+      v = mkMathCall(admitFloatCall(op, 1), op, @[v])
+  elif src != nil and src.kind == itInt:
+    v = mkConvIntToFloat(v, if tgt.kind == itFloat32: 32 else: 64)
+  else:
+    preamble.add ctx.declineAtSite(
+      feUnsupportedExprKind,
+      "a conversion into the float range `" & conv.repr & "` from an " &
+        "operand that is neither a float nor an integer (" &
+        (if src == nil: "unclassified" else: $src.kind) &
+        ") -- degraded to sxUnknown (feUnsupportedExprKind)",
+      "float range conversion from a non-numeric operand " &
+        "(feUnsupportedExprKind)", halt = true)
+    return zeroValueForType(tgt)
   mkFloatRangeCheck(v, tgt)
 
 proc augStoresThroughRange(op: NimNode): bool =

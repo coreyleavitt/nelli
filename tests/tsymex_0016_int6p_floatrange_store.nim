@@ -121,6 +121,18 @@ proc conv64(a: float) =
   symexTarget("t")
   discard v
 
+proc conv64Int(a: int) =
+  ## int6-r2: an integer converted into a float range is converted to the
+  ## range's base, then checked (it faulted the walk: "operand is not a
+  ## float")
+  let v = U64(a)
+  symexTarget("t")
+  discard v
+
+proc conv64IntTop(a: int) =
+  let v = U64(a)
+  if v == 1.0: symexTarget("hit")
+
 # --- float32 -----------------------------------------------------------------
 
 proc asg32(a: float32) =
@@ -155,6 +167,12 @@ proc mul32(a: float32) =
 proc div32(a: float32) =
   var v: U32 = 0.5'f32
   v /= a
+  symexTarget("t")
+  discard v
+
+proc conv32Int(a: int32) =
+  ## int6-r2: the same into a float32 range
+  let v = U32(a)
   symexTarget("t")
   discard v
 
@@ -214,6 +232,10 @@ suite "int6 float range store: float64":
   test "U64(a)":
     raises(conv64)
     reaches(conv64, tLabel("t"))
+  test "U64(i) for an integer i (int6-r2)":
+    raises(conv64Int)
+    reaches(conv64Int, tLabel("t"))
+    reaches(conv64IntTop, tLabel("hit"))
 
 suite "int6 float range store: float32":
   test "v = a":
@@ -223,6 +245,9 @@ suite "int6 float range store: float32":
     raises(add32)
     raises(sub32)
     raises(mul32)
+  test "U32(i) for an integer i (int6-r2)":
+    raises(conv32Int)
+    reaches(conv32Int, tLabel("t"))
   test "v /= a on a float32 range checks":
     raises(div32)
     neverRaises(div32In)
@@ -235,3 +260,5 @@ suite "int6 float range: NaN is a value of the type":
 suite "int6 float range store: walker version":
   test "walker version floor >= 463":
     check parseInt(symexWalkerVersion) >= 463
+  test "walker version floor >= 480 (int6-r2: an integer into a float range)":
+    check parseInt(symexWalkerVersion) >= 480

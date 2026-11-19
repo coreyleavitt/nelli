@@ -337,7 +337,7 @@ proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
     of svFloat32:
       syncRangeDefectCond(sv.fp32 < mkFloat32(float32(e.cfrLo)) or
                           sv.fp32 > mkFloat32(float32(e.cfrHi)))
-    else: raise newException(ValueError, "range[float](): operand is not a float")  # [raise-audited: category-c: the parser emits iekConvFloatRange only over a float-typed operand of the range's width, which lowers to svFloat32/svFloat64]
+    else: raise newException(ValueError, "range[float](): operand is not a float")  # [raise-audited: category-c: mkFloatRangeCheck's two callers hand it a float of the range's width only -- convIntoFloatRange converts an integer operand (iekConvIntToFloat) or the other float width (toFloat32/toFloat64) first and declines any other kind at parse time, and augFloatRangeStore's value is the range slot's own float op -- which lowers to svFloat32/svFloat64]
     sv
   of iekMathCall:
     lowerMathCall(env, e)

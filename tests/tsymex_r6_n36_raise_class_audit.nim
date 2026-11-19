@@ -403,7 +403,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## E8 and F6 suites. No site was added; five were newly scanned.
     check total == 37
 
-  test "pattern (B) site inventory: 88 marked lines across the runtime family (80 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim + 5 runtime_exceptions/floats/closures when pinned)":
+  test "pattern (B) site inventory: 89 marked lines across the runtime family (80 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim + 6 runtime_exceptions/floats/closures when pinned)":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -471,9 +471,25 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## else). No site was added.
     ## 89 -> 88 (RFC-0016 K9c-g): `storeSeqElem`'s unsupported-kind raise is
     ## gone (an element type the model does not back taints in-band).
-    check total == 88
+    ## 88 -> 89 (RFC-0016 int6, 08039ffb; audited int6-r2, walker 480). One
+    ## new marked site: `runtime_floats.nim`'s `iekConvFloatRange` arm of
+    ## `lowerFloatArm`, the `else` of its case over the operand's kind. As
+    ## landed its category-c argument was false: `U(i)` for an integer `i`
+    ## passed the integer through `convIntoFloatRange` and reached this
+    ## raise (probed: `weInternalWalkerFault`, "operand is not a float").
+    ## int6-r2 made the argument true at the parser rather than re-wording
+    ## the marker: an integer operand is converted to the range's base first
+    ## (`iekConvIntToFloat`), the other float width is narrowed or widened
+    ## (`toFloat32`/`toFloat64`), any other kind declines at parse time, and
+    ## `augFloatRangeStore`'s value is the slot's own float op -- so the
+    ## operand always lowers to svFloat32/svFloat64. Pinned by
+    ## `tsymex_0016_int6p_floatrange_store`'s `U64(i)`/`U32(i)` cases. No
+    ## existing helper keeps a lowering's unexpected-kind `else` out of
+    ## pattern (B); its siblings in the same file (`float()`'s, `int()`'s,
+    ## `lowerFloatArm`'s final else) are category-c the same way.
+    check total == 89
 
-  test "N46-followup-3: pattern (B) category breakdown -- 88 category-c, 0 category-d (runtime family) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 89 category-c, 0 category-d (runtime family) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -503,7 +519,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 83 -> 84: the same `storeOrdinal` site added above (RFC-0005 S8cl).
     ## 84 -> 89: the five newly scanned pattern-(B) sites (D3-fix-c).
     ## 89 -> 88 (RFC-0016 K9c-g): see the inventory above.
-    check cCount == 88
+    ## 88 -> 89 (RFC-0016 int6, audited int6-r2): the same
+    ## `iekConvFloatRange` operand-kind site added above (category-c).
+    check cCount == 89
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime family)":

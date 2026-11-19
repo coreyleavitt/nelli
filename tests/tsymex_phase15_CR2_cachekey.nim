@@ -1461,7 +1461,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## compile order is replayed past it): 477->478.
     ## RFC-0016 int6-m6 (a stdlib routine whose body pushes check options is
     ## unreadable to the opaque defect scan, as a user one is): 478->479.
-    check symexWalkerVersion == "479"
+    ## RFC-0016 int6-r2 (an integer converted into a float range is
+    ## converted to the range's base before the check): 479->480.
+    check symexWalkerVersion == "480"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -1495,8 +1495,15 @@ const renderAsChoicesVersion* = "12"
   ##   routine, where it was read as one scope. Verdicts move (a trusted
   ##   label past such an opaque call is no longer trusted). No key bytes
   ##   change.
+  ## - RFC-0016 int6-r2 (479->480): a conversion into a float range from an
+  ##   integer (`U(i)`) converts the integer to the range's base first
+  ##   (`iekConvIntToFloat`), then checks, as Nim does; it reached the
+  ##   check's lowering as an integer and faulted the walk ("operand is not
+  ##   a float", sxUnknown). An operand of any other kind declines at parse
+  ##   time. Verdicts move (sxUnknown -> a definite verdict). Key bytes
+  ##   change: such a body's IR.
 
-const symexWalkerVersion* = "479"
+const symexWalkerVersion* = "480"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

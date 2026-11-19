@@ -58,6 +58,7 @@ import ./admission     ## RFC-0016 ADM-IR: `Admit`
 import ./stdlib_rows   ## RFC-0016 ADM-IR: `StdlibBody`
 import ./scan_kinds    ## RFC-0016 K2F-3: the shared scan kind lists
 import ./check_scan    ## RFC-0016 D5: the pure scan; this module is its adapter
+import ./magic_rows    ## RFC-0016 int6-u: `magicIs`, for `loopIncRegion`
 export check_scan, buildprofile.CheckOption
 
 {.warning[Deprecated]: off.}   # `NimNode.owner`: no replacement in 2.2.10
@@ -697,7 +698,7 @@ proc bodyAstOf(file: string): NimNode =
 const loopIncExemptions* = [
   (file: "system/iterators.nim", name: "unCheckedInc")]
   ## RFC-0016 int6-t. The push regions the opaque defect scan reads through
-  ## (`dsl_parser.bodyCheckPragma`): a template of the toolchain's `lib/` file,
+  ## (`bodyCheckPragma`): a template of the toolchain's `lib/` file,
   ## whose body is exactly `{.push overflowChecks: off.}` `inc(x)` `{.pop.}`,
   ## as expanded inside a routine of that same file. Each entry is audited, use
   ## site by use site, in `tests/0016-allowlist/pushexempt.txt`, which must
@@ -749,6 +750,129 @@ proc loopIncExempt*(owner, push: NimNode): bool =
       if isLoopIncTemplate(t, e.name) and t[6][0].lineInfoObj.line == pli.line:
         return true
 
+# ---- RFC-0016 int6-u: the typed body's check pragmas (moved from dsl_parser,
+# so the placement of a routine reads them too) ---------------------------
+
+proc pragmaWord*(n: NimNode): string =
+  if n.kind in {nnkIdent, nnkSym}: n.strVal.toLowerAscii else: ""
+
+proc isPushPragma*(n: NimNode): bool =
+  n.kind == nnkPragma and n.len >= 1 and pragmaWord(n[0]) == "push"
+
+proc isPopPragma*(n: NimNode): bool =
+  n.kind == nnkPragma and n.len == 1 and pragmaWord(n[0]) == "pop"
+
+proc namesCheck*(n: NimNode): bool =
+  ## A push item naming a check option (`rangeChecks: off`, `checks: on`).
+  let h = if n.kind == nnkExprColonExpr and n.len == 2: n[0] else: n
+  checksNamed(nameOf(h)) != {}
+
+proc literalOn*(v: NimNode): int =
+  ## 1 on, 0 off, -1 otherwise. The typed body folds `off` and a `const` to
+  ## an integer literal.
+  case v.kind
+  of nnkIntLit .. nnkUInt64Lit: (if v.intVal == 0: 0 elif v.intVal == 1: 1
+                                 else: -1)
+  of nnkIdent, nnkSym: turnsOn(v)
+  else: -1  # k2: fail-closed: -1: parseCheckPragma declines feCheckOption on a value it cannot read
+
+proc implMagic*(impl: NimNode): string =
+  ## RFC-0005 S8be / S8bl. The `{.magic: "X".}` name of the routine
+  ## declaration `impl`, or "". A magic's semantics are the compiler's: its
+  ## body, when it has one, is documentation or a VM fallback, never what
+  ## the call does. (Batch 6: S8be's `routineMagic` and S8bl's, which took
+  ## the declaration, are this one reader.)
+  if impl == nil or impl.kind notin RoutineNodes or impl.len < 5: return ""
+  let prag = impl[4]
+  if prag.kind != nnkPragma: return ""
+  for p in prag:
+    if p.kind == nnkExprColonExpr and p.len == 2 and
+       p[0].kind in {nnkIdent, nnkSym} and macros.strVal(p[0]) == "magic" and
+       p[1].kind in {nnkStrLit .. nnkTripleStrLit, nnkIdent, nnkSym}:
+      return macros.strVal(p[1])
+  ""
+
+proc routineMagic*(sym: NimNode): string =
+  ## RFC-0005 S8be. The `{.magic.}` name of the routine `sym` (`"AddI"` for
+  ## `system.+` on `int`), or "" when it has none.
+  if sym.kind != nnkSym: return ""
+  let impl =
+    try: sym.getImpl
+    except CatchableError: return ""
+  implMagic(impl)
+
+proc loopIncRegion(s, owner: NimNode): bool =
+  ## RFC-0016 int6-t. Is the statement list `s`, in the typed body of the
+  ## routine definition `owner`, exactly an audited loop-counter step: `{.push
+  ## overflowChecks: off.}` (no other option), `inc` (`system.inc`, by its
+  ## magic) of a local variable by one, `{.pop.}`, whose push is a
+  ## `check_options.loopIncExemptions` template's as its own module expands it
+  ## (`loopIncExempt`)? Its counter's loop bounds it (the allowlist's audit),
+  ## so it neither overflows nor leaves its range: reading the routine as one
+  ## scope loses nothing there.
+  if s.kind != nnkStmtList or s.len != 3: return false
+  let push = s[0]
+  if not isPushPragma(push) or push.len != 2: return false
+  let it = push[1]
+  if it.kind != nnkExprColonExpr or it.len != 2 or
+     checksNamed(nameOf(it[0])) != {coOverflow} or literalOn(it[1]) != 0:
+    return false
+  let step = s[1]
+  if step.kind notin {nnkCall, nnkCommand} or step.len notin 2 .. 3 or
+     not magicIs(routineMagic(step[0]), "Inc"): return false
+  if step[1].kind != nnkSym or step[1].symKind != nskVar: return false
+  if step.len == 3 and
+     (step[2].kind notin {nnkIntLit .. nnkInt64Lit} or step[2].intVal != 1):
+    return false
+  isPopPragma(s[2]) and loopIncExempt(owner, push)
+
+proc bodyCheckPragma*(n, owner: NimNode): NimNode =
+  ## RFC-0016 int6-t. The first pragma statement naming a check option in the
+  ## typed body `n` of the routine definition `owner` (a routine declared in
+  ## it aside: it is not run here), or nil. The typed body keeps every push
+  ## and pop as a pragma statement, whether the definition's text wrote it, a
+  ## template expanded it or a macro emitted it; int6-a5 and int6-m6 read the
+  ## text, which holds the first only. An audited loop-counter step
+  ## (`loopIncRegion`) is not one.
+  if n == nil or n.kind in RoutineNodes: return nil
+  if loopIncRegion(n, owner): return nil
+  if n.kind == nnkPragma:
+    for it in n:
+      if namesCheck(it): return n
+  for c in n:
+    result = bodyCheckPragma(c, owner)
+    if result != nil: return
+
+const typedHostKinds = {nskProc, nskFunc, nskMethod, nskIterator, nskConverter}
+  ## RFC-0016 int6-u. The owners a routine can be declared inside.
+
+proc typedPushingHost(impl: NimNode): string =
+  ## RFC-0016 int6-u. "" or why the typed routine definition `impl` is
+  ## declared inside a routine, at any depth, whose typed body holds a check
+  ## pragma (`bodyCheckPragma`): a routine declared there compiles under that
+  ## push where it stands. `pushingHost` reads the definitions' text, which a push
+  ## a template expands or a macro emits is not in; the typed body keeps every
+  ## push as a pragma statement. Fail closed: a host whose typed body cannot
+  ## be read, or a definition whose owner cannot be found, is named too.
+  if impl.len == 0 or impl[0].kind != nnkSym:
+    return "its definition's name is no symbol (`" &
+           (if impl.len > 0: impl[0].repr else: "") & "`), so the routine " &
+           "it is declared inside, if any, is not found"
+  var o = impl[0].owner
+  while o != nil and o.kind == nnkSym and o.symKind in typedHostKinds:
+    let h =
+      try: o.getImpl
+      except CatchableError: nil
+    let at = "it is declared inside `" & o.strVal & "` (line " &
+             $o.lineInfoObj.line & "), whose typed body "
+    if h == nil or h.kind notin RoutineNodes or h.len <= 6:
+      return at & "the scan cannot read: a push there would place it"
+    if bodyCheckPragma(h[6], h) != nil:
+      return at & "pushes check options (a template's or a macro's push " &
+             "among them): it takes that push's where it stands, which the " &
+             "scan of the module's statements does not read"
+    o = o.owner
+
 proc positionUnreadable(impl: NimNode; file: string; line: int;
                         st: CheckState; m: ModuleScan): string =
   ## RFC-0016 PRC-07. Why the routine's check state at the four checks cannot be
@@ -761,7 +885,8 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   ## already (`checks` keeps it, and the routine declines).
   ##
   ## RFC-0016 int6-a5: a routine declared inside a body that pushes is
-  ## unreadable here: its position is that push's. (A push among the
+  ## unreadable here: its position is that push's; RFC-0016 int6-u: that body
+  ## is read typed as well as by text (`typedPushingHost`). (A push among the
   ## routine's own statements is the parser's: it walks each pair as a
   ## region, and the opaque defect scan finds it in the typed body, int6-t.)
   let off = scopedChecks - buildSemantics.checks
@@ -781,6 +906,10 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
         return "it is declared inside " & host & ", whose body pushes " &
                "check options: it takes that push's where it stands, which " &
                "the scan of the module's statements does not read"
+    # RFC-0016 int6-u: the host found in the typed body, where a template's
+    # or a macro's push is (the text above holds the written ones alone).
+    let typed = typedPushingHost(impl)
+    if typed.len > 0: return typed
 
 proc stdlibDefClean(impl: NimNode; file: string; line: int;
                     m: ModuleScan): bool =

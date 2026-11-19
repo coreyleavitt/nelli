@@ -1512,8 +1512,15 @@ const renderAsChoicesVersion* = "12"
   ##   or a trusted sxUnsat past such a callee no longer is; a callee reaching
   ##   a `sequtils` routine's own `unCheckedInc` is unreadable). No key bytes
   ##   change.
+  ## - RFC-0016 int6-u (481->482): a routine declared inside a routine whose
+  ##   typed body pushes check options (`check_options.typedPushingHost`) is
+  ##   placed under that push and declines, as one inside a body whose text
+  ##   pushes did (int6-a5); a template's or a macro's push around it was
+  ##   missed and the routine walked under its host's checks. A host whose
+  ##   typed body cannot be read declines too. Verdicts move (a trusted
+  ##   verdict through such a routine now declines). No key bytes change.
 
-const symexWalkerVersion* = "481"
+const symexWalkerVersion* = "482"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

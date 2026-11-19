@@ -1903,34 +1903,11 @@ const regionPop = "\x01cs-"
   ## the prefix). `withCheckDeclines` replaces each pair by the region's block;
   ## one left is a decline.
 
-proc pragmaWord(n: NimNode): string =
-  if n.kind in {nnkIdent, nnkSym}: n.strVal.toLowerAscii else: ""
-
-proc isPushPragma(n: NimNode): bool =
-  n.kind == nnkPragma and n.len >= 1 and pragmaWord(n[0]) == "push"
-
-proc isPopPragma(n: NimNode): bool =
-  n.kind == nnkPragma and n.len == 1 and pragmaWord(n[0]) == "pop"
-
-proc namesCheck(n: NimNode): bool =
-  ## A push item naming a check option (`rangeChecks: off`, `checks: on`).
-  let h = if n.kind == nnkExprColonExpr and n.len == 2: n[0] else: n
-  checksNamed(nameOf(h)) != {}
-
 proc isCheckPush(n: NimNode): bool =
   ## RFC-0016 int6-a5. `{.push ...}` naming at least one check option.
   if not isPushPragma(n): return false
   for i in 1 ..< n.len:
     if namesCheck(n[i]): return true
-
-proc literalOn(v: NimNode): int =
-  ## 1 on, 0 off, -1 otherwise. The typed body folds `off` and a `const` to
-  ## an integer literal.
-  case v.kind
-  of nnkIntLit .. nnkUInt64Lit: (if v.intVal == 0: 0 elif v.intVal == 1: 1
-                                 else: -1)
-  of nnkIdent, nnkSym: turnsOn(v)
-  else: -1  # k2: fail-closed: -1: parseCheckPragma declines feCheckOption on a value it cannot read
 
 proc parseCheckPragma(ctx: ParseCtx; n: NimNode): IRStmt =
   ## RFC-0016 int6-a5. A check `push` or a `pop` among a routine's statements:
@@ -1987,8 +1964,6 @@ proc ledgerNote(key: string) =
   when nelliStdlibLedger.len > 0:
     discard gorge("echo '" & key.replace("'", "'\\''") & "' >> '" &
             nelliStdlibLedger & "'")
-
-proc implMagic*(impl: NimNode): string  ## defined below (RFC-0005 S8be)
 
 proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
   ## RFC-0016 K4c (section 8.1). The stdlib-body axis, read for a routine of
@@ -4777,8 +4752,6 @@ proc namesRoutineDirectly(e: NimNode): bool =
   (e.kind == nnkSym and symKind(e) notin procValueHeadKinds) or
     e.kind in {nnkLambda, nnkDo}
 
-proc routineMagic(sym: NimNode): string  ## RFC-0016 INT-87 fwd decl
-
 proc scanCall(n: NimNode; acc: var OpaqueEffects;
               seen, stack: var seq[NimNode]) =
   ## RFC-0005 S8cc. A call in a summarised body: the routine, then each
@@ -5159,31 +5132,6 @@ const anyDefect* = "Defect"
   ## RFC-0005 S8be. In `IRStmt.opaqueDefects`: a `Defect` of a type the scan
   ## cannot name (an unscanned routine, a closure, a re-raise). The walk
   ## raises it as `Defect` and splits it over the handlers in scope.
-
-proc implMagic*(impl: NimNode): string =
-  ## RFC-0005 S8be / S8bl. The `{.magic: "X".}` name of the routine
-  ## declaration `impl`, or "". A magic's semantics are the compiler's: its
-  ## body, when it has one, is documentation or a VM fallback, never what
-  ## the call does. (Batch 6: S8be's `routineMagic` and S8bl's, which took
-  ## the declaration, are this one reader.)
-  if impl == nil or impl.kind notin RoutineNodes or impl.len < 5: return ""
-  let prag = impl[4]
-  if prag.kind != nnkPragma: return ""
-  for p in prag:
-    if p.kind == nnkExprColonExpr and p.len == 2 and
-       p[0].kind in {nnkIdent, nnkSym} and macros.strVal(p[0]) == "magic" and
-       p[1].kind in {nnkStrLit .. nnkTripleStrLit, nnkIdent, nnkSym}:
-      return macros.strVal(p[1])
-  ""
-
-proc routineMagic(sym: NimNode): string =
-  ## RFC-0005 S8be. The `{.magic.}` name of the routine `sym` (`"AddI"` for
-  ## `system.+` on `int`), or "" when it has none.
-  if sym.kind != nnkSym: return ""
-  let impl =
-    try: sym.getImpl
-    except CatchableError: return ""
-  implMagic(impl)
 
 const
   # RFC-0016 K4a-guard: which magics raise which Defect is a property of
@@ -5858,48 +5806,6 @@ proc namesSym(n, sym: NimNode): bool =
 
 func isRoutineDefNode(n: NimNode): bool =
   n.kind in RoutineNodes
-
-proc loopIncRegion(s, owner: NimNode): bool =
-  ## RFC-0016 int6-t. Is the statement list `s`, in the typed body of the
-  ## routine definition `owner`, exactly an audited loop-counter step: `{.push
-  ## overflowChecks: off.}` (no other option), `inc` (`system.inc`, by its
-  ## magic) of a local variable by one, `{.pop.}`, whose push is a
-  ## `check_options.loopIncExemptions` template's as its own module expands it
-  ## (`loopIncExempt`)? Its counter's loop bounds it (the allowlist's audit),
-  ## so it neither overflows nor leaves its range: reading the routine as one
-  ## scope loses nothing there.
-  if s.kind != nnkStmtList or s.len != 3: return false
-  let push = s[0]
-  if not isPushPragma(push) or push.len != 2: return false
-  let it = push[1]
-  if it.kind != nnkExprColonExpr or it.len != 2 or
-     checksNamed(nameOf(it[0])) != {coOverflow} or literalOn(it[1]) != 0:
-    return false
-  let step = s[1]
-  if step.kind notin {nnkCall, nnkCommand} or step.len notin 2 .. 3 or
-     not magicIs(routineMagic(step[0]), "Inc"): return false
-  if step[1].kind != nnkSym or step[1].symKind != nskVar: return false
-  if step.len == 3 and
-     (step[2].kind notin {nnkIntLit .. nnkInt64Lit} or step[2].intVal != 1):
-    return false
-  isPopPragma(s[2]) and loopIncExempt(owner, push)
-
-proc bodyCheckPragma(n, owner: NimNode): NimNode =
-  ## RFC-0016 int6-t. The first pragma statement naming a check option in the
-  ## typed body `n` of the routine definition `owner` (a routine declared in
-  ## it aside: it is not run here), or nil. The typed body keeps every push
-  ## and pop as a pragma statement, whether the definition's text wrote it, a
-  ## template expanded it or a macro emitted it; int6-a5 and int6-m6 read the
-  ## text, which holds the first only. An audited loop-counter step
-  ## (`loopIncRegion`) is not one.
-  if n == nil or isRoutineDefNode(n): return nil
-  if loopIncRegion(n, owner): return nil
-  if n.kind == nnkPragma:
-    for it in n:
-      if namesCheck(it): return n
-  for c in n:
-    result = bodyCheckPragma(c, owner)
-    if result != nil: return
 
 proc runRoutineDef(sym: NimNode): NimNode =
   ## RFC-0005 S8be. The definition of the routine a call to `sym` runs (a

@@ -135,6 +135,14 @@ where that note does not yet cover it.
   own iterators, so an opaque `for x in s` keeps its verdicts. `sequtils`'s
   own `unCheckedInc` is not on it: a callee that reaches one of its routines
   may raise any `Defect` and may be undefined.
+- **A routine declared inside a template's or a macro's push** (int6-u;
+  walker 482). int6-a5 declined a routine declared inside a body that pushes
+  check options, but found the host by its definition text, so a routine
+  declared inside a template's `{.push rangeChecks: off.}` region was walked
+  under its host's checks: `R(300)` in it raised a trusted `RangeDefect`
+  where natively it keeps 300. The host is now found in the typed body too
+  (any enclosing routine whose typed body holds a check pragma), and a host
+  whose typed body cannot be read declines.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

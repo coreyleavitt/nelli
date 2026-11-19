@@ -13570,6 +13570,7 @@ proc modelHolds(ctx: Z3Context; m: Z3Model; root: Z3Bool): bool =
   ## RFC-0016 int6 D1d. `root` is true in `m`, completed (`holdsIn`), charged
   ## a visit per distinct term of it (Z3's evaluator visits each once).
   chargeWalkerTerms(queryTermCount(ctx, [root]))
+  chargeWalkWork()
   holdsIn(m, root)
 
 proc satByModel(ctx: Z3Context; query: openArray[Z3Bool]): bool =
@@ -13596,6 +13597,7 @@ proc satByModel(ctx: Z3Context; query: openArray[Z3Bool]): bool =
         return false
       left -= n
       chargeWalkerTerms(n)
+      chargeWalkWork()
       if not holdsIn(satModels[i].m, query[j]):
         ok = false
         break
@@ -13643,7 +13645,9 @@ proc refuteStatus(ctx: Z3Context; query: openArray[Z3Bool];
   ## does run is the one it was. A satisfying model is a model, so the
   ## verdict is the search's or the search's `zsUnknown`, and these callers
   ## read both alike (not refuted); only the units and the wall time move.
-  if satByModel(ctx, query): return zsSat
+  # A walk out of work decides nothing more by a model either: the search
+  # below runs under what is left (`workLeftRLimit`), and the walk stops.
+  if not walkWorkExhausted and satByModel(ctx, query): return zsSat
   let r = checkCapped(ctx, query, settings, rlimit0)
   if r.status == zsSat: keepSatModel(ctx, r.m, query)
   r.status

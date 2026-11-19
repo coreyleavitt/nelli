@@ -2555,7 +2555,7 @@ note = "Two modelled exact stdlib rows, `math.round` and `math.floor`. Not yet p
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
 cells = []
-pins = ["tsymex_0016_int58_roundunsat", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib"]
+pins = ["tsymex_0016_int58_roundunsat", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib_a", "tsymex_0016_k8b_axes_stdlib_b"]
 
 [[row]]
 id = "INT-59"
@@ -2567,7 +2567,7 @@ note = "Classified as an expected cost (FP division and rounding bit-blast), not
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
 cells = []
-pins = ["tsymex_0016_int59_fpinterval", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib"]
+pins = ["tsymex_0016_int59_fpinterval", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_stdlib_a", "tsymex_0016_k8b_axes_stdlib_b"]
 
 [[row]]
 id = "INT-60"

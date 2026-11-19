@@ -1489,8 +1489,14 @@ const renderAsChoicesVersion* = "12"
   ##   text does not place still keeps the coarse reading. Verdicts and key
   ##   bytes move where the replay now runs: such a body's scope, stamp and
   ##   digest.
+  ## - RFC-0016 int6-m6 (478->479): a stdlib routine whose definition text
+  ##   pushes check options inside its body is unreadable to the opaque
+  ##   defect scan (any Defect, "may be undefined"), as int6-a5 made a user
+  ##   routine, where it was read as one scope. Verdicts move (a trusted
+  ##   label past such an opaque call is no longer trusted). No key bytes
+  ##   change.
 
-const symexWalkerVersion* = "478"
+const symexWalkerVersion* = "479"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

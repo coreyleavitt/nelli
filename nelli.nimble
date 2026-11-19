@@ -2097,6 +2097,8 @@ task test, "Run the test suite":
             "tsymex_0016_int6p2_checkscope_off",
             # RFC-0016 int6-a5: a check push and pop inside a routine body is a region of its own (nested, restored, range and overflow); unbalanced shapes decline.
             "tsymex_0016_int6a5_bodypush",
+            # RFC-0016 int6-m6: a stdlib routine whose body pushes check options is unreadable to the opaque defect scan, as a user one is.
+            "tsymex_0016_int6m6_stdbodypush",
             # RFC-0016 int6-f: fieldChecks belongs to its region (push off in a checked build reads the union as the off build does; a checked caller keeps FieldDefect).
             "tsymex_0016_int6f_fieldscope",
             # RFC-0016 int6-o: overflowChecks belongs to its region too (push off in a checked build is walked unchecked; system *= keeps the build's).

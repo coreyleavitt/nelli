@@ -688,6 +688,31 @@ proc pushingHost(file: string; ast, def: NimNode; line: int): string =
     if h.first <= line and line <= h.last:
       return h.name & " (line " & $h.first & ")"
 
+proc bodyAstOf(file: string): NimNode =
+  ## `file` parsed from disk, once; nil where it cannot be read or parsed.
+  if file notin bodyAsts:
+    var ast: NimNode
+    var text: string
+    if readSource(compileTimeEnv(), file, text).len == 0:
+      try: ast = parseStmt(text, file)
+      except ValueError: discard
+    bodyAsts[file] = ast
+  bodyAsts[file]
+
+var stdlibPushFiles {.compileTime.}: Table[string, bool]
+
+proc stdlibBodyPushes(file: string): bool =
+  ## RFC-0016 int6-m6. May a routine body in the stdlib file `file` push a
+  ## check option? Its text holds a check pragma off its line's start
+  ## (`innerCheckPragma`), or it cannot be read. Once per file: the parse and
+  ## the definition search are paid only where it holds.
+  if file notin stdlibPushFiles:
+    var text: string
+    stdlibPushFiles[file] =
+      readSource(compileTimeEnv(), file, text).len > 0 or
+      innerCheckPragma(text)
+  stdlibPushFiles[file]
+
 proc positionUnreadable(impl: NimNode; file: string; line: int;
                         st: CheckState; m: ModuleScan;
                         bodyPragmas: var bool): string =
@@ -707,6 +732,18 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   ## that push's.
   let off = scopedChecks - buildSemantics.checks
   let both = off * st.maybeOn * st.maybeOff
+  if isStdlibFile(file):
+    # RFC-0016 int6-m6: a stdlib routine's body may push too (`seqs_v2`'s
+    # `setLen`), and the opaque defect scan, which reads a body as one
+    # scope, reads it unreadable, as it does a user routine's. Only a file
+    # whose text holds a check pragma off its line's start is parsed for it.
+    if stdlibBodyPushes(file):
+      var ast = scannedAst(m, file)
+      if ast == nil: ast = bodyAstOf(file)
+      if ast != nil:
+        let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
+        if def != nil and inRoutineChecks(def, allChecks, allChecks).len > 0:
+          bodyPragmas = true
   if both != {}:
     return "its position is both pushed on and off for " & $both
   if not isStdlibFile(file):
@@ -714,14 +751,7 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
     # a second read from disk is another snapshot of a file that may be
     # edited during the compile.
     var ast = scannedAst(m, file)
-    if ast != nil: discard
-    elif file in bodyAsts: ast = bodyAsts[file]
-    else:
-      var text: string
-      if readSource(compileTimeEnv(), file, text).len == 0:
-        try: ast = parseStmt(text, file)
-        except ValueError: discard
-      bodyAsts[file] = ast
+    if ast == nil: ast = bodyAstOf(file)
     if ast != nil:
       let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
       if def != nil and inRoutineChecks(def, allChecks, allChecks).len > 0:

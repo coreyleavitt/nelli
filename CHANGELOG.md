@@ -111,6 +111,13 @@ where that note does not yet cover it.
   be undefined"): it read the body as one scope, so in a `--boundChecks:off`
   build a handler for the `IndexDefect` of a `boundChecks: on` region was a
   trusted false `sxUnsat`.
+- **A stdlib body that pushes, under the opaque scan** (int6-m6; walker
+  479). A stdlib routine whose definition text pushes check options inside
+  its body is unreadable to the opaque defect scan too, as int6-a5 made a
+  user routine: it was still read as one scope under its module's options.
+  No stdlib routine of 2.2.10 is reached so (`system/seqs_v2.nim`'s
+  `setLen[T]`, the only one, is reached through its magic alone); the pin
+  is a module classified as the stdlib by its path.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

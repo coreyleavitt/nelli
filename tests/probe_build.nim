@@ -11,7 +11,7 @@
 ## platform arm as recordable because the file defines `skipCell`. A suite
 ## that cannot build or run a probe on a platform records that with
 ## `skipCell` (`s8cu_helpers`).
-import std/[compilesettings, os, osproc, streams, tempfiles]
+import std/[compilesettings, os, osproc, streams, strutils, tempfiles]
 import nelli/smt/buildprofile
 
 type
@@ -47,6 +47,28 @@ proc nelliVeh(p: pointer): int32 {.stdcall.} =
 discard nelliAddVeh(1, cast[pointer](nelliVeh))
 """ else: ""
 
+proc childBuildArgs*(): seq[string] =
+  ## What any child `nim` this suite starts needs to compile against the host
+  ## build's sources and C compiler: the repo's `src` and every search path
+  ## THIS test was compiled with (the dependencies', wherever the host build got
+  ## them from, CI's command-line `--path`s included), absolute so the child's
+  ## cwd does not matter; the host's `--cincludes`; and its C compiler (the
+  ## toolchain ships Nim alone, so on Windows the child would otherwise fall
+  ## through to `vcc`). A search path inside the host's `lib/` is left to the
+  ## child's own configuration, which adds its own `lib/`'s: a child built
+  ## against another `lib/` must not search the host's.
+  let lib = absolutePath(querySetting(libPath)).replace('\\', '/')
+  var paths = @[currentSourcePath().parentDir.parentDir / "src"]
+  for q in hostSearchPaths:
+    let a = absolutePath(q)
+    let norm = a.replace('\\', '/')
+    if norm == lib or norm.startsWith(lib & "/"): continue
+    if a notin paths: paths.add a
+  for q in paths: result.add "--path:" & q
+  for q in hostCIncludes: result.add "--cincludes:" & absolutePath(q)
+  when defined(vcc): result.add "--cc:vcc"
+  elif defined(windows): result.add "--cc:gcc"   # the toolchain ships Nim alone
+
 type ProbeBuild* = object
   dir*, exe*, backend*: string
   args*: seq[string]
@@ -70,24 +92,14 @@ proc prepareProbe*(who: string; probe: string; flags: openArray[string]
     src = absolutePath(probe)
   result.exe = result.dir / ("probe" & ExeExt)
   # The child compiles `probe_src.nim` in a temp dir, so it finds no `nim.cfg`
-  # and nothing resolves `import nelli`. It is given the repo's `src` and every
-  # search path THIS test was compiled with (the dependencies', wherever the
-  # host build got them from), absolute so the child's cwd does not matter.
-  var paths = @[currentSourcePath().parentDir.parentDir / "src"]
-  for q in hostSearchPaths:
-    let a = absolutePath(q)
-    if a notin paths: paths.add a
+  # and nothing resolves `import nelli` but what `childBuildArgs` gives it.
   result.args = @["--hints:off", "--warnings:off", "--threads:on",
                "--nimcache:" & (result.dir / "cache"), "--out:" & result.exe,
                "--panics:" & (when defined(nimPanics): "on" else: "off"),
-               "--mm:" & $buildSemantics.mm]
-  for q in paths: result.args.add "--path:" & q
-  for q in hostCIncludes: result.args.add "--cincludes:" & absolutePath(q)
+               "--mm:" & $buildSemantics.mm] & childBuildArgs()
   when defined(nelliFwrapv): result.args.add "-d:nelliFwrapv"
   when defined(release): result.args.add "-d:release"
   when defined(danger): result.args.add "-d:danger"
-  when defined(vcc): result.args.add "--cc:vcc"
-  elif defined(windows): result.args.add "--cc:gcc"   # the toolchain ships Nim alone
   for f in flags: result.args.add f
   result.backend = when defined(cpp): "cpp" else: "c"
   result.cmd = quoteShellCommand(@[nim, result.backend] & result.args & @[src])

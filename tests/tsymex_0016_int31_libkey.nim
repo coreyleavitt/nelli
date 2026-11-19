@@ -22,7 +22,7 @@ import nelli/smt/admission
 import nelli/smt/canonicalize
 import nelli/smt/toolchain_id
 import nelli/smt/types
-from ./s8cu_helpers import pinNever
+from ./s8cu_helpers import pinNever, childBuildArgs
 
 const
   cell = cellKey(axConstruct, "cache/key/toolchain")
@@ -54,7 +54,8 @@ proc copyToolchain(dest: string) =
 proc build(tmp, name, root: string): string =
   result = tmp / name & ExeExt
   let cmd = quoteShell(root / "bin" / "nim" & ExeExt) &
-    " c --threads:on --hints:off " & getEnv("NELLI_NIM_FLAGS") &
+    " c --threads:on --hints:off " &
+    quoteShellCommand(childBuildArgs()) & " " & getEnv("NELLI_NIM_FLAGS") &
     " --nimcache:" & quoteShell(tmp / ("nc_" & name)) &
     " -o:" & quoteShell(result) & " " & quoteShell(child)
   let (output, code) = execCmdEx(cmd)

@@ -7,6 +7,7 @@
 ## under the configured lib path, as `isStdlibDecl` does.
 import std/[unittest, os, osproc, strutils, compilesettings]
 import nelli/smt/canonicalize
+from ./probe_build import childBuildArgs
 
 const
   libDir = querySetting(libPath)
@@ -15,7 +16,8 @@ const
 proc verdict(tmp, name: string; extra: string): seq[string] =
   let exe = tmp / name & ExeExt
   let cmd = quoteShell(getCurrentCompilerExe()) &
-    " c --threads:on --hints:off " & getEnv("NELLI_NIM_FLAGS") & " " & extra &
+    " c --threads:on --hints:off " &
+    quoteShellCommand(childBuildArgs()) & " " & getEnv("NELLI_NIM_FLAGS") & " " & extra &
     " --nimcache:" & quoteShell(tmp / ("nc_" & name)) &
     " -o:" & quoteShell(exe) & " " & quoteShell(child)
   let (output, code) = execCmdEx(cmd)

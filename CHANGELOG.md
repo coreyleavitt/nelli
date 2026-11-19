@@ -22,7 +22,7 @@ definedness check, and the removal of the two fields 0.9.2 deprecated; plus
 the code review of that surface (`docs/rfc/0016-review.md`, "0.10.0 review",
 nine rounds, floor at round 9).
 
-The walker version moves from `"287"` to `"369"`. Every 0.9.2 cache entry is
+The walker version moves from `"287"` to `"472"`. Every 0.9.2 cache entry is
 orphaned and the first run after the upgrade is cold. The soundness codec
 stays at version 4.
 
@@ -86,8 +86,8 @@ where that note does not yet cover it.
   not there, because the module was saved during the compile, now declines
   `feCheckOption` (rebuild without editing). An edit that moves no routine is
   not detected.
-- **Walk budget, per-context charge and model reuse** (migration 3, `walkRLimit`;
-  commits 92a1f583 and aa7464d7 for what the note does not state). The walker's
+- **Walk budget, per-context charge and model reuse** (migration 3 and
+  9 to 10, `walkRLimit`; commits 92a1f583 and aa7464d7). The walker's
   own work is charged to `walkRLimit` at 15 units per term visit beside the Z3
   units (migration 3). Each check's own Z3 context is also charged, so a walk of
   many small queries (a k-unroll such as `filterIt`) is bounded by the budget
@@ -96,18 +96,17 @@ where that note does not yet cover it.
   cuts the per-check cost without sharing a context (aa7464d7, walker 466). A
   walk the budget ends answers `sxUnknown` with `ckWalkWork`; raise
   `walkRLimit` or set it `0` (migration 3).
-- **Command-syntax calls are walked** (commit 73e91183, walker 460; not in the
-  migration note). A call spelled as a command (`f x`) in expression position
+- **Command-syntax calls are walked** (commit 73e91183, walker 460; migration 7). A call spelled as a command (`f x`) in expression position
   was declined `feUnsupportedExprKind`, so every path through Nim 2.2.10's
   `filterIt` (it ends in `move result`) declined; `filterIt` is now walkable.
-- **NaN is admitted in float range stores** (commit 08039ffb, walker 463; not
-  in the migration note). A plain assignment or `+=`, `-=`, `*=` and `/=` on a
+- **NaN is admitted in float range stores** (commit 08039ffb, walker 463;
+  migration 8). A plain assignment or `+=`, `-=`, `*=` and `/=` on a
   float range location is a checked store that raises `RangeDefect` when the
   value is below `lo` or above `hi`; NaN passes that test natively, so the
   heap and parameter domains and the clamp now admit it. Nothing is raised
   under `--rangeChecks:off`.
-- **API breaks recorded by INT-34** (commit 4e7497b8, walker 416; not in the
-  migration note). `FindingGap.kind`, `FindingHint.kind` and
+- **API breaks recorded by INT-34** (commit 4e7497b8, walker 416; migration
+  11, with before and after code). `FindingGap.kind`, `FindingHint.kind` and
   `FindingHint.severity` are the `SymexErrorKind` and `SymexErrorSeverity`
   enums, not strings (the cache stores them by name, so older records read the
   same and a name the build does not know is a miss). The exported threadvar
@@ -118,9 +117,6 @@ where that note does not yet cover it.
   that wrote it (`w416:`) instead of `sx2:`; `pruneForeignSymexRecords` is an
   opt-in sweep of records of other walker versions, and a backend lists its
   keys through the new optional `ExampleDatabase.primaryKeysImpl`.
-- The walker version is `"472"` on this branch (`symexWalkerVersion`), past
-  the `"369"` that migration section 6 and the header above state; the cold
-  start they describe applies to the later number.
 
 ### Module layout
 
@@ -205,7 +201,7 @@ a consumer that imported an internal module by path.
   routine's arithmetic facts are stated once.
 - **`std/os` pruned from `symex.nim`** broke the `nelliVmAliasAudit` build
   only (R5-H1); the audit block imports what it uses.
-- Walker `"287"` to `"369"` (`symexWalkerVersion`): every cached verdict is
+- Walker `"287"` to `"472"` (`symexWalkerVersion`): every cached verdict is
   recomputed once.
 
 ## [0.9.2] — 2026-11-07

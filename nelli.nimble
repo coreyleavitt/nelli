@@ -2103,6 +2103,8 @@ task test, "Run the test suite":
             "tsymex_0016_int6t_typedpush",
             # RFC-0016 int6-t: the same under --rangeChecks:off --boundChecks:off (a template's boundChecks: on region raises out of an opaque callee).
             "tsymex_0016_int6t_typedpush_off",
+            # RFC-0016 int6-u: a routine declared inside a region a template or macro pushes is placed under that push (declines), found in the typed body.
+            "tsymex_0016_int6u_hostpush",
             # RFC-0016 int6-f: fieldChecks belongs to its region (push off in a checked build reads the union as the off build does; a checked caller keeps FieldDefect).
             "tsymex_0016_int6f_fieldscope",
             # RFC-0016 int6-o: overflowChecks belongs to its region too (push off in a checked build is walked unchecked; system *= keeps the build's).

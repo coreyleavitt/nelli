@@ -17898,7 +17898,8 @@ proc fieldsUnchecked(): bool =
   not checkedNow(coField)
 
 proc inactiveFieldSide(cp: Path; outOfArm: Z3Bool; env: Env; loc: string;
-                       w: var WalkCtx; isWrite = false): seq[Path] =
+                       w: var WalkCtx; isWrite = false;
+                       checkedRead = false): seq[Path] =
   ## RFC-0016 PRC-07. The out-of-branch side `outOfArm` of a variant field
   ## access on `cp` in a `fieldChecks: off` build. On the cpp backend reading a
   ## union member that is not the active one is undefined: decided at the op
@@ -17914,7 +17915,15 @@ proc inactiveFieldSide(cp: Path; outOfArm: Z3Bool; env: Env; loc: string;
   ## the walker cannot answer (`fieldChecksOffLayout`), is declined, on its own
   ## path only. Returns the declined child (`env`
   ## its environment) for the caller to add to its survivors, or nothing.
+  ## RFC-0016 int6-f: `checkedRead` is a CHECKED read (cpp) the discriminator
+  ## admits, through a member an unchecked write left inactive: `outOfArm`
+  ## is then the inactive-member condition and the side is always decided.
   if guardLiteral(outOfArm) == glFalse: return
+  if checkedRead:
+    decideUndefined(cp, inactiveFieldUb(), outOfArm,
+      opSite("a checked variant field read through a member an " &
+             "unchecked write left inactive", loc), w)
+    return
   if buildSemantics.backend == beCpp and not isWrite:
     decideUndefined(cp, inactiveFieldUb(),  outOfArm,
       opSite("a variant field accessed outside its branch (a plain union " &
@@ -21538,9 +21547,8 @@ proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
           seeded = true
         if seeded:
           let inactive = inArmCond and not actIn
-          decideUndefined(p, inactiveFieldUb(), inactive,
-            opSite("a checked variant field read through a member an " &
-                   "unchecked write left inactive", stmt.vfLoc), w)
+          discard inactiveFieldSide(p, inactive, p.env, stmt.vfLoc, w,
+                                    checkedRead = true)
           activeOk = some(not inactive)
     if w.shouldStop: return exact(@[])
     survivors.add declinedSide

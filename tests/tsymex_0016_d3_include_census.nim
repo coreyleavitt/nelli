@@ -827,13 +827,14 @@ suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
     for l in hm.splitLines:
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
-    check tvs.len == 38   # RFC-0016 INT-82: +4 (provenance); INT-81: +1 (field owners);
+    check tvs.len == 39   # RFC-0016 INT-82: +4 (provenance); INT-81: +1 (field owners);
                           # INT-83: +5 (pointer facts, views, sorts, read sorts,
                           # decls); INT-84: +2 (input domain, holes made);
                           # INT-85: +1 (made-value decl kinds, process-stable);
                           # INT-90: +7 (sort types, facts, fact ids, desync,
                           # facts off, accessed, written); INT-93: +3 (frame
                           # object ids, frame cells, frame pointers)
+                          # int6-f: +1 (unionImageProgram, reset per run)
     for n in tvs:
       checkpoint n
       if n in hmProcessStable:

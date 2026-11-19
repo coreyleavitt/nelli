@@ -3830,9 +3830,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
               for hit in armHits:
                 actIn = actIn or variantDiscEq(act, int64(hit.tagOrd))
               let inactive = inArmCond and not actIn
-              decideUndefined(forkPath(cpA, basePc, cpA.env), inactiveFieldUb(),
-                inactive, opSite("a checked variant field read through a " &
-                  "member an unchecked write left inactive", ""), w)
+              discard inactiveFieldSide(forkPath(cpA, basePc, cpA.env),
+                                        inactive, cpA.env, "", w,
+                                        checkedRead = true)
               basePc = basePc & @[not inactive]
           if w.shouldStop: return exact(survivors)
           # In-arm continuation: assert inArmCond on the range-constrained base.

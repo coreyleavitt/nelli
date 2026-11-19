@@ -870,7 +870,12 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
   of iekStrCount:
     # RFC-0005 S8cf (item 11). `strutils.count(s, sub)`, non-overlapping: a
     # recursive definition (`fuel` as S8bi's) with the facts Z3's unfolding
-    # does not reach.
+    # does not reach. The value is a fresh `v` whose definition sits in
+    # `regexRecDefConds`, as `replace`'s does, so step 0 decides the query
+    # on the facts alone. RFC-0016 CRH-07: S8cf had inlined the term instead,
+    # because a second definition naming the first (`count` over a `replace`
+    # value) crashed in `checkExact`'s substitution, which held an unowned
+    # `Z3_substitute` result; that is fixed there.
     let recv = lowerStrOperand(env, e.strArgs[0])
     requireStr(recv, "iekStrCount")
     let sub = needleAsStr(lowerStrOperand(env, e.strArgs[1]), "iekStrCount")
@@ -884,7 +889,8 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
         ite(fuel <= mkInt(0), mkInt(0),
           ite(at0 < mkInt(0), mkInt(0),
               mkInt(1) + self(substr(u, past, len(u) - past), fuel - mkInt(1)))))
-    let v = f(recv.str, len(recv.str) + mkInt(1))
+    let v = mkIntVar(regexFreshName("__strCountValue"))
+    regexRecDefConds.add v == f(recv.str, len(recv.str) + mkInt(1))
     regexRecFactConds.add (v >= mkInt(0)) and (v * len(sub) <= len(recv.str)) and
       implies(contains(recv.str, sub), v >= mkInt(1)) and
       implies(v >= mkInt(1), contains(recv.str, sub))

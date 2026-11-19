@@ -58,11 +58,19 @@ proc checkedSelect*(ctx: Z3Context; arr, idx: RawZ3Ast): RawZ3Ast =
     return freshOfSort(ctx, ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort))
   ctx.checkErr Z3_mk_select(ctx.raw, arr, idx)
 
+proc boolSortFault(ctx: Z3Context; op: string; got: RawZ3Sort): bool =
+  ## RFC-0016 CRH-07: `sortFault` against Bool that makes no AST unless the
+  ## sort is wrong. A caller may pass a fresh, unreferenced term, which the
+  ## next call that makes an AST (`Z3_mk_bool_sort` too) frees; only the
+  ## getters run before the term is built over it.
+  if Z3_get_sort_kind(ctx.raw, got) == Z3_BOOL_SORT: return false
+  sortFault(ctx, op, ctx.checkErr Z3_mk_bool_sort(ctx.raw), got)
+
 proc checkedIte*(ctx: Z3Context; c, t, e: RawZ3Ast): RawZ3Ast =
   ## RFC-0005 S8m. `Z3_mk_ite` with a Bool condition and two same-sort arms.
+  ## Makes no AST before `Z3_mk_ite` on the well-sorted path (CRH-07).
   let tSort = sortOfRaw(ctx, t)
-  if sortFault(ctx, "ite condition", ctx.checkErr Z3_mk_bool_sort(ctx.raw),
-               sortOfRaw(ctx, c)) or
+  if boolSortFault(ctx, "ite condition", sortOfRaw(ctx, c)) or
      sortFault(ctx, "ite else-arm", tSort, sortOfRaw(ctx, e)):
     return freshOfSort(ctx, tSort)
   ctx.checkErr Z3_mk_ite(ctx.raw, c, t, e)
@@ -257,7 +265,7 @@ proc rawAnyAstOf*(sv: SymVal): RawZ3Ast =
       plainEnglishSymValKind(sv.kind) &
       ") with no single-leaf Z3 sort representation " &
       "(seUnsupportedCompoundSortLeaf)")
-    mkBitVec[64](0'i64).raw
+    keepRaw(mkBitVec[64](0'i64))   # RFC-0016 CRH-07: the temporary's raw dangled
 
 proc probeContext*(): Z3Context =
   ## RFC-0005 S8bp. A fresh Z3 context for a per-thread kind probe's terms

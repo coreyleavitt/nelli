@@ -844,6 +844,15 @@ const renderAsChoicesVersion* = "12"
   ##   lost to the bound (`s8aq_rfind_before_piece`, `grow_stale_dead`), and
   ##   at three quarters the first still was. A search cut by its bound can
   ##   cut elsewhere than at 384. No key bytes change.
+  ## - RFC-0016 CRH-07 (369->372; 370 and 371 are the integration head's):
+  ##   `strutils.count`'s value is a fresh `v` with its definition in
+  ##   `regexRecDefConds`, as `replace`'s is, so step 0 decides on the facts
+  ##   alone; S8cf had inlined the term to avoid a crash. The crash was
+  ##   `checkExact` holding an unowned `Z3_substitute` result while resolving
+  ##   one definition against another (`count` over a `replace` value): the
+  ##   roots built over the freed term read stale nodes (a false `sxUnsat` on
+  ##   a satisfiable `count`) and were later released into them (SIGSEGV).
+  ##   The query a count reaches changes shape; no key bytes change.
 
 const symexWalkerVersion* = "412"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

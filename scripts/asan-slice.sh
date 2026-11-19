@@ -74,6 +74,7 @@ core=(
   tsymex_phase15_g4_distinct_sort  # distinct sorts: inject/eject decls pinned before the next Z3 call (S8ck-r)
   tsymex_rfc0005_s8ca_strings tsymex_r6_b1_stringbacked                                    # strings
   tsymex_phase15_S6a_regex_parser tsymex_phase15_S6b_regex tsymex_rfc0005_s8cf_classes     # regex
+  tsymex_0016_crh07_substowned tsymex_0016_crh07_rawholds                                                             # CRH-07: substituted definitions
   tsymex_rfc0005_s8ca_closures_heap tsymex_phase15_CR1_CR5_closure_heap                    # closures
   tsymex_r6_n36_raise_class_audit tsymex_rfc0005_s8ce_raiseshapes tsymex_r6_n37_raise_residue  # raise paths
   tsymex_rfc0005_s2_replay tsymex_rfc0005_s8cb_replay tsymex_phase15_CR2_cachekey tsymex_0016_w1d1c_cachedprune  # cache replay

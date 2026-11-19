@@ -1562,12 +1562,6 @@ proc ptrTabCellRead(ctx: Z3Context; cell: RawZ3Ast; pointee: IRType): SymVal =
   ## holds.
   cellValue(wrap[Z3BitVec[64]](ctx, cell), pointee)
 
-proc ptrTabCellOf(val: SymVal; pointee: IRType): RawZ3Ast =
-  ## RFC-0005 S8bw (item 3). The 64-bit table cell of the `pointee` value
-  ## `val` (sign- or zero-extended, a `bool` as 0 / 1).
-  let c = cellOf(val, pointee)
-  if c.isSome: c.get.raw else: rawAnyAstOf(val)
-
 type PtrLeaf = tuple[path: seq[int]; steps: seq[string]; seqIdx, tabKey: bool;
                      aggregate: bool; elemPath: seq[int]; elemSteps: seq[string]]
   ## RFC-0005 S8bn (item 4). A part of a variable: its `path` below the
@@ -2688,18 +2682,20 @@ proc elemTermIn(ctx: Z3Context; val: SymVal; arr: Z3AnyAst): RawZ3Ast =
   ## a heap field family (`heapLeafRaw`, S8ax), while a `ptr int` heap is
   ## Int-sorted (`intHeapCell`): the store through a pointer must meet the
   ## array's own sort (it was an ill-sorted store, a walker fault).
+  ## RFC-0016 CRH-07: a converted term is the run's (`keepRaw`); the `.raw` of
+  ## the temporary dangled once this proc returned.
   let rng = ctx.checkErr Z3_get_array_sort_range(ctx.raw, sortOfRaw(ctx, arr.raw))
   let intS = ctx.checkErr Z3_mk_int_sort(ctx.raw)
   if rng == intS:
     if val.kind in {svBV8, svBV16, svBV32, svBV64}:
-      return toSvIntPreserving(val).zi.raw
+      return keepRaw(toSvIntPreserving(val).zi)
     return rawAnyAstOf(val)
   if val.kind == svInt:
     case int(Z3_get_bv_sort_size(ctx.raw, rng))
-    of 8:  return intToBv[8](val.zi, Z3BitVec[8]).raw
-    of 16: return intToBv[16](val.zi, Z3BitVec[16]).raw
-    of 32: return intToBv[32](val.zi, Z3BitVec[32]).raw
-    else:  return intToBv[64](val.zi, Z3BitVec[64]).raw
+    of 8:  return keepRaw(intToBv[8](val.zi, Z3BitVec[8]))
+    of 16: return keepRaw(intToBv[16](val.zi, Z3BitVec[16]))
+    of 32: return keepRaw(intToBv[32](val.zi, Z3BitVec[32]))
+    else:  return keepRaw(intToBv[64](val.zi, Z3BitVec[64]))
   rawAnyAstOf(val)
 
 proc elemValueOf(ctx: Z3Context; raw: RawZ3Ast; pointee: IRType): SymVal =
@@ -2707,6 +2703,9 @@ proc elemValueOf(ctx: Z3Context; raw: RawZ3Ast; pointee: IRType): SymVal =
   ## (either sort, see `elemTermIn`) as the value a `ptr pointee` read
   ## yields: in the pointee heap's own sort, so it merges with the other
   ## candidates and the pointer's own cell.
+  ## RFC-0016 CRH-07: `raw` is a fresh select; it is owned before the next
+  ## call that makes an AST (`Z3_mk_int_sort` freed it).
+  let held = wrap[Z3AnyAst](ctx, raw)
   let intS = ctx.checkErr Z3_mk_int_sort(ctx.raw)
   let v =
     if pointee.kind == itInt and ctx.checkErr(Z3_get_sort(ctx.raw, raw)) == intS:
@@ -2727,6 +2726,9 @@ proc tabValueOf(ctx: Z3Context; raw: RawZ3Ast; pointee: IRType): SymVal =
   ## family holds as an Int (`elemTermIn`); a 64-bit integer's cell is the
   ## value (`elemValueOf`).
   ## RFC-0005 S8bz (item 2): a string or float value is a term of its sort.
+  ## RFC-0016 CRH-07: `raw` is a fresh select, owned before any call that
+  ## makes an AST.
+  let held = wrap[Z3AnyAst](ctx, raw)
   case pointee.kind
   of itString: return SymVal(kind: svString, str: wrap[Z3String](ctx, raw))
   of itFloat32: return SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, raw))
@@ -2750,6 +2752,7 @@ proc tabTermIn(ctx: Z3Context; val: SymVal; pointee: IRType;
     return elemTermIn(ctx, val, arr)
   let c = cellOf(val, pointee)
   if c.isNone: return elemTermIn(ctx, val, arr)
+  discard keepRaw(c.get)   # CRH-07: the cell outlives this proc's `c`
   elemTermIn(ctx, SymVal(kind: svBV64, signed: true, bv64: c.get), arr)
 
 proc ptrAggregateMsg(pointee: IRType): string =

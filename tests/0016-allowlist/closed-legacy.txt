@@ -36,3 +36,4 @@ AUD-06	a CI design note (the sampled vm-alias job); no engine behaviour, so no c
 INT-19	a local one-off run against a PCRE 8.37 no-JIT build, recorded in the row; no cell and no pin record
 INT-53	a CI-intake tooling defect (scripts/rfc0016-intake.sh, pinned by its --self-test); no engine behaviour, so no cell and no pin record
 INT-54	a compile-time VM budget observation on the msvc nightly leg (the suites it names write no record; tsymex_0016_w3z_r10_nestedreplay pins the budget); no engine cell
+CRH-07	a latent crash with no cell axis: its pin (tsymex_0016_crh07_substowned) asserts verdicts and no crash, and the ASan core set runs it; no K9 cell names a refcount defect

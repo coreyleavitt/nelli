@@ -1025,14 +1025,16 @@ proc heapLeafRaw*(sv: SymVal; ty: IRType): RawZ3Ast =
   ## scalar cell. Before, S8ar's tree leaves stored the bit-vector while
   ## the read wrapped it as an Int: an ill-sorted term at the first
   ## comparison (`Sorts (_ BitVec 64) and Int are incompatible`).
+  ## RFC-0016 CRH-07: a converted term is the run's (`keepRaw`); the `.raw`
+  ## of the temporary dangled once this proc returned.
   if ty.kind == itInt and intHeapCell(ty):
-    return heapStoreValue(sv, sv, ty).zi.raw
+    return keepRaw(heapStoreValue(sv, sv, ty).zi)
   if ty.kind == itInt and sv.kind == svInt:
     case ty.width
-    of 8:  return intToBv[8](sv.zi, Z3BitVec[8]).raw
-    of 16: return intToBv[16](sv.zi, Z3BitVec[16]).raw
-    of 32: return intToBv[32](sv.zi, Z3BitVec[32]).raw
-    else:  return intToBv[64](sv.zi, Z3BitVec[64]).raw
+    of 8:  return keepRaw(intToBv[8](sv.zi, Z3BitVec[8]))
+    of 16: return keepRaw(intToBv[16](sv.zi, Z3BitVec[16]))
+    of 32: return keepRaw(intToBv[32](sv.zi, Z3BitVec[32]))
+    else:  return keepRaw(intToBv[64](sv.zi, Z3BitVec[64]))
   rawAnyAstOf(sv)
 
 proc svLeafAsts*(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast] =
@@ -2350,10 +2352,11 @@ proc iteSV*(cond: Z3Bool, t, e: SymVal): SymVal =
     # (uninterpreted-sort ites are fine) and the base recursively.
     let ctx = t.distinctAst.ctx
     var args = [cond.raw, t.distinctAst.raw, e.distinctAst.raw]
-    let merged = checkedIte(ctx, args[0], args[1], args[2])
+    # RFC-0016 CRH-07: owned at once; the base merge below makes ASTs.
+    let merged = wrap[Z3AnyAst](ctx, checkedIte(ctx, args[0], args[1], args[2]))
     let boxed = new(SymVal)
     boxed[] = iteSV(cond, t.distinctBaseSym[], e.distinctBaseSym[])
-    SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
+    SymVal(kind: svDistinct, distinctAst: merged,
            distinctName: t.distinctName, distinctBaseSym: boxed)
   of svSeq:
     if t.isUnsupportedFieldPlaceholder or e.isUnsupportedFieldPlaceholder: # [placeholder-audited]

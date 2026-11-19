@@ -561,7 +561,7 @@ suite "RFC-0016 D3c-1: the symval leaf":
     for l in sv.splitLines:
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
-    check tvs.len == 3
+    check tvs.len == 4   # + RFC-0016 CRH-07 rawKeep
     for n in tvs:
       checkpoint n
       check resetBody.contains("\n  " & n & " = ")

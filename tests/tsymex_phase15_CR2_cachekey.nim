@@ -1278,6 +1278,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## without Z3's cheap equality search): 379->384.
     ## RFC-0016 S8ci uneven split (Z3's defaults get seven eighths of the
     ## bound, not half): 384->389 (385-388 reserved).
+    ## RFC-0016 CRH-07 (a `count` value is defined in `regexRecDefConds`;
+    ## `checkExact` owns its substituted terms): 369->372 (370 and 371 are
+    ## the integration head's).
     check symexWalkerVersion == "412"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

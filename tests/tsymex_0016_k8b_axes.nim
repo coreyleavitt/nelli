@@ -99,8 +99,12 @@ suite "K8b axes: the fragments and the denominator":
     check ownRowProblems(@[OwnRow(axis: axPragma, key: "routine/nosuch",
                                   suite: pragmaDispatchSuite)]).len == 1
     check ownRowProblems(ok & ok).len == 1
+    # The blocked case has no subject while `blockedRows` is empty (INT-57
+    # readmitted `IntToStr`, the row this check named): a readmitted row with
+    # one of its axis's suites is no problem.
+    check blockedRows.len == 0
     check ownRowProblems(@[OwnRow(axis: axMagic, key: "IntToStr",
-                                  suite: axisFiles[axMagic][0])]).len == 1
+                                  suite: axisFiles[axMagic][0])]).len == 0
 
   test "a raising fragment's program takes no reordering relation":
     let ps = genAxis(axDefinedness, 1, 3, 2)

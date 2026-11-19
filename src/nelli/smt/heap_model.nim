@@ -1768,8 +1768,8 @@ proc heapCellWfConds*(ctx: Z3Context; key: string; refSort: RawZ3Sort;
 
 var crossSortAccessed*, crossSortWritten* {.threadvar.}: bool
   ## RFC-0016 INT-90. Some path of the run read a pointee's heap
-  ## (`crossSortLink`) or stored into one (`heapCellStore`) so far
-  ## (`crossSortEnter`).
+  ## (`crossSortLink`) or stored into one a view's leaf may be (`heapPut`)
+  ## so far (`crossSortEnter`).
 
 proc heapCellStore*(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
                    valSV: SymVal; valTy: IRType): HeapCell =
@@ -1781,7 +1781,6 @@ proc heapCellStore*(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
   ## `seUnsupportedCompoundSortLeaf` through `allocDegrade` (drained onto the
   ## path by the caller, as the scalar store's decline is) and each leaf
   ## stores a fresh term of its sort.
-  crossSortWritten = true   # RFC-0016 INT-90 (`crossSortEnter`)
   if heapStandInTy(valTy):
     # RFC-0005 S8ar: a by-value case object, a distinct over a composite
     # base, or an aggregate with a part that is neither, is not a cell value
@@ -2395,6 +2394,14 @@ func viewOffsets(sizes: seq[int]; packed: bool): seq[int] =
     result.add o
     o += sz
 
+func crossSortLeafShaped*(key: string): bool =
+  ## RFC-0016 INT-90. `key` may be a view's leaf heap: a scalar sort's id or
+  ## a field's `<O>__<f>`, never one of the model's own arrays (an `@` in
+  ## the key: a discriminator, a case branch's field, a union image, a
+  ## pointer's selector). `viewLeaves` holds no other key, so a store into
+  ## any other heap leaves every view's bytes as they were (`heapPut`).
+  '@' notin key
+
 proc viewLeaves*(ty: IRType; typeId: string): seq[ViewLeaf] =
   ## RFC-0016 INT-90. The scalar leaves of a view of `ty` at their native
   ## byte offsets, or empty where the model does not know the layout. A
@@ -2409,6 +2416,7 @@ proc viewLeaves*(ty: IRType; typeId: string): seq[ViewLeaf] =
   ## offset (an `importc` struct), a nested object, a case object, an
   ## array, a ref, a string, a seq, an enum: no leaves.
   if viewExactTy(ty):
+    if not crossSortLeafShaped(typeId): return
     return @[(typeId, 0, viewScalarSize(ty), ty)]
   if ty == nil or ty.kind != itTuple or ty.inheritChain.len > 0 or
      ty.fields.len == 0 or ty.fieldNames.len != ty.fields.len:
@@ -2428,7 +2436,74 @@ proc viewLeaves*(ty: IRType; typeId: string): seq[ViewLeaf] =
     if offs != viewOffsets(sizes, true): return
   for i, f in ty.fields:
     if ty.fieldNames[i].len == 0: return
-    result.add (fieldHeapKey(ty, ty.fieldNames[i]), offs[i], sizes[i], f)
+    let key = fieldHeapKey(ty, ty.fieldNames[i])
+    if not crossSortLeafShaped(key): return @[]
+    result.add (key, offs[i], sizes[i], f)
+
+proc crossSortSharedLeaf*(key: string): bool =
+  ## RFC-0016 INT-90. `key` is the heap of a leaf of a view sort of the
+  ## `pointer` space while at least one other view sort is in it: the heap
+  ## a cross-sort fact may read (`crossSortLink`), so a store into it that
+  ## no splice reflects in the other sorts' heaps desyncs the path
+  ## (`heapPut`). Decided by key, not by the store's sort or site, so a
+  ## store path cannot miss it by holding a type the author did not think
+  ## of as a view.
+  if pointerSortsUsed.len < 2: return false
+  var views = 0
+  for tid in pointerSortsUsed:
+    if not pointerSortTypes.hasKey(tid): continue
+    let lv = viewLeaves(pointerSortTypes[tid], tid)
+    if lv.len == 0: continue
+    inc views
+    for l in lv:
+      if l.key == key: result = true
+  result = result and views >= 2
+
+type HeapWrite* = enum
+  ## RFC-0016 INT-90. What a write of a path's heap (`heapPut`) is.
+  hwInput    ## the path's input heap of a key it does not hold yet (a
+             ## fresh array constant, a key's known constant array): no
+             ## state changes
+  hwCarry    ## a heap the path read, carried onto a child: the input
+             ## constant of a key the path does not hold yet, or the term it
+             ## already holds
+  hwStore    ## a store, a zero-init, or a havoc that no cross-sort splice
+             ## reflects
+  hwSpliced  ## a store whose bytes `crossSortPropagate` spliced into every
+             ## other view sort's heap (or one of those splices)
+
+proc heapPutIn*(heaps: var Table[string, Z3AnyAst];
+                counters: var Table[string, int]; key: string; arr: Z3AnyAst;
+                how: HeapWrite) =
+  ## RFC-0016 INT-90. The one write of a path's heaps (`heaps`, its
+  ## `allocCounters` as `counters`), through `heapPut` (audited:
+  ## `tsymex_0016_int90_heapput_audit`). A cross-sort fact relates two view
+  ## sorts' heaps of one path at one statement, sound only while every
+  ## change of either heap so far was reflected in both. So every write is
+  ## either spliced (`hwSpliced`) or, when `key` is the leaf heap of a view
+  ## sort sharing the `pointer` space with another (`crossSortSharedLeaf`),
+  ## desyncs the path (`crossSortDesyncKey`): no later fact is emitted on
+  ## it and its witness keeps the lossy marking. An input or carried heap
+  ## that turns out to replace a different term the path holds is a store.
+  ## A change of a heap a view's leaf may be (`crossSortLeafShaped`) also
+  ## counts as a write of the run (`crossSortWritten`), so a sort entering
+  ## the space later emits no fact (`crossSortEnter`).
+  var how = how
+  if how in {hwInput, hwCarry} and heaps.hasKey(key) and
+     heaps[key].raw != arr.raw:
+    how = hwStore
+  heaps[key] = arr   ## the only indexed write of a path's heaps
+  if how in {hwInput, hwCarry}: return
+  if crossSortLeafShaped(key): crossSortWritten = true
+  if how == hwStore:
+    if crossSortSharedLeaf(key):
+      counters[crossSortDesyncKey] = 1
+      crossSortAnyDesync = true
+
+template heapPut*(p: untyped; key: string; arr: Z3AnyAst; how: HeapWrite) =
+  ## RFC-0016 INT-90. `p.heaps[key] = arr` for a walker `Path` `p`, written
+  ## as `how` (`heapPutIn`).
+  heapPutIn(p.heaps, p.allocCounters, key, arr, how)
 
 proc crossSortExactCell*(sorts: seq[string]): bool =
   ## RFC-0016 INT-90. A cell held at the `Ref_<T>` sorts `sorts` is the

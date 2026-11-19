@@ -722,13 +722,13 @@ proc h1ForkIsolation*(): bool =
   let astA = toAnyAst(mkInt(1))
   let astB = toAnyAst(mkInt(2))
   let parent = Path(pc: @[], env: initOrderedTable[string, SymVal]())
-  parent.heaps["x"] = astA
+  heapPut(parent, "x", astA, hwInput)
   # Fork a child the way a fork site does (identical heap-state deep-copy path).
   let child = forkPath(parent, parent.pc, parent.env)
   # Child must start with an isolated copy of the parent's heap.
   doAssert child.heaps.hasKey("x")
   # Mutate the child; the parent must NOT observe it (value-copy isolation).
-  child.heaps["x"] = astB
+  heapPut(child, "x", astB, hwStore)
   result = parent.heaps["x"].raw == astA.raw and
            child.heaps["x"].raw == astB.raw and
            parent.heaps["x"].raw != child.heaps["x"].raw
@@ -14441,14 +14441,15 @@ proc havocOpaqueHeaps(w: var WalkCtx; p: Path; stmt: IRStmt): bool =
     # witness through it replayed.
     if "__@msk" in k:
       let dom = ctx.checkErr Z3_get_array_sort_domain(ctx.raw, arrSort)
-      p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const_array(
-        ctx.raw, dom, mkBitVec[64](0'i64).raw))
+      heapPut(p, k, wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const_array(
+        ctx.raw, dom, mkBitVec[64](0'i64).raw)), hwStore)
       continue
     inc w.synthZ3
     let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
       ("heap_" & k & "@hv" & $w.synthZ3).cstring)
-    p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
-                                                              arrSort))
+    heapPut(p, k,
+            wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                        arrSort)), hwStore)
   if stmt.opaqueHeapAll: ids = @["*"]
   for id in ids:
     let ck = heapEpochPrefix & id
@@ -17800,7 +17801,7 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
   var hkeys: seq[string]
   for k in skip.heaps.keys: hkeys.add k
   sort(hkeys)
-  var heaps = skip.heaps
+  var joined = skip.heaps
   for k in hkeys:
     var acc = armOut[n - 1].heaps[k]
     var changed = acc.raw != skip.heaps[k].raw
@@ -17810,8 +17811,8 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
       acc = wrap[Z3AnyAst](h.ctx, checkedIte(h.ctx, gs[i].get.raw, h.raw, acc.raw))
       changed = true
     if changed and acc.raw != skip.heaps[k].raw:
-      heaps[k] = wrap[Z3AnyAst](acc.ctx, checkedIte(acc.ctx, cond.raw, acc.raw,
-                                                    skip.heaps[k].raw))
+      joined[k] = wrap[Z3AnyAst](acc.ctx, checkedIte(acc.ctx, cond.raw, acc.raw,
+                                                     skip.heaps[k].raw))
   var pc = base.pc
   var facts: Option[Z3Bool]
   if n == 1:
@@ -17827,7 +17828,7 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
     for i in 1 ..< n: anyG = anyG or gs[i].get
     facts = some(anyG)
   let merged = forkPath(skip, pc, env)
-  merged.heaps = heaps
+  merged.heaps = joined
   joinHeapMeta(merged, armOut)
   for a in armOut: merged.heapDepth = max(merged.heapDepth, a.heapDepth)
   if facts.isSome:

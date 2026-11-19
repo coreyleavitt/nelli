@@ -44,6 +44,8 @@ type
   Packed {.packed.} = object   # no padding: `b` at 1, size 5
     a: int8
     b: int32
+  Two = object        # 0, 8: two int64s
+    x, y: int64
 
 # ---- int <-> float at one address --------------------------------------------
 
@@ -220,6 +222,21 @@ proc lateCast(a: ptr int; b: ptr float; c: bool) =
     if c: a[] = 5
     if cast[pointer](a) == cast[pointer](b) and b[] == 2.0:
       symexTarget("hit")
+
+# ---- a store through a pointer into a view object's field --------------------
+
+proc famStore(a: ptr Two; b: ptr float; c: ptr int64) =
+  # `c` may address `a.x` (a field the path read): its store reaches the
+  # object's field heap, not the float's, so the float read before it is
+  # still 2.0 while `a.x` is 5 (`c = addr a.x`). It was spliced into no
+  # other sort and did not desync: a false `sxUnsat`.
+  if a != nil and b != nil and c != nil and
+     cast[pointer](a) == cast[pointer](b):
+    let f0 = b[]
+    if a.x != 7:
+      c[] = 5
+      if f0 == 2.0 and a.x == 5:
+        symexTarget("hit")
 
 suite "INT-90: two sorts' heaps at one address":
   test "natively: the target's layout is the model's":
@@ -405,6 +422,24 @@ suite "INT-90: two sorts' heaps at one address":
     b[] = 2.0
     check cast[pointer](a) == cast[pointer](b) and b[] == 2.0
     let r = pinFind(lateCast, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+
+  test "natively: a store through a pointer into a view's field":
+    check sizeof(Two) == 16 and offsetOf(Two, y) == 8
+    var buf: Two
+    let a = addr buf
+    let b = cast[ptr float](addr buf)
+    let c = addr buf.x
+    b[] = 2.0
+    let f0 = b[]
+    check a.x != 7
+    c[] = 5
+    check f0 == 2.0 and a.x == 5
+    check cast[pointer](a) == cast[pointer](b)
+
+  test "a store through a pointer into a view's field desyncs the path":
+    let r = pinFind(famStore, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
 

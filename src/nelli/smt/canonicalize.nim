@@ -893,7 +893,11 @@ const renderAsChoicesVersion* = "12"
   ##   writes every view's rendered leaves into the shared allocation
   ##   (`renderCrossSortViews`, `resolveRef`), so a cell held only at view
   ##   sorts with no desync is trusted, a view wider than its owner or over
-  ##   its padding included (it was lossy). No key bytes change.
+  ##   its padding included (it was lossy). Every write of a path's heaps
+  ##   goes through `heapPut` (heap_model.nim): a store into a shared view's
+  ##   leaf heap that no splice reflects desyncs the path wherever it is
+  ##   made (a `ptr`'s store into a field of a view object was a false
+  ##   `sxUnsat`), and a `new`'s zero is spliced. No key bytes change.
 
 const symexWalkerVersion* = "454"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

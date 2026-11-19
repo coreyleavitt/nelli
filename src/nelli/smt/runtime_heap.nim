@@ -425,15 +425,16 @@ proc imageStore(ctx: Z3Context; p: Path; cells: HeapCell; refAst: Z3AnyAst;
                 img: seq[Z3BitVec[64]]) =
   ## `p` with the cell at `refAst` holding `img`.
   for i, c in cells:
-    p.heaps[c.key] = wrap[Z3AnyAst](ctx, checkedStore(ctx, c.arr.raw, refAst.raw,
-                                                      img[i].raw))
+    heapPut(p, c.key,
+            wrap[Z3AnyAst](ctx, checkedStore(ctx, c.arr.raw, refAst.raw,
+                                            img[i].raw)), hwStore)
 
 proc keepHeaps(p: Path; cell: HeapCell) =
   ## `p` holding the heaps of `cell` it read (an input heap's constant): the
   ## heaps a value read is built from are the path's own, which the witness
   ## pins (`modelPins`) and a join compares.
   for c in cell:
-    if not p.heaps.hasKey(c.key): p.heaps[c.key] = c.arr
+    if not p.heaps.hasKey(c.key): heapPut(p, c.key, c.arr, hwCarry)
 
 proc cellDisc(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst): SymVal =
   ## The discriminator of the case object at `refAst` on `p`.
@@ -516,10 +517,10 @@ proc storeActive(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   ## discriminator's arm).
   let (act, on) = activeHeaps(ctx, p, ty)
   if active.isSome:
-    p.heaps[act.key] = wrap[Z3AnyAst](ctx, checkedStore(ctx, act.arr.raw,
-      refAst.raw, rawAnyAstOf(active.get)))
-  p.heaps[on.key] = wrap[Z3AnyAst](ctx, checkedStore(ctx, on.arr.raw,
-    refAst.raw, mkBool(active.isSome).raw))
+    heapPut(p, act.key, wrap[Z3AnyAst](ctx, checkedStore(ctx, act.arr.raw,
+      refAst.raw, rawAnyAstOf(active.get))), hwStore)
+  heapPut(p, on.key, wrap[Z3AnyAst](ctx, checkedStore(ctx, on.arr.raw,
+    refAst.raw, mkBool(active.isSome).raw)), hwStore)
 
 proc variantCellValue(ctx: Z3Context; p: Path; ty: IRType;
                       refAst: Z3AnyAst): SymVal =
@@ -583,7 +584,7 @@ proc variantCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
     let proto = allocateSym(sl.ty, "__addrCellProto", scratchPC)
     for c in heapCellStore(ctx, cell, refAst,
                            heapStoreValue(fv, proto, sl.ty), sl.ty):
-      p.heaps[c.key] = c.arr
+      heapPut(p, c.key, c.arr, hwStore)
   # RFC-0016 PRC-07 (ref variants): the value's union image goes with it. A
   # value with no derived image (`vImage` empty under the gate) marks every
   # byte its active arm's fields do not cover indeterminate, so no later
@@ -655,7 +656,7 @@ proc outOfArmFieldStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
       let merged = heapCellIte(ctx, sel, heapStoreValue(nv.get, proto, fty),
                                heapCellSelect(ctx, cell, refAst, fty), fty)
       for c in heapCellStore(ctx, cell, refAst, merged, fty):
-        p.heaps[c.key] = c.arr
+        heapPut(p, c.key, c.arr, hwStore)
   true
 
 proc multiVariantCellValue(ctx: Z3Context; p: Path; ty: IRType;
@@ -717,7 +718,7 @@ proc multiVariantCellStore(ctx: Z3Context; p: Path; ty: IRType;
       let proto = allocateSym(sl.ty, "__addrCellProto", scratchPC)
       for c in heapCellStore(ctx, cell, refAst,
                              heapStoreValue(fv, proto, sl.ty), sl.ty):
-        p.heaps[c.key] = c.arr
+        heapPut(p, c.key, c.arr, hwStore)
 
 proc objectCellValue(ctx: Z3Context; p: Path; ty: IRType;
                      refAst: Z3AnyAst): SymVal =
@@ -746,7 +747,7 @@ proc objectCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
     for c in heapCellStore(ctx, cell, refAst,
                            heapStoreValue(v.fields[i], proto, ty.fields[i]),
                            ty.fields[i]):
-      p.heaps[c.key] = c.arr
+      heapPut(p, c.key, c.arr, hwStore)
 
 proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
                    refAst: Z3AnyAst): SymVal =
@@ -772,16 +773,14 @@ func keepStrBuf*(stored, v: SymVal): SymVal =
   if result.kind == svString and v.kind == svString:
     result.strBuf = v.strBuf
 
-proc crossSortUnspliced(p: Path; typeId: string)
-
 proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                    v: SymVal): SymVal =
   ## RFC-0005 S8ax. Store `v` into the address cell at `refAst` on `p` (a
   ## path the caller just forked) and return the cell's value read back:
   ## the variable's new binding, so the two stay one term.
   ## RFC-0016 INT-90: the store is spliced into no other sort of the
-  ## `pointer` space (`crossSortPropagate` is the deref write's).
-  crossSortUnspliced(p, refPointeeTypeId(ty))
+  ## `pointer` space (`crossSortPropagate` is the deref write's): each heap
+  ## it writes is an `hwStore` (`heapPut`).
   if ty.kind == itVariant:   # RFC-0005 S8be
     if v.kind == svVariant: variantCellStore(ctx, p, ty, refAst, v)
     return variantCellValue(ctx, p, ty, refAst)
@@ -796,7 +795,7 @@ proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   var scratchPC: seq[Z3Bool]
   let proto = allocateSym(ty, "__addrCellProto", scratchPC)
   let stored = heapCellStore(ctx, cell, refAst, heapStoreValue(v, proto, ty), ty)
-  for c in stored: p.heaps[c.key] = c.arr
+  for c in stored: heapPut(p, c.key, c.arr, hwStore)
   heapCellSelect(ctx, stored, refAst, ty)
 
 proc arrayLocIx(ix: SymVal; n: int): Option[int] =
@@ -1814,8 +1813,9 @@ proc ptrIdxAt(ctx: Z3Context; p: Path; typeId: string; refSort: RawZ3Sort;
     let intSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
     let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, intSort)
     let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & k).cstring)
-    p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
-                                                               arrSort))
+    heapPut(p, k,
+            wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                         arrSort)), hwInput)
   wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[k].raw, ptrAst.raw))
 
 proc ptrKeyAt(ctx: Z3Context; p: Path; typeId: string; refSort: RawZ3Sort;
@@ -1828,8 +1828,9 @@ proc ptrKeyAt(ctx: Z3Context; p: Path; typeId: string; refSort: RawZ3Sort;
     let strSort = ctx.checkErr Z3_mk_string_sort(ctx.raw)
     let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, strSort)
     let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & k).cstring)
-    p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
-                                                               arrSort))
+    heapPut(p, k,
+            wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                         arrSort)), hwInput)
   result = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[k].raw, ptrAst.raw))
   noteTableKey(wrap[Z3String](ctx, result.raw))
 
@@ -2142,16 +2143,6 @@ proc crossSortOthers(typeId: string):
     let lv = viewLeaves(ty, tid)
     if lv.len > 0: result.add (tid, ty, lv)
 
-proc crossSortUnspliced(p: Path; typeId: string) =
-  ## RFC-0016 INT-90. A store into the sort `typeId`'s heap on `p` that is
-  ## not spliced into the other sorts' (a write to a variable by name, a
-  ## `ptr` target's guarded store): when another view sort shares the
-  ## `pointer` space, `p` desyncs (`crossSortDesyncKey`), so no later fact
-  ## relates the written heap to an unwritten one.
-  if crossSortOthers(typeId).len == 0: return
-  p.allocCounters[crossSortDesyncKey] = 1
-  crossSortAnyDesync = true
-
 proc crossSortDesynced(p: Path): bool =
   ## RFC-0016 INT-90. `p`'s heaps no longer describe one instant: a store
   ## went unreflected (`crossSortDesyncKey`) or an opaque call havocked a
@@ -2193,23 +2184,24 @@ proc crossSortLink(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
 
 proc crossSortPropagate(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
                         refAst: Z3AnyAst; leafKey: string; valSV: SymVal;
-                        leafTy: IRType) =
+                        leafTy: IRType): bool =
   ## RFC-0016 INT-90. After the store of `valSV` (in its heap's value sort)
   ## into the leaf `leafKey` of the sort `typeId` at `refAst` on `p`: the
   ## same bytes into every other view sort's overlapping leaves at the same
   ## address, spliced into their old values, so the heaps keep describing
-  ## one instant. A store the model cannot splice -- the sort or the leaf is
-  ## no view (a whole-object store, a string cell) -- desyncs the path.
+  ## one instant. True when it spliced: the leaf's own store is then an
+  ## `hwSpliced` write (`spliceCellStore`). A store the model cannot splice
+  ## -- the sort or the leaf is no view (a whole-object store, a string
+  ## cell) -- is false, and its writes are `hwStore`s, which desync the
+  ## path where they write a shared view's leaf (`heapPut`).
   let others = crossSortOthers(typeId)
-  if others.len == 0: return
+  if others.len == 0: return false
   var leaf: Option[ViewLeaf]
   for l in viewLeaves(ty, typeId):
     if l.key == leafKey: leaf = some(l)
   if leaf.isNone or not viewExactTy(leafTy) or
      svScalarSize(valSV) != leaf.get.size:
-    p.allocCounters[crossSortDesyncKey] = 1
-    crossSortAnyDesync = true
-    return
+    return false
   let a = leaf.get
   let newBits = leafBits(ctx, valSV, a.size)
   for o in others:
@@ -2225,7 +2217,23 @@ proc crossSortPropagate(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
                                bitsAt(ctx, newBits, a.off, a.size, lo, hi))
       let nv = bitsAsLeaf(ctx, spliced, b.size, b.ty)
       for c in heapCellStore(ctx, cell, mapped, nv, b.ty):
-        p.heaps[c.key] = c.arr
+        heapPut(p, c.key, c.arr, hwSpliced)
+  true
+
+proc spliceCellStore(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
+                     refAst: Z3AnyAst; stored: HeapCell; leafKey: string;
+                     valSV: SymVal; leafTy: IRType) =
+  ## RFC-0016 INT-90. A deref write's own store, or a `new`'s zero-init
+  ## (`stored`, `valSV` into the leaf `leafKey` of the sort `typeId` at
+  ## `refAst`) onto `p`: the leaf's
+  ## heap is `hwSpliced` when `crossSortPropagate` spliced its bytes into
+  ## every other view sort's heap, and every other heap it writes is an
+  ## `hwStore` (`heapPut`).
+  let spliced = crossSortPropagate(ctx, p, typeId, ty, refAst, leafKey, valSV,
+                                   leafTy)
+  for c in stored:
+    heapPut(p, c.key, c.arr,
+            if spliced and c.key == leafKey: hwSpliced else: hwStore)
 
 proc ptrOverlapsOfHeap(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
     seq[PtrOverlap] =
@@ -2604,8 +2612,9 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
     if not p.heaps.hasKey(ok):
       let mapSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, objSort)
       let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & ok).cstring)
-      p.heaps[ok] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
-                                                                 mapSort))
+      heapPut(p, ok,
+              wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                          mapSort)), hwInput)
     let objAddr = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[ok].raw,
                                                     ptrAst.raw))
     # The object predates every allocation of the walk: distinct from each
@@ -2655,8 +2664,9 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
     if not p.heaps.hasKey(ok):
       let mapSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, objSort)
       let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & ok).cstring)
-      p.heaps[ok] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
-                                                                 mapSort))
+      heapPut(p, ok,
+              wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                          mapSort)), hwInput)
     let objAddr = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[ok].raw,
                                                     ptrAst.raw))
     # The seq's input length at the object, and its length on this path:
@@ -2738,8 +2748,9 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
     if not p.heaps.hasKey(ok):
       let mapSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, objSort)
       let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & ok).cstring)
-      p.heaps[ok] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
-                                                                 mapSort))
+      heapPut(p, ok,
+              wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                          mapSort)), hwInput)
     let objAddr = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[ok].raw,
                                                     ptrAst.raw))
     var inPresent: Z3AnyAst
@@ -2824,8 +2835,8 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   if result.targets.len == 0: return
   let sk = ptrSelKey(typeId)
   if not p.heaps.hasKey(sk):
-    p.heaps[sk] = mkHeapArrayVar(ctx, refSort, tInt(64, signed = true),
-                                 "heap_" & sk)
+    heapPut(p, sk, mkHeapArrayVar(ctx, refSort, tInt(64, signed = true),
+                                 "heap_" & sk), hwInput)
   result.sel = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[sk].raw,
                                                  ptrAst.raw))
   # RFC-0005 S8bn (item 4): a seq element target's index is within the
@@ -3074,7 +3085,9 @@ proc ptrOverlapWrite(ctx: Z3Context; p: Path; t: PtrTarget; ov: PtrOverlap;
               else: mkHeapArrayVar(ctx, sortOfRaw(ctx, t.objAddr.raw), ov.ty,
                                    "heap_" & ov.famKey)
     let stored = checkedStore(ctx, arr.raw, t.objAddr.raw, rawAnyAstOf(bytes))
-    p.heaps[ov.famKey] = wrap[Z3AnyAst](ctx, checkedIte(ctx, g.raw, stored, arr.raw))
+    heapPut(p, ov.famKey,
+            wrap[Z3AnyAst](ctx, checkedIte(ctx, g.raw, stored, arr.raw)),
+            hwStore)
     return true
   if t.aggregate:
     var alt = t
@@ -3088,8 +3101,8 @@ proc ptrOverlapWrite(ctx: Z3Context; p: Path; t: PtrTarget; ov: PtrOverlap;
       let leaves = svLeafAsts(merged, t.famElemTy)
       for li, sfx in heapLeafSuffixes(t.famElemTy):
         if leaves[li] == oldLeaves[li]: continue
-        p.heaps[t.famKey & sfx] = wrap[Z3AnyAst](ctx, checkedStore(ctx,
-          p.heaps[t.famKey & sfx].raw, t.objAddr.raw, leaves[li]))
+        heapPut(p, t.famKey & sfx, wrap[Z3AnyAst](ctx, checkedStore(ctx,
+          p.heaps[t.famKey & sfx].raw, t.objAddr.raw, leaves[li])), hwStore)
       return true
     let root = p.env[t.envName]
     let sq = svAtPath(root, t.path)
@@ -3221,8 +3234,9 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         let arr = p.heaps[t.famKey & sfx]
         let stored = wrap[Z3AnyAst](ctx, checkedStore(ctx, arr.raw,
                                                       t.objAddr.raw, leaves[li]))
-        p.heaps[t.famKey & sfx] = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
-                                                  stored.raw, arr.raw))
+        heapPut(p, t.famKey & sfx,
+                wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
+                               stored.raw, arr.raw)), hwStore)
     elif t.aggregate:
       # RFC-0005 S8bz (items 1, 2): the part of the element or value, in each
       # leaf's array under the guard.
@@ -3242,8 +3256,9 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         else: elemTermIn(ctx, val, data)))
       let stored = wrap[Z3AnyAst](ctx, checkedStore(ctx, arr.raw,
                                                     t.objAddr.raw, data2.raw))
-      p.heaps[t.famKey] = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
-                                                          stored.raw, arr.raw))
+      heapPut(p, t.famKey,
+              wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
+                                             stored.raw, arr.raw)), hwStore)
     elif t.seqIdx:
       let root = p.env[t.envName]
       # R3-7, R4: `ptrTargets` declined a placeholder current value.
@@ -3270,8 +3285,9 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
     elif t.famKey.len > 0:
       let arr = p.heaps[t.famKey]
       let stored = checkedStore(ctx, arr.raw, t.objAddr.raw, rawAnyAstOf(famVal))
-      p.heaps[t.famKey] = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
-                                                          stored, arr.raw))
+      heapPut(p, t.famKey,
+              wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
+                                             stored, arr.raw)), hwStore)
     elif t.inCell:   # RFC-0016 S8ch: the variable's storage is its cell
       discard addrCellStore(ctx, p, t.cellTy, t.cellRef, ptrIteSV(ctx, guard,
                             val, addrCellValue(ctx, p, t.cellTy, t.cellRef)))
@@ -3289,8 +3305,9 @@ proc ptrSelOwnAtAlloc(ctx: Z3Context; p: Path; pointee: IRType;
             else: mkHeapArrayVar(ctx, refSort, tInt(64, signed = true),
                                  "heap_" & sk)
   let s = ctx.checkErr Z3_get_array_sort_range(ctx.raw, sortOfRaw(ctx, arr.raw))
-  p.heaps[sk] = wrap[Z3AnyAst](ctx, checkedStore(ctx, arr.raw, newRef.raw,
-                                                 ctx.checkErr Z3_mk_int64(ctx.raw, 0, s)))
+  let zero = ctx.checkErr Z3_mk_int64(ctx.raw, 0, s)
+  heapPut(p, sk, wrap[Z3AnyAst](ctx, checkedStore(ctx, arr.raw, newRef.raw,
+                                                  zero)), hwStore)
 
 proc heapArmDegrade(kind: SymexErrorKind; msg: string): Degrade =
   ## RFC-0005 S1. The `walkHeapArm` decline arms' funnel: records through
@@ -3755,9 +3772,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           stampHeapSteps(bound, step)   ## RFC-0005 S8ar
           newEnv[stmt.dRetName] = bound
           var child = forkPath(cpB, childPc, newEnv)
-          child.heaps[discHeapKey] = discHeap
+          heapPut(child, discHeapKey, discHeap, hwCarry)
           for (hk, hh) in armHeaps:
-            child.heaps[hk] = hh
+            heapPut(child, hk, hh, hwCarry)
           # RFC-0016 PRC-07 (ref variants): a field a discriminator store
           # re-read from indeterminate bytes taints the path that reads it.
           # simplified: a field an out-of-arm store re-read from the image
@@ -3859,7 +3876,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           stampHeapSteps(valW, step)
           envW[stmt.dRetName] = valW
           var childW = forkPath(cpW, cpW.pc & rd.conds, envW)
-          for c in rd.cells: childW.heaps[c.key] = c.arr
+          for c in rd.cells: heapPut(childW, c.key, c.arr, hwCarry)
           survivors.add childW
           continue
         # N42 (round-6 fix round 7, walker v105). Materialising the per-path
@@ -3949,7 +3966,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
         if refSV.kind == svPtr and not isField and not stmt.dCell and
            ptrScalarPointee(stmt.dElemTy):
           cp2 = forkPath(cp2, cp2.pc, cp2.env)
-          for c in cell: cp2.heaps[c.key] = c.arr
+          for c in cell: heapPut(cp2, c.key, c.arr, hwCarry)
           let tr = ptrTargetRead(ctx, w, cp2, refAst, stmt.dElemTy, refSort,
                                  typeId, valSV)
           if tr.decline.len > 0:
@@ -4034,7 +4051,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
         # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
         # functional read — `p[] == 42 and p[] == 43` is unsat).
         var child = forkPath(cp2, childPc, newEnv)
-        for c in cell: child.heaps[c.key] = c.arr
+        for c in cell: heapPut(child, c.key, c.arr, hwCarry)
         survivors.add child
     exact(survivors)
   of isNew:
@@ -4163,8 +4180,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           # ill-sorted against it.
           let tagSV = heapStoreValue(tagRaw, proto, tagTy)
           child = childAfter
-          child.heaps[key] = wrap[Z3AnyAst](ctx, checkedStore(ctx, fheap.raw,
-            newRef.raw, rawAnyAstOf(tagSV)))
+          heapPut(child, key, wrap[Z3AnyAst](ctx, checkedStore(ctx, fheap.raw,
+            newRef.raw, rawAnyAstOf(tagSV))), hwStore)
       if pointee.kind in {itTuple, itVariant, itMultiVariant} and not anonTuple:
         for slot in zeroSlots:
           let fname = slot.fname
@@ -4181,7 +4198,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
             let cell = heapCellArrays(ctx, child, slot.key, refSort, fty,
                                       slot.variantTy)
             for c in heapCellStore(ctx, cell, newRef, heapCellZero(fty), fty):
-              child.heaps[c.key] = c.arr
+              heapPut(child, c.key, c.arr, hwStore)
             continue
           if fty.kind == itUninterp and fty.uninterpName == "__closure" and
              slot.variantTy == nil:
@@ -4196,8 +4213,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
             let zero = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw, 0,
               ctx.checkErr Z3_get_array_sort_range(ctx.raw,
                                                    sortOfRaw(ctx, sheap.raw))))
-            child.heaps[sk] = wrap[Z3AnyAst](ctx, checkedStore(ctx, sheap.raw,
-              newRef.raw, zero.raw))
+            heapPut(child, sk, wrap[Z3AnyAst](ctx, checkedStore(ctx, sheap.raw,
+              newRef.raw, zero.raw)), hwStore)
             continue
           let zeroExpr = zeroIRExprForType(fty)
           if zeroExpr == nil:
@@ -4233,7 +4250,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           valSV = heapStoreValue(valSV, proto, fty)   # RFC-0005 S8as
           let storedRaw = checkedStore(ctx, fheap.raw, newRef.raw, rawAnyAstOf(valSV))
           child = childAfter
-          child.heaps[fieldKey] = wrap[Z3AnyAst](ctx, storedRaw)
+          # RFC-0016 INT-90: the zero bytes into the other sorts' views.
+          let zeroCell = @[(key: fieldKey, arr: wrap[Z3AnyAst](ctx, storedRaw))]
+          spliceCellStore(ctx, child, typeId, pointee, newRef, zeroCell,
+                          fieldKey, valSV, fty)
         # RFC-0016 PRC-07 (ref variants): the cell's union image. `new` is
         # `nimNewObj`, zero; a constructor naming every field of its arm is
         # `nimNewObjUninit` (`nUninit`): every byte indeterminate until the
@@ -4263,7 +4283,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
         if heapCompoundTy(pointee) and defaultZeroTotal(pointee):
           let cell = heapCellArrays(ctx, child, typeId, refSort, pointee)
           for c in heapCellStore(ctx, cell, newRef, heapCellZero(pointee), pointee):
-            child.heaps[c.key] = c.arr
+            heapPut(child, c.key, c.arr, hwStore)
         elif zeroExpr == nil:
           # SND-1 twin of the field loop's decline: no clean zero encoding
           # for this pointee type -- the cell stays fresh, on a tainted path.
@@ -4285,7 +4305,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           valSV = heapStoreValue(valSV, proto, pointee)   # RFC-0005 S8as
           let storedRaw = checkedStore(ctx, heap.raw, newRef.raw, rawAnyAstOf(valSV))
           child = childAfter
-          child.heaps[typeId] = wrap[Z3AnyAst](ctx, storedRaw)
+          # RFC-0016 INT-90: the zero bytes into the other sorts' views.
+          spliceCellStore(ctx, child, typeId, pointee, newRef,
+                          @[(key: typeId, arr: wrap[Z3AnyAst](ctx, storedRaw))],
+                          typeId, valSV, pointee)
       survivors.add child
     exact(survivors)
   of isDerefWrite:
@@ -4509,7 +4532,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
             elif exactCondW.isSome: basePcW & @[inArmCondW or exactCondW.get]
             else: basePcW & @[inArmCondW]
           var cpChild = forkPath(cpDW, childPcW, cpDW.env)
-          cpChild.heaps[discHeapKeyW] = discHeap
+          heapPut(cpChild, discHeapKeyW, discHeap, hwCarry)
           # Lower RHS on the in-arm path (proto from the field type) — BV coercion
           # mirrors the plain-field write path (svInt↔BV reconciliation).
           var scratchPC: seq[Z3Bool]
@@ -4562,7 +4585,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
                                            allocRefSort(ctx, objTy), hit.fieldTy,
                                            objTy)
               for c in heapCellStore(ctx, armCell, refAst, valSV, hit.fieldTy):
-                cpInArmRanged.heaps[c.key] = c.arr
+                heapPut(cpInArmRanged, c.key, c.arr, hwStore)
             # N42 audit (round-6 fix round 7): unlike the plain-field write path
             # (below, in this same proc) and the disc-heap materialisation
             # above, THIS loop's `mkHeapArrayVar` calls happen AFTER the RHS's
@@ -4655,7 +4678,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
             if svFitsHeapTy(valW, stmt.dwElemTy):
               for c in refVariantWholeStore(ctx, cpL, allocRefSort(ctx, sortTy),
                                             refAst, stmt.dwElemTy, valW):
-                child.heaps[c.key] = c.arr
+                heapPut(child, c.key, c.arr, hwStore)
             else:
               # A value some upstream degrade produced: no parts to store.
               # Each part's cell is havocked (a fresh term of its sort), as
@@ -4671,8 +4694,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
                   let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, c.arr.raw)
                   let fresh = freshOfSort(ctx,
                     ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort))
-                  child.heaps[c.key] = wrap[Z3AnyAst](ctx,
-                    checkedStore(ctx, c.arr.raw, refAst.raw, fresh))
+                  heapPut(child, c.key, wrap[Z3AnyAst](ctx,
+                    checkedStore(ctx, c.arr.raw, refAst.raw, fresh)), hwStore)
             survivors.add drainPendingLowerEffects(child)
           continue
         # Materialise the per-path heap (field-split array for a field write) on
@@ -4862,7 +4885,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
                                         carried, fty)
                 for k in 0 ..< g.len:
                   for c in heapCellStore(ctx, cells[k], refAst, carried, fty):
-                    cpS.heaps[c.key] = c.arr
+                    heapPut(cpS, c.key, c.arr, hwStore)
                 for c in wf: cpS.pc.add c
             # RFC-0016 PRC-07 (ref variants): the arm the new tag selects
             # reads its fields from the union image (the bytes stay).
@@ -4879,16 +4902,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
                 let nv = heapCellIte(ctx, sel, heapStoreValue(after[j], protoI, fty),
                                      heapCellSelect(ctx, cellI, refAst, fty), fty)
                 for c in heapCellStore(ctx, cellI, refAst, nv, fty):
-                  cpS.heaps[c.key] = c.arr
+                  heapPut(cpS, c.key, c.arr, hwStore)
           let stored = heapCellStore(ctx, cell, refAst, valSV, stmt.dwElemTy)
           # REPLACE the per-path heap binding with the stored array on the surviving
           # path (PER-PATH — an unforked branch never sees this update).
           # RFC-0005 S8ap: every leaf of a compound cell.
           var child = forkPath(cpS, cpS.pc, cpS.env)
-          for c in stored: child.heaps[c.key] = c.arr
           # RFC-0016 INT-90: the same bytes into the other sorts' views.
-          crossSortPropagate(ctx, child, typeId, sortTy, refAst, heapKey, valSV,
-                             stmt.dwElemTy)
+          spliceCellStore(ctx, child, typeId, sortTy, refAst, stored, heapKey,
+                          valSV, stmt.dwElemTy)
           # RFC-0005 S8bh (item 2). A bare `p[] = v` through a `ptr` also
           # stores into each candidate TARGET under its `sel` guard
           # (`ptrTargetWrite`; the own cell's store is the one above). Not

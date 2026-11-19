@@ -1419,7 +1419,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## its own path; 457 reserved): 456->458.
     ## RFC-0016 int6 D1 (a command-syntax call is a call in expression
     ## position; 459 reserved): 458->460.
-    check symexWalkerVersion == "460"
+    ## RFC-0016 int6 D1b (the walk budget charges each query's own-context
+    ## solver; 461-463 reserved): 460->464.
+    check symexWalkerVersion == "464"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

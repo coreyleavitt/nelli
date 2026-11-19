@@ -2536,6 +2536,37 @@ const walkerTermUnits* = 15
   ##   walk's units/s is within the arithmetic shapes' (see
   ##   `tests/tsymex_0016_k7_twosearch.nim`).
 
+const walkerContextUnits* = 25_000
+  ## RFC-0016 int6 D1b. Units charged per own-context solver
+  ## (`ownContextSolver`): the fixed cost of one check that neither Z3's step
+  ## count nor the term visits count -- the fresh Z3 context, the solver and
+  ## its parameters, the check's own overhead, the context's teardown, and
+  ## the per-query passes' fixed set-up. Count-based (one per solver built),
+  ## so a cut walk is the same on every host. On the same scale as
+  ## `walkerTermUnits`: a unit is about 0.254 us of wall.
+  ##
+  ## Why: a k-unroll of small queries is made of that cost. The `filterIt`
+  ## over a `seq[seq[int]]` parameter (`tsymex_0016_k9cg_unbacked_p`) is
+  ## ~1.5k Z3 units and ~430 term visits a query and ~12x the queries per
+  ## unroll step; without this charge it was charged about 1M units a second
+  ## of wall against the calibrated 3.9M, so `walkRLimit` was ~1,000 s of
+  ## that shape and its unroll-5 walk ran to the 600 s stall backstop.
+  ##
+  ## Calibration (int6 D1b, 2026-11-19, podman `nelli-dev`, c, walk time
+  ## only, one solver per query in both walks): wall = a * solvers + b *
+  ## visits + 0.254 us * Z3 units, fitted to two shapes at the two ends of
+  ## the visits-per-query range:
+  ##   filterIt unroll 3 (`tsymex_0016_int6_d1b_walkbudget`): 426 solvers,
+  ##     184,857 visits, 616,699 Z3 units, 3,622 ms
+  ##   `tsymex_0016_k7_twosearch`'s third walk: 83 solvers, 659,473 visits,
+  ##     219,661 Z3 units, 2,991 ms
+  ## gives b = 3.6 us/visit (`walkerTermUnits`' 15 stays: 3.6 / 0.254 =
+  ## 14.3) and a = 6.56 ms/solver = 25,800 units; 25,000 is used. The fit
+  ## predicts filterIt unroll 4 (3,906 solvers, 2,341,468 visits, 8.65M Z3
+  ## units) at 36 s; it ran 42-57 s on a loaded host. In the instrumented
+  ## build the context alone (`newContext`) was 2.2 ms of filterIt's 6.6 and
+  ## `mergeMemberships`' fixed set-up 1.6 ms.
+
 template chargeWalkerTerms(n: int) =
   ## One count-based charge (a function of the query's terms alone, so the
   ## verdict is the same on every host).
@@ -11606,6 +11637,7 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   let own = newContext()
   setCurrentContext(prev)
   chargeWalkerTerms(queryTermCount(ctx, roots))   ## RFC-0016 K7: one translate visit per term
+  walkerWorkUnits += walkerContextUnits            ## RFC-0016 int6 D1b: the solver's fixed cost
   let terms = newAstVector(ctx)
   for c in roots: terms.add toAnyAst(c)
   let made = translate(terms, own)

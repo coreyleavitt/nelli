@@ -1343,8 +1343,17 @@ const renderAsChoicesVersion* = "12"
   ##   `feUnsupportedExprKind`, so no hit was clean and a `seq[seq[int]]`
   ##   parameter's walk enumerated every unwound path (past 900 s). No key
   ##   bytes change.
+  ## - RFC-0016 int6 D1b (460->464; 461-463 are reserved on other branches):
+  ##   `walkRLimit` charges each own-context solver a fixed
+  ##   `walkerContextUnits` (25,000) beside its Z3 units and term visits: the
+  ##   context, solver, check overhead and teardown no count saw, measured at
+  ##   6.56 ms a query. A k-unroll of small queries (the k9cg FilterIt probe)
+  ##   was charged about a quarter of its wall, so the budget did not bound
+  ##   it and the walk ran to the stall backstop; it now ends on the budget
+  ##   (`ckWalkWork`, `beBudgetExhaustedPrune`). A walk the budget cut
+  ##   before is cut sooner, so verdicts move. No key bytes change.
 
-const symexWalkerVersion* = "460"
+const symexWalkerVersion* = "464"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

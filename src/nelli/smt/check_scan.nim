@@ -905,6 +905,48 @@ proc targetStem(t: string): string =
   elif p.startsWith("?"): p = p[1 .. ^1]
   p.baseName.stemOf
 
+const defsUnreadKinds = {
+    nnkNone, nnkEmpty, nnkIdent, nnkSym, nnkType, nnkCharLit, nnkIntLit,
+    nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit, nnkUIntLit, nnkUInt8Lit,
+    nnkUInt16Lit, nnkUInt32Lit, nnkUInt64Lit, nnkFloatLit, nnkFloat32Lit,
+    nnkFloat64Lit, nnkFloat128Lit, nnkStrLit, nnkRStrLit, nnkTripleStrLit,
+    nnkNilLit, nnkComesFrom, nnkDotCall, nnkCommand, nnkCall, nnkCallStrLit,
+    nnkInfix, nnkPrefix, nnkPostfix, nnkHiddenCallConv, nnkExprEqExpr,
+    nnkExprColonExpr, nnkIdentDefs, nnkVarTuple, nnkPar, nnkObjConstr,
+    nnkCurly, nnkCurlyExpr, nnkBracket, nnkBracketExpr, nnkPragmaExpr,
+    nnkRange, nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr, nnkIfExpr,
+    nnkElifExpr, nnkElseExpr, nnkLambda, nnkDo, nnkAccQuoted, nnkTableConstr,
+    nnkBind, nnkClosedSymChoice, nnkOpenSymChoice, nnkHiddenStdConv,
+    nnkHiddenSubConv, nnkConv, nnkCast, nnkStaticExpr, nnkAddr, nnkHiddenAddr,
+    nnkHiddenDeref, nnkObjDownConv, nnkObjUpConv, nnkChckRangeF,
+    nnkChckRange64, nnkChckRange, nnkStringToCString, nnkCStringToString,
+    nnkAsgn, nnkFastAsgn, nnkGenericParams, nnkFormalParams, nnkOfInherit,
+    nnkImportAs, nnkOfBranch, nnkElifBranch, nnkExceptBranch, nnkElse,
+    nnkAsmStmt, nnkPragma, nnkPragmaBlock, nnkIfStmt, nnkForStmt,
+    nnkParForStmt, nnkWhileStmt, nnkCaseStmt, nnkTypeSection, nnkVarSection,
+    nnkLetSection, nnkConstSection, nnkConstDef, nnkTypeDef, nnkYieldStmt,
+    nnkDefer, nnkTryStmt, nnkFinally, nnkRaiseStmt, nnkReturnStmt,
+    nnkBreakStmt, nnkContinueStmt, nnkBlockStmt, nnkStaticStmt, nnkDiscardStmt,
+    nnkBindStmt, nnkMixinStmt, nnkUsingStmt, nnkCommentStmt, nnkBlockExpr,
+    nnkStmtListType, nnkBlockType, nnkWith, nnkWithout, nnkTypeOfExpr,
+    nnkObjectTy, nnkTupleTy, nnkTupleClassTy, nnkTypeClassTy, nnkStaticTy,
+    nnkRecList, nnkRecCase, nnkRecWhen, nnkRefTy, nnkPtrTy, nnkVarTy,
+    nnkConstTy, nnkOutTy, nnkDistinctTy, nnkProcTy, nnkIteratorTy, nnkSinkAsgn,
+    nnkEnumTy, nnkEnumFieldDef, nnkArgList, nnkPattern, nnkHiddenTryStmt,
+    nnkClosure, nnkGotoState, nnkState, nnkBreakState, nnkTupleConstr,
+    nnkError, nnkModuleRef, nnkReplayAction, nnkNilRodNode, nnkOpenSym}
+  ## RFC-0016 int6-u. Every node kind `defsWalk` does not follow, listed by
+  ## name: what a module-level statement of one of them defines is not read.
+  ## They are the statements that define nothing by name (sections, pragmas,
+  ## comments, assignments, `discard`), the ones whose body opens its own
+  ## scope (`block`, `if`, `case`, the loops, `try`, `static`), the kinds the
+  ## parser never puts at a module's level, and the calls: a definition a
+  ## macro or template call expands to is not read, as `moduleDefs`
+  ## documents, and declining every module-level call would leave every
+  ## callee unplaced. The set together with `defsWalk`'s other branches is
+  ## the whole of `NimNodeKind` (its `case` has no `else`), so a kind a
+  ## toolchain adds fails the build until it is classified here or followed.
+
 proc defsWalk(sc: var Scanner; md: var ModuleDefs; n: NimNode;
               imports: var seq[tuple[name, target: string]];
               exports: var seq[NimNode]) =
@@ -984,7 +1026,8 @@ proc defsWalk(sc: var Scanner; md: var ModuleDefs; n: NimNode;
       sc.including.add path
       defsWalk(sc, md, ast, imports, exports)
       discard sc.including.pop()
-  else:
+  of defsUnreadKinds:
+    # Names no module-level routine the reading takes (`defsUnreadKinds`).
     discard
 
 proc moduleDefs*(env: SourceEnv; path: string): ModuleDefs =

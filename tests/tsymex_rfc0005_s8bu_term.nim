@@ -197,8 +197,8 @@ suite "S8bu (1): no query is unbounded under the defaults":
     check taintedSolveRLimit(defaultSymexSettings()) ==
           defaultConcreteBranchRLimit
     check defaultSymexSettings().budget.queryRLimit != 0'u
-    check ResourceBudget().queryTimeoutMs == 600_000'u
-    check ";budget.queryTimeoutMs=600000" in canonicalize(defaultSymexSettings())
+    check ResourceBudget().queryTimeoutMs == 1_200_000'u
+    check ";budget.queryTimeoutMs=1200000" in canonicalize(defaultSymexSettings())
     check ";budget.queryTimeoutMs=2000" in canonicalize(clockOnly)
 
   test "a solve the clock cuts off declines, named, and is not cached":

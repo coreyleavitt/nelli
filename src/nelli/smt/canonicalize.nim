@@ -992,6 +992,48 @@ const renderAsChoicesVersion* = "12"
   ##   on a type whose value is the C target's. Verdicts change from a fault or a trusted
   ##   answer to `sxUnknown`. Key bytes change for a halting marker only
   ##   (`;halt` in its `St<Un:...>`).
+  ## - RFC-0016 INT-59 / INT-61 / INT-62 (417->421; 418-420 are reserved for
+  ##   other W4 work): a query a float interval argument refutes is asked as
+  ##   `false` (`fpIntervalRefutes`), and a string length bounded by its
+  ##   term's structure gets that bound beside the query
+  ##   (`seqLenBoundFacts`), so a rounded division's range side and a
+  ##   char-built string's overflow side are decided in a few units
+  ##   instead of millions; `pointCheck` and `limitWorldRefuted` cut a solve
+  ##   by their clocks only under a run clock, so under the pin settings
+  ##   their answers are the step bound's; and a query that counts a
+  ##   builtin set's members is asked first with each count a free variable
+  ##   beside the ranges of its `int` views (`cardFreeAbstraction`,
+  ##   `bvViewRangeFacts`), so a packed program's queries after a set row
+  ##   no longer bit-blast the set again (six rows: past 16.5M units, now
+  ##   about 6 times the rows' sum). Verdicts can change from
+  ##   `sxUnknown` to exact. Key bytes change: the default
+  ##   `queryTimeoutMs` is `1_200_000` (was `600_000`), which the default
+  ##   settings' canonical form names.
+  ## - RFC-0016 INT-71 (421->425; 422-424 are reserved for other W4 work):
+  ##   the global-route scan reads an `IdentDefs`' type slot as the type its
+  ##   names' symbols carry, not as code. A template's `var x {.gensym.}:
+  ##   seq[int]` keeps `seq[int]` as `[]` over the open choice of every `[]`
+  ##   in scope at the template; the scan took each as a callee, walked into
+  ##   an imported library's hooks and declined every read
+  ##   (`feGlobalRouteUnproved`). Verdicts change from `sxUnknown` to exact.
+  ##   No key bytes change.
+  ## - RFC-0016 INT-57 (425->428; 426-427 are reserved for other W4 work):
+  ##   the rendering `$v` of a bit-vector is registered, and its length and
+  ##   its order or equality against another rendering lower to bit-vector
+  ##   formulas over `v` (`strLenOf`, `renderCmp`; a merged `$b` compares by
+  ##   cases, `litCmp`), so the sequence solver no longer decides them and
+  ##   Z3's step counter no longer stalls on them. With no run clock
+  ##   (`queryTimeoutMs = 0`) every step-bounded solve runs under the solver
+  ##   stall backstop (`stallBackstopMs`), a wall deadline for the whole run:
+  ##   a solve it ends is `beSolverUndef` naming it, the walk stops, and the
+  ##   run is `rdQueryTimeout`, not cached. Verdicts change from a hang to
+  ## - RFC-0016 INT-57 / INT-74 (428->431; 429-430 are reserved for other W4
+  ##   work): a fixed-index byte of a rendering, and of a slice or a
+  ##   concatenation over one, lowers to a bit-vector formula (`strByteAt`),
+  ##   and a slice's length to SMT-LIB's definition over its base's length
+  ##   (`strLenOf`), so `($t & "ab")[0 .. 1][0]` holds no string. Verdicts
+  ##   change from `sxUnknown` (the stall backstop) to exact. No key bytes
+  ##   change.
 
 const symexWalkerVersion* = "435"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

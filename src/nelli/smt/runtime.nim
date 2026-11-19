@@ -27,6 +27,7 @@ import std/algorithm   ## N46 audit (RFC-chapulin-hardening bucket-2): sort() fo
                         ## deterministic Table-key iteration order at Z3 term-
                         ## building sites (mergeClosureExitHeap's ITE loop)
 import std/math   ## Phase 15 F2: classify() for float-literal NaN/Inf/-0.0 lowering
+import std/monotimes   ## RFC-0016 INT-57: the stall backstop deadline
 import std/strutils   ## Phase 15 S5: parseInt on a concrete seqLen numeral; split
 import z3
 
@@ -2529,6 +2530,15 @@ template chargeWalkerTerms(n: int) =
   ## verdict is the same on every host).
   walkerWorkUnits += n * walkerTermUnits
 
+proc isBitSetCard(ctx: Z3Context; id: int): bool =
+  ## RFC-0016 INT-62. `id` is a `card` term of `ctx` (`bsCard`): AST ids
+  ## are per context, and the registry is the thread's, so an id alone may
+  ## name another context's count. Within a run every lookup is the run's
+  ## context and the registry is cleared when that context is made
+  ## (`resetSymexRunState`); the check keeps a lookup from any other context
+  ## (a probe, a query's own context, a caller's) from reading one.
+  id in bitSetCardIds and bitSetCardSets[id].s.ctx.raw == ctx.raw
+
 proc queryMentionsBitSetCard(ctx: Z3Context; roots: openArray[Z3Bool]): bool =
   ## RFC-0005 S8bq. Some term of `roots` is a builtin set's `card`.
   if bitSetCardIds.len == 0: return false
@@ -2541,7 +2551,7 @@ proc queryMentionsBitSetCard(ctx: Z3Context; roots: openArray[Z3Bool]): bool =
     if id in seen: continue
     seen.incl id
     chargeWalkerTerms(1)
-    if id in bitSetCardIds: return true
+    if isBitSetCard(ctx, id): return true
     if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
     let app = Z3_to_app(ctx.raw, t)
     for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
@@ -2578,7 +2588,7 @@ proc bsPopcount(s: Z3AnyAst; n: int): Z3BitVec[64] =
   else: wrap[Z3BitVec[64]](c, c.checkErr Z3_mk_zero_ext(c.raw, cuint(64 - w),
                                                        terms[0].raw))
 
-proc bsCard(s: Z3AnyAst; n: int): Z3BitVec[64] =
+proc bsCard*(s: Z3AnyAst; n: int): Z3BitVec[64] =
   ## `card(s)`: `bsPopcount`, registered (`bitSetCardIds`) with its set
   ## (`bitSetCardSets`, RFC-0005 S8bv) for `checkCapped`.
   result = bsPopcount(s, n)
@@ -2615,7 +2625,7 @@ proc bitSetCardFacts(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     if id in seen: continue
     seen.incl id
     chargeWalkerTerms(1)
-    if id in bitSetCardIds:
+    if isBitSetCard(ctx, id):
       let (sv, n) = bitSetCardSets[id]
       found.add (wrap[Z3BitVec[64]](ctx, t), sv, n)
       continue
@@ -4392,6 +4402,13 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
   ## `raise` here would hit the identical C-backend silent-loss hazard. See
   ## `loweringDidDegrade`'s doc comment for the full mechanism.
   doAssert a.kind == svString and b.kind == svString
+  # RFC-0016 INT-57: two renderings of bit-vectors (`$t <= $u`), or two
+  # values each one of a few literals (a merged `$b`), compare as formulas
+  # over the values, not as strings (`renderCmp`, `litCmp`).
+  let byValue = renderCmp(a.str, b.str, op)
+  if byValue.isSome: return ofBool(byValue.get)
+  let byCases = litCmp(a.str, b.str, op)
+  if byCases.isSome: return ofBool(byCases.get)
   case op
   of bEq: ofBool(a.str == b.str)
   of bNe: ofBool(a.str != b.str)
@@ -6124,7 +6141,7 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       # (`runtime_strings.nim`), same byte-faithful `str.len` read. Makes
       # `data.len` WORK (not merely decline) even through a call-chain hop
       # whose OWN parse never routed the dispatch through `iekStrLen`.
-      SymVal(kind: svInt, zi: len(recv.str))
+      SymVal(kind: svInt, zi: strLenOf(recv.str))   # RFC-0016 INT-57
     else:
       # Round-6 B1 backstop: was a bare `ValueError` (a live crash gap) —
       # a mis-classified receiver now declines classified instead of
@@ -9201,6 +9218,8 @@ type SeqCapKinds = object
     ## `seqRangeFacts`. `str.replace_all` is read off a parsed term: its
     ## C constructor is absent below Z3 4.16 (`z3WithSeqReplaceAll`), the
     ## SMT-LIB operator is not.
+  strFromCode, iteK: int
+    ## RFC-0016 INT-61: `str.from_code` and `ite`, for `seqLenBoundFacts`.
   reToRe, reRange, reConcat, reUnion, reInter, rePlus, reOpt, reLoop,
     rePower, reAllChar: int
     ## RFC-0005 S8ai: the regex constructors `regexLenBounds` reads a
@@ -9269,7 +9288,11 @@ proc seqCapKinds(): SeqCapKinds =
       strToInt:    kindOf(ctx, toInt(str).raw),
       strContains: kindOf(ctx, contains(str, ch).raw),
       strPrefix:   kindOf(ctx, startsWith(str, ch).raw),
-      strSuffix:   kindOf(ctx, endsWith(str, ch).raw))
+      strSuffix:   kindOf(ctx, endsWith(str, ch).raw),
+      strFromCode: kindOf(ctx, ctx.checkErr Z3_mk_string_from_code(ctx.raw,
+                                                                   c.raw)),
+      iteK:        kindOf(ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+                     (c == c).raw, str.raw, str.raw)))
     # RFC-0005 S8ai: disable an S8ai kind that is not unique. A power that
     # shares the loop's ordinal is read by the loop arm (`regexLenBounds`),
     # so only the power is dropped.
@@ -9281,7 +9304,7 @@ proc seqCapKinds(): SeqCapKinds =
                k.strPrefix, k.strSuffix, lastIndexKind, k.strConcat,
                k.strFromInt, k.strReplaceAll, k.reToRe, k.reRange, k.reConcat,
                k.reUnion, k.reInter, k.rePlus, k.reOpt, k.reLoop, k.rePower,
-               k.reAllChar]
+               k.reAllChar, k.strFromCode, k.iteK]
     template unique(f: untyped) =
       var uses = 0
       for a in all:
@@ -9300,8 +9323,364 @@ proc seqCapKinds(): SeqCapKinds =
     unique(k.reLoop)
     if k.rePower != -2: unique(k.rePower)
     unique(k.reAllChar)
+    unique(k.strFromCode)
+    unique(k.iteK)
     seqCapDeclKinds = (ready: true, k: k)
   seqCapDeclKinds.k
+
+const maxLenBoundFacts = 64
+  ## RFC-0016 INT-61. The most `str.len` terms `seqLenBoundFacts` bounds in
+  ## one query.
+
+proc seqLenBoundFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0016 INT-61. For every `str.len(x)` in `roots` whose argument has a
+  ## length bound its own structure gives, `str.len(x) <= n`:
+  ##   - a literal: its length;
+  ##   - `str.from_code(k)`, `str.at(s, i)`: 1;
+  ##   - `str.++(a, b, ...)`: the sum of the parts' bounds;
+  ##   - `str.substr(s, i, n)`: `s`'s bound;
+  ##   - `ite(c, a, b)`: the larger of the arms' bounds.
+  ## Anything else (an input, a `select`, `str.from_int`) has none, and a
+  ## term with an unbounded part gets no fact. Each holds in every model of
+  ## the sequence theory, so the query's models are its own (as
+  ## `bitSetCardFacts`'). They are what the arithmetic around a length
+  ## lacks: an `int` addition's overflow side over `len($chr(t + 128))`
+  ## asks whether `str.len(str.from_code(k))` leaves the `int` range, which
+  ## Z3's sequence solver did not refute in 12.4M units (`sxUnknown`, about
+  ## 25 s on c); with `<= 1` beside it the arithmetic refutes it at once.
+  let kinds = seqCapKinds()
+  var memo = initTable[int, int]()   # ast id -> bound, -1 none
+  proc bound(t: RawZ3Ast; depth: int): int =
+    let id = astId(ctx, t)
+    if id in memo: return memo[id]
+    result = -1
+    chargeWalkerTerms(1)
+    if Z3_is_string(ctx.raw, t):
+      result = int(Z3_get_string_length(ctx.raw, t))
+    elif depth < 32 and Z3_get_ast_kind(ctx.raw, t) == Z3_APP_AST:
+      let app = Z3_to_app(ctx.raw, t)
+      let k = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)))
+      let n = int(Z3_get_app_num_args(ctx.raw, app))
+      template arg(i: int): RawZ3Ast = Z3_get_app_arg(ctx.raw, app, cuint(i))
+      if k == kinds.strFromCode or k == kinds.strAt:
+        result = 1
+      elif k == kinds.strConcat:
+        var sum = 0
+        for i in 0 ..< n:
+          let b = bound(arg(i), depth + 1)
+          if b < 0: (sum = -1; break)
+          sum += b
+        result = sum
+      elif k == kinds.strExtract and n == 3:
+        result = bound(arg(0), depth + 1)
+      elif k == kinds.iteK and n == 3:
+        let x = bound(arg(1), depth + 1)
+        let y = bound(arg(2), depth + 1)
+        if x >= 0 and y >= 0: result = max(x, y)
+    memo[id] = result
+  var seen: HashSet[int]
+  var stack: seq[RawZ3Ast]
+  for r in roots: stack.add r.raw
+  while stack.len > 0 and result.len < maxLenBoundFacts:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    chargeWalkerTerms(1)
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let app = Z3_to_app(ctx.raw, t)
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    if n == 1 and ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw,
+        app))) == kinds.strLen:
+      let x = Z3_get_app_arg(ctx.raw, app, 0)
+      let b = bound(x, 0)
+      if b >= 0 and not Z3_is_string(ctx.raw, x):
+        result.add wrap[Z3Int](ctx, t) <= mkInt(ctx, b)
+    for i in 0 ..< n:
+      stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+
+type FpIntervalKinds = object
+  ## RFC-0016 INT-59: the `Z3_decl_kind` ordinals `fpIntervalRefutes`
+  ## reads, taken from the linked Z3 (positional, as `SeqCapKinds`).
+  ok: bool
+    ## Every ordinal is distinct. A collision (a kind the linked Z3 shares
+    ## between two operators) turns the interval argument off.
+  toFpS, toFpU, fdiv, fmul, fadd, fsub, fneg, rti: int
+  leq, lt, geq, gt, sext, zext, notK, andK, orK: int
+
+proc cNextAfter(x, y: cdouble): cdouble {.importc: "nextafter",
+                                           header: "<math.h>".}
+  ## RFC-0016 INT-59: C99's `nextafter` (`fpIntervalRefutes` widens by it).
+
+var fpIntervalDeclKinds {.threadvar.}: tuple[ready: bool, k: FpIntervalKinds]
+
+proc fpIntervalKinds(): FpIntervalKinds =
+  ## Each kind is read off a term built through the C API in a probe
+  ## context, every operand held by a wrapper. (A first version built
+  ## them from bare handles: in a reference-counted context Z3 keeps an
+  ## unreferenced result only until the next API call, so the bit-vector
+  ## operand of `Z3_mk_fpa_to_fp_signed` was already freed when it ran,
+  ## Z3 rejected the call ("rm and float sorts expected") and the null it
+  ## returned crashed `Z3_get_app_decl`. The binding is right.)
+  if not fpIntervalDeclKinds.ready:
+    let ctx = probeContext()
+    let c = ctx.raw
+    template held(x: RawZ3Ast): Z3AnyAst = wrap[Z3AnyAst](ctx, ctx.checkErr x)
+    proc kindOf(a: Z3AnyAst): int =
+      ord(Z3_get_decl_kind(c, Z3_get_app_decl(c, Z3_to_app(c, a.raw))))
+    let v = mkBitVec[8](ctx, 3)
+    let rm = rmRTZ(ctx)
+    let x = toFpFromSigned(rm, v, Z3Float64)
+    let y = toFpFromUnsigned(rm, v, Z3Float64)
+    let lt = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_fpa_lt(c, x.raw, y.raw))
+    let gt = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_fpa_gt(c, x.raw, y.raw))
+    var k = FpIntervalKinds(
+      toFpS: kindOf(held x.raw), toFpU: kindOf(held y.raw),
+      fdiv: kindOf(held Z3_mk_fpa_div(c, rm.raw, x.raw, y.raw)),
+      fmul: kindOf(held Z3_mk_fpa_mul(c, rm.raw, x.raw, y.raw)),
+      fadd: kindOf(held Z3_mk_fpa_add(c, rm.raw, x.raw, y.raw)),
+      fsub: kindOf(held Z3_mk_fpa_sub(c, rm.raw, x.raw, y.raw)),
+      fneg: kindOf(held Z3_mk_fpa_neg(c, x.raw)),
+      rti: kindOf(held Z3_mk_fpa_round_to_integral(c, rm.raw, x.raw)),
+      leq: kindOf(held Z3_mk_fpa_leq(c, x.raw, y.raw)),
+      lt: kindOf(held lt.raw),
+      geq: kindOf(held Z3_mk_fpa_geq(c, x.raw, y.raw)),
+      gt: kindOf(held gt.raw),
+      sext: kindOf(held Z3_mk_sign_ext(c, 8, v.raw)),
+      zext: kindOf(held Z3_mk_zero_ext(c, 8, v.raw)),
+      notK: kindOf(held (not lt).raw),
+      andK: kindOf(held (lt and gt).raw),
+      orK: kindOf(held (lt or gt).raw))
+    let all = [k.toFpS, k.toFpU, k.fdiv, k.fmul, k.fadd, k.fsub, k.fneg,
+               k.rti, k.leq, k.lt, k.geq, k.gt, k.sext, k.zext, k.notK,
+               k.andK, k.orK]
+    k.ok = true
+    for i in 0 ..< all.len:
+      for j in i + 1 ..< all.len:
+        if all[i] == all[j]: k.ok = false
+    fpIntervalDeclKinds = (ready: true, k: k)
+  fpIntervalDeclKinds.k
+
+const fpIntervalMagnitude = 1e300
+  ## RFC-0016 INT-59. The largest bound `fpIntervalRefutes` keeps: far
+  ## enough below `high(float64)` (about 1.8e308) that one ulp of
+  ## widening and the rounding of a bounded result never reach infinity.
+var fpUnderflowProbe {.volatile.} = 2.2250738585072014e-308
+  ## RFC-0016 INT-59: the least positive normal `float64`, read at run time
+  ## (`volatile`, so the C compiler cannot fold the probe below).
+
+proc hostGradualUnderflow(): bool =
+  ## Whether this thread's `float64` arithmetic underflows gradually (IEEE
+  ## 754): neither flushes a subnormal result to zero (FTZ) nor reads a
+  ## subnormal operand as zero (DAZ). A process built with `-ffast-math`
+  ## (`crtfastmath`) sets both, and the one-ulp argument of
+  ## `fpIntervalRefutes` assumes neither.
+  let m = fpUnderflowProbe
+  let half = m / 2.0                     # subnormal; 0 under FTZ
+  half != 0.0 and half * 2.0 == m        # the operand read as 0 under DAZ
+
+proc fpIntervalRefutes*(ctx: Z3Context; roots: openArray[Z3Bool]): bool =
+  ## RFC-0016 INT-59. Whether an interval argument shows some root of
+  ## `roots` false, so the query is UNSAT without a solve (`checkExact`
+  ## then asks `false`). What it is for: the range check of a float-to-int
+  ## conversion (`decideUndefined`'s `ubFloatToIntRange` side, `not (f > lo
+  ## - 1 and f < hi + 1)`) over `int(trunc(float(t) / 3.0))`; Z3 refuted it
+  ## only by bit-blasting the division (11.6M units, twice a walk), and a
+  ## fact `lo <= x <= hi` beside the query did not shorten that (10.6M).
+  ##
+  ## Shapes. Only `Float64` terms (11 exponent, 53 significand bits) get an
+  ## interval `[lo, hi]` of reals, each bound a finite `float64` in
+  ## `[-1e300, 1e300]`:
+  ##   - `to_fp`/`to_fp_unsigned` of a bit-vector of width <= 64 under any
+  ##     rounding mode: the integer range of its width (a sign extension
+  ##     under a signed conversion, or a zero extension that adds bits,
+  ##     narrows it to the operand's);
+  ##   - a numeral that is neither NaN nor infinite;
+  ##   - `fp.neg`, `fp.roundToIntegral`, `fp.add`, `fp.sub`, `fp.mul`, and
+  ##     `fp.div` whose divisor's interval excludes zero, over bounded
+  ##     operands, under any rounding mode.
+  ## Anything else (a variable, `ite`, `sqrt`, a bit-pattern `to_fp`, another
+  ## sort) gets none, and so does everything above it. Truth is three-valued
+  ## over `fp.leq/lt/geq/gt` of two bounded terms, `not`, `and`, `or`; a root
+  ## evaluated false refutes. Every other connective is undecided.
+  ##
+  ## Soundness: claim (I) every value the term takes in any model is a
+  ## finite float (not NaN, not infinite) whose real value lies in `[lo,
+  ## hi]`. By induction on the term:
+  ##   - Conversion: for any of the five rounding modes, the result of
+  ##     rounding an integer `v` lies between `RD(v)` and `RU(v)` (round
+  ##     down / up), and rounding is monotone, so the result is in
+  ##     `[RD(min), RU(max)]` of the integer range; `|v| <= 2^64` never
+  ##     overflows.
+  ##   - Numeral: its real value (`fp.to_real`, simplified to a rational)
+  ##     converted to `float64` and checked by rebuilding the numeral from
+  ##     that double: the same term (hash-consed, one id) is the same value,
+  ##     so the conversion lost
+  ##     nothing (a subnormal's rational, whose denominator exceeds the
+  ##     double range, fails that check and gets no interval). A zero is
+  ##     taken as `[0, 0]` either sign: `-0` and `+0` are the real 0.
+  ##   - `+ - * /`: the exact real result `e` of operands in their intervals
+  ##     is monotone in each operand separately (`*` is linear in each;
+  ##     `/` is too, its divisor's sign fixed by an interval that excludes
+  ##     zero), so it is bounded by the four corner values; each corner
+  ##     computed in `float64` is that corner rounded to nearest, and
+  ##     rounding is monotone, so the least computed corner is `RN(emin)`.
+  ##     Any rounding mode gives `RD(e) <= result <= RU(e)`, and `RD(emin)
+  ##     >= nextafter(RN(emin), -inf)` (if `emin` is not representable
+  ##     `RN` is one of its two neighbours `RD`, `RU`, and the step below
+  ##     `RU` is `RD`; if it is, all three agree). Symmetrically above. So
+  ##     widening the computed bounds one ulp outward contains every
+  ##     rounding mode's result. Division by an interval holding zero (or
+  ##     a zero of either sign) is refused, so `x/0` (an infinity or NaN)
+  ##     never arises; finite operands and a nonzero divisor give no NaN
+  ##     (`inf - inf`, `0 * inf`, `0/0`, `inf/inf` need an infinite or zero
+  ##     operand).
+  ##   - `fp.neg` is exact; `fp.roundToIntegral` under any mode returns
+  ##     `floor(x)` or `ceil(x)`, in `[floor(lo), ceil(hi)]`.
+  ##   - Overflow: a bound past `1e300` is refused (as is a NaN or infinite
+  ##     computed bound). A result within one ulp of a bound under `1e300`
+  ##     is finite, so no operation over bounded operands overflows to
+  ##     infinity.
+  ##   - Subnormals: the bounds are computed in the host's `float64`, which
+  ##     must be IEEE 754 with gradual underflow for the one-ulp argument
+  ##     (a subnormal result is still correctly rounded, one subnormal ulp
+  ##     from the exact value). A thread that flushes subnormals to zero or
+  ##     reads them as zero (`-ffast-math`) is detected at the call
+  ##     (`hostGradualUnderflow`) and gets no refutation.
+  ##   - Exact bounds are not widened: a numeral's value, a conversion of a
+  ##     bit-vector of width <= 53 (every integer of its range is a
+  ##     `float64`, so `RD` and `RU` of a bound are the bound), `fp.neg`'s
+  ##     negation and `fp.roundToIntegral`'s `floor`/`ceil`.
+  ##   - The rounding-mode argument is never read: the bounds hold for all
+  ##     five modes, so a symbolic mode is covered too.
+  ## Claim (II), the comparisons: `fp.leq(a, b)` is true iff neither is NaN
+  ## and `a <= b` as reals (`-0 = +0`); by (I) neither is NaN, so `a.hi <=
+  ## b.lo` makes it true and `a.lo > b.hi` false in every model (`fp.lt`
+  ## with `<` and `>=`; `geq`/`gt` swapped). `not`, `and`, `or` combine
+  ## decided parts by their truth tables and leave the rest undecided. A
+  ## root decided false holds in no model, so the conjunction of `roots` is
+  ## UNSAT: the answer is the query's own. Pinned differentially against
+  ## Z3 by `tsymex_0016_int59_fpinterval`.
+  let k = fpIntervalKinds()
+  if not k.ok or not hostGradualUnderflow(): return false
+  let c = ctx.raw
+  var memo = initTable[int, tuple[ok: bool, lo, hi: float64]]()
+  proc exact(a, b: float64): tuple[ok: bool, lo, hi: float64] =
+    # Written so a NaN bound fails too.
+    if a >= -fpIntervalMagnitude and b <= fpIntervalMagnitude and a <= b:
+      (true, a, b)
+    else: (false, 0.0, 0.0)
+  proc widen(lo, hi: float64): tuple[ok: bool, lo, hi: float64] =
+    exact(float64(cNextAfter(lo, NegInf)), float64(cNextAfter(hi, Inf)))
+  proc isDouble(t: RawZ3Ast): bool =
+    let so = Z3_get_sort(c, t)
+    Z3_get_sort_kind(c, so) == Z3_FLOATING_POINT_SORT and
+      Z3_fpa_get_ebits(c, so) == 11 and Z3_fpa_get_sbits(c, so) == 53
+  proc bvRange(t: RawZ3Ast; signed: bool): tuple[ok: bool, lo, hi: float64] =
+    var w = int(Z3_get_bv_sort_size(c, Z3_get_sort(c, t)))
+    var sgn = signed
+    if Z3_get_ast_kind(c, t) == Z3_APP_AST:
+      let app = Z3_to_app(c, t)
+      let kd = ord(Z3_get_decl_kind(c, Z3_get_app_decl(c, app)))
+      if Z3_get_app_num_args(c, app) == 1 and (kd == k.sext or kd == k.zext):
+        let inner = Z3_get_app_arg(c, app, 0)
+        let iw = int(Z3_get_bv_sort_size(c, Z3_get_sort(c, inner)))
+        # A zero extension by 0 bits is the operand itself, read signed by
+        # a signed conversion: it narrows only when it adds a bit.
+        if kd == k.zext and iw < w: (w = iw; sgn = false)
+        elif kd == k.sext and signed: w = iw
+    if w < 1 or w > 64: return (false, 0.0, 0.0)
+    let (lo, hi) = if sgn: (-pow(2.0, float64(w - 1)), pow(2.0, float64(w - 1)) - 1.0)
+                   else: (0.0, pow(2.0, float64(w)) - 1.0)
+    if w <= 53: exact(lo, hi) else: widen(lo, hi)
+  proc iv(t: RawZ3Ast; depth: int): tuple[ok: bool, lo, hi: float64] =
+    let id = astId(ctx, t)
+    if id in memo: return memo[id]
+    result = (false, 0.0, 0.0)
+    chargeWalkerTerms(1)
+    if depth < 24 and Z3_get_ast_kind(c, t) == Z3_APP_AST and isDouble(t):
+      let app = Z3_to_app(c, t)
+      let kd = ord(Z3_get_decl_kind(c, Z3_get_app_decl(c, app)))
+      let n = int(Z3_get_app_num_args(c, app))
+      template arg(i: int): RawZ3Ast = Z3_get_app_arg(c, app, cuint(i))
+      if n == 0:
+        # A numeral (an uninterpreted constant's real value is not a
+        # numeral, so it gets none).
+        if Z3_is_numeral_ast(c, t) and not Z3_fpa_is_numeral_nan(c, t) and
+           not Z3_fpa_is_numeral_inf(c, t):
+          let real = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fpa_to_real(c, t))
+          let r = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_simplify(c, real.raw))
+          if Z3_get_ast_kind(c, r.raw) == Z3_NUMERAL_AST:
+            let v = float64(Z3_get_numeral_double(c, r.raw))
+            if v == 0.0:
+              if Z3_fpa_is_numeral_zero(c, t): result = exact(0.0, 0.0)
+            elif v == v:
+              let back = wrap[Z3AnyAst](ctx, ctx.checkErr(
+                Z3_mk_fpa_numeral_double(c, cdouble(v), Z3_get_sort(c, t))))
+              if astId(ctx, back.raw) == id: result = exact(v, v)
+      elif (kd == k.toFpS or kd == k.toFpU) and n == 2 and
+           Z3_get_sort_kind(c, Z3_get_sort(c, arg(1))) == Z3_BV_SORT:
+        result = bvRange(arg(1), kd == k.toFpS)
+      elif kd == k.fneg and n == 1:
+        let a = iv(arg(0), depth + 1)
+        if a.ok: result = exact(-a.hi, -a.lo)
+      elif kd == k.rti and n == 2:
+        let a = iv(arg(1), depth + 1)
+        if a.ok: result = exact(floor(a.lo), ceil(a.hi))
+      elif n == 3 and (kd == k.fadd or kd == k.fsub or kd == k.fmul or
+                       kd == k.fdiv):
+        let a = iv(arg(1), depth + 1)
+        let b = iv(arg(2), depth + 1)
+        if a.ok and b.ok:
+          if kd == k.fadd: result = widen(a.lo + b.lo, a.hi + b.hi)
+          elif kd == k.fsub: result = widen(a.lo - b.hi, a.hi - b.lo)
+          elif kd == k.fdiv and b.lo <= 0.0 and b.hi >= 0.0:
+            discard   # the divisor may be zero: no interval
+          else:
+            let ps = if kd == k.fmul:
+                       [a.lo * b.lo, a.lo * b.hi, a.hi * b.lo, a.hi * b.hi]
+                     else:
+                       [a.lo / b.lo, a.lo / b.hi, a.hi / b.lo, a.hi / b.hi]
+            result = widen(min(ps), max(ps))
+    memo[id] = result
+  # Three-valued: 1 true, 0 false, -1 not decided by the intervals.
+  proc truth(t: RawZ3Ast; depth: int): int =
+    result = -1
+    chargeWalkerTerms(1)
+    if depth >= 24 or Z3_get_ast_kind(c, t) != Z3_APP_AST: return
+    let app = Z3_to_app(c, t)
+    let kd = ord(Z3_get_decl_kind(c, Z3_get_app_decl(c, app)))
+    let n = int(Z3_get_app_num_args(c, app))
+    template arg(i: int): RawZ3Ast = Z3_get_app_arg(c, app, cuint(i))
+    if kd == k.notK and n == 1:
+      let a = truth(arg(0), depth + 1)
+      if a >= 0: result = 1 - a
+    elif kd == k.andK:
+      result = 1
+      for i in 0 ..< n:
+        let a = truth(arg(i), depth + 1)
+        if a == 0: return 0
+        if a < 0: result = -1
+    elif kd == k.orK:
+      result = 0
+      for i in 0 ..< n:
+        let a = truth(arg(i), depth + 1)
+        if a == 1: return 1
+        if a < 0: result = -1
+    elif n == 2 and (kd == k.leq or kd == k.lt or kd == k.geq or kd == k.gt):
+      if not (isDouble(arg(0)) and isDouble(arg(1))): return
+      var a = iv(arg(0), 0)
+      var b = iv(arg(1), 0)
+      if not (a.ok and b.ok): return
+      if kd == k.geq or kd == k.gt: swap(a, b)   # now `a <= b` / `a < b`
+      if kd == k.leq or kd == k.geq:
+        if a.hi <= b.lo: result = 1
+        elif a.lo > b.hi: result = 0
+      else:
+        if a.hi < b.lo: result = 1
+        elif a.lo >= b.hi: result = 0
+  for r in roots:
+    if truth(r.raw, 0) == 0: return true
 
 proc byteLeafIds(ctx: Z3Context; roots: openArray[Z3Bool]): HashSet[int] =
   ## The AST ids of the string leaves whose byte-domain constraint `s in
@@ -10555,6 +10934,73 @@ proc theoryFreeSimple(): bool =
     theoryFreeNeedsSimple = (ready: true, simple: s.check() != zsSat)
   theoryFreeNeedsSimple.simple
 
+const stallBackstopMs* {.intdefine: "nelliStallBackstopMs".} = 600_000
+  ## RFC-0016 INT-57. The solver stall backstop: the wall-clock bound, in
+  ## milliseconds, on the step-bounded solves (`rlimit` non-zero) of ONE run
+  ## that has no run clock (`queryTimeoutMs = 0`, the pin settings). A step
+  ## bound ends a search only while Z3 advances its step counter, and Z3 can
+  ## stop advancing it (`len($t) + t + 129 <= 3` over the sequence solver,
+  ## S8bu's mixed Int / bit-vector query); `walkRLimit` cannot end it either,
+  ## since a check is charged only once it returns (`chargeWalkWork`). So the
+  ## pin settings, which turn the run clock off, left such a solve unbounded:
+  ## the walk was killed at 900 s. Z3 offers no thread-safe read of the
+  ## counter during a check (`rlimit count` is a statistic, collected from
+  ## the solver's own state), so a monitor cannot tell a stalled counter from
+  ## a slow one; the backstop is Z3's own `timeout` (a timer thread that
+  ## cancels the search, as `Z3_interrupt` does). It is a DEADLINE for the
+  ## run, not a per-solve figure (`beginStallDeadline`): each solve gets what
+  ## is left of it (`stallTimeoutMs`), so a walk of many stalling solves ends
+  ## within it too, and once a solve is cut the walk stops (`walkStalled`,
+  ## `shouldStop`). `600_000` is past where the step bounds end a search
+  ## whose counter advances (the slowest measured, the sequence solver at
+  ## 40-55k units/s, spends `seqQueryRLimit`'s 20M in about 6-8 minutes) and
+  ## inside the 900 s a sweep allows a suite. A solve it ends is never a
+  ## verdict: `zsUnknown`, `beSolverUndef` naming the backstop
+  ## (`undefReason`), and the run is marked `rdQueryTimeout`
+  ## (`solveBounded`), so its verdict is not cached, as a wall-clock cut
+  ## never is; a sat or unsat answer never depends on it. A step-unbounded
+  ## solve (`rlimit = 0`: the caller opted out of every step bound and
+  ## `walkRLimit`) is left alone. `-d:nelliStallBackstopMs=N` lowers it for
+  ## a suite that exercises it.
+
+type StallDeadline = object
+  ## RFC-0016 INT-57. The run's stall backstop deadline (`stallBackstopMs`),
+  ## in `getMonoTime` ticks; `on` only inside a run with no run clock.
+  on: bool
+  ticks: int64
+
+var stallDeadline {.threadvar.}: StallDeadline
+var walkStalled {.threadvar.}: bool
+  ## RFC-0016 INT-57. A solve of the current run was cut by the stall
+  ## backstop; reset by `resetSymexRunState`. `shouldStop` ends the walk and
+  ## `runSymexImpl` records the halt.
+
+proc beginStallDeadline(timeoutMs: uint): StallDeadline =
+  ## RFC-0016 INT-57. Starts the run's stall deadline (no run clock only) and
+  ## returns the one it replaces, for the run's exit to restore
+  ## (`endStallDeadline`). A run begun inside another keeps the earlier of
+  ## the two deadlines.
+  result = stallDeadline
+  if timeoutMs == 0'u and stallBackstopMs > 0:
+    let t = getMonoTime().ticks + int64(stallBackstopMs) * 1_000_000'i64
+    stallDeadline = StallDeadline(on: true,
+      ticks: (if result.on: min(result.ticks, t) else: t))
+  else:
+    stallDeadline = StallDeadline(on: false)
+
+proc endStallDeadline(prev: StallDeadline) =
+  ## RFC-0016 INT-57. The run is over: the deadline it replaced is back.
+  stallDeadline = prev
+
+proc stallTimeoutMs(): uint =
+  ## RFC-0016 INT-57. The `timeout` a step-bounded solve runs under with no
+  ## run clock: what is left of the run's deadline (at least 1 ms: the
+  ## deadline passed, the solve is cut at once), or outside a run the whole
+  ## backstop.
+  if not stallDeadline.on: return uint(stallBackstopMs)
+  let left = (stallDeadline.ticks - getMonoTime().ticks) div 1_000_000'i64
+  uint(max(1'i64, min(left, int64(stallBackstopMs))))
+
 var queryTimeoutMsCur {.threadvar.}: uint
   ## RFC-0005 S8bu. The run's `queryTimeoutMs`, set by `resetSymexRunState`:
   ## every solver `querySolver` builds runs under it. `0` (none) outside a
@@ -10641,14 +11087,34 @@ proc solveBounded(s: Z3Solver; assumptions: openArray[Z3Bool] = []): Z3Status =
   result = if assumptions.len == 0: s.check() else: s.checkWith(assumptions)
   if result == zsUnknown and s.reasonUnknown() == "timeout":
     queryTimedOutFlag = true
+    # RFC-0016 INT-57: with no run clock it was the stall backstop; the run's
+    # deadline is spent, so the walk stops (`shouldStop`).
+    if queryTimeoutMsCur == 0'u: walkStalled = true
 
 proc undefReason(s: Z3Solver; timeoutMs: uint): string =
   ## RFC-0005 S8bu. Z3's `reason_unknown`, naming `queryTimeoutMs` when
-  ## the clock ended the solve.
+  ## the clock ended the solve. RFC-0016 INT-59: with the units the solve
+  ## had spent at the cut. A cut does not show that Z3 stopped advancing its
+  ## step count: INT-59's trunc row, cut by a 15 s clock, was counting
+  ## about 1M units a second (12,066,441 in 11.8 s on c) and was short of
+  ## its bound. So the message claims only what it measured.
   result = "Z3: " & s.reasonUnknown()
   if result == "Z3: timeout":
-    result.add " (queryTimeoutMs = " & $timeoutMs & ": Z3 stopped " &
-      "advancing its step count, so no step bound ended the solve)"
+    var units = -1'i64
+    let st = s.getStatistics()
+    if st.contains("rlimit count"):
+      units = if st.isInt("rlimit count"): int64(st.getInt("rlimit count"))
+              else: int64(st.getFloat("rlimit count"))
+    let spent = (if units >= 0: " after " & $units & " rlimit units" else: "")
+    if queryTimeoutMsCur == 0'u:
+      # RFC-0016 INT-57: no run clock, so the stall backstop ended it.
+      result.add " (solver stall backstop: the run had no answer within " &
+        $stallBackstopMs & " ms with queryTimeoutMs = 0" & spent &
+        ", and the step bound had not ended the solve; the run's, not " &
+        "the program's)"
+    else:
+      result.add " (queryTimeoutMs = " & $timeoutMs & ": the run clock " &
+        "ended the solve" & spent & ", before its step bound did)"
 
 proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
                  rlimit: uint; seqTheory = true): Z3Solver =
@@ -10672,6 +11138,9 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   solverParams.set("rlimit", rlimit)
   # RFC-0005 S8bu: and the run's wall-clock backstop (`queryTimeoutMs`).
   if queryTimeoutMsCur > 0'u: solverParams.set("timeout", queryTimeoutMsCur)
+  elif rlimit > 0'u and stallBackstopMs > 0:
+    # RFC-0016 INT-57: no run clock; the run's stall deadline bounds it.
+    solverParams.set("timeout", stallTimeoutMs())
   solverParams.set("random_seed", 0'u)
   if not seqTheory:
     solverParams.set("smt.string_solver", "none")
@@ -11240,6 +11709,197 @@ proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let eq = checkedEq(ctx, views[i].x.raw, views[j].x.raw)
     result.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_implies(ctx.raw, t.raw, eq))
 
+var bvExtDeclKinds {.threadvar.}: tuple[ready: bool, zext, sext, iteK: int]
+  ## RFC-0016 INT-62. The `Z3_decl_kind` ordinals of `zero_extend`,
+  ## `sign_extend` and `ite`, read off probe terms (as `intDivDeclKinds`).
+
+const maxViewRangeFacts = 64
+  ## RFC-0016 INT-62. The most views `bvViewRangeFacts` ranges in one query
+  ## (two facts each).
+
+proc bvViewRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0016 INT-62. For every signed Int view `v = sbv2int(x)` in `roots`
+  ## (an `int` as Int arithmetic sees it, `bvTermToZ3Int`) whose `x` has a
+  ## range its own structure gives, `lo <= v and v <= hi`. The range of a
+  ## `W`-bit term, read through each `select(store(a, i, y), i)` as `y`
+  ## (`peelSelect`, a theorem of arrays):
+  ##   - a numeral: its signed value;
+  ##   - a builtin set's `card` over `n` bits (`bsCard`): [0, n];
+  ##   - a zero extension of a `w`-bit term, `w` < W: [0, 2^w - 1];
+  ##   - a sign extension of a `w`-bit term, `w` < W:
+  ##     [-2^(w-1), 2^(w-1) - 1];
+  ##   - `bvadd` / `bvsub` of ranged operands: the integer sum's or
+  ##     difference's range, when it lies in W bits' signed range (then the
+  ##     operation does not wrap, and its value is the integer one);
+  ##   - `ite(c, a, b)` of ranged arms: the union.
+  ## Anything else (an input, a product, a sum that may wrap) has none.
+  ## Bounds are kept within [-2^62, 2^62]. Each fact is a theorem of two's
+  ## complement (and, for `card`, of counting: at most `n` of `n` bits are
+  ## set), so the query's models are its own (as `bitSetCardFacts`').
+  ## `cardFreeAbstraction` asserts them beside a query whose counts it has
+  ## replaced by free variables: there they are what an `int`
+  ## accumulator's overflow side needs, `acc + c1[1] + 2 + card(x2)`
+  ## leaving the `int` range being linear arithmetic over ranged views.
+  ## Without the ranges Z3 refuted that side only by bit-blasting the
+  ## 256-bit set beside the seq element (about 4M units for each of two
+  ## sides once a `set[char]` row joined a `seq` row). They are not added to
+  ## every query: beside the set's own bit-blast they did not make the
+  ## packed program's sides cheaper than about 150k units each.
+  ensureIntDivDeclKinds()
+  if not bvExtDeclKinds.ready:
+    let pc = probeContext()
+    let v = mkBitVecVar[8](pc, "__int62_ext_probe")
+    let v2 = mkBitVecVar[8](pc, "__int62_ext_probe2")
+    proc kindOf(a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(pc.raw, Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, a))))
+    bvExtDeclKinds = (ready: true,
+      zext: kindOf(pc.checkErr Z3_mk_zero_ext(pc.raw, 8, v.raw)),
+      sext: kindOf(pc.checkErr Z3_mk_sign_ext(pc.raw, 8, v.raw)),
+      iteK: kindOf(pc.checkErr Z3_mk_ite(pc.raw,
+        pc.checkErr(Z3_mk_bvslt(pc.raw, v.raw, v2.raw)), v.raw, v2.raw)))
+  let bv2nat = intDivDeclKinds.bv2nat
+  var seen: HashSet[int]
+  var args1: seq[RawZ3Ast]
+  var stack: seq[RawZ3Ast]
+  for r in roots: stack.add r.raw
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    chargeWalkerTerms(1)
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let app = Z3_to_app(ctx.raw, t)
+    let n = int(Z3_get_app_num_args(ctx.raw, app))
+    for i in 0 ..< n: stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+    if n == 1 and ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw,
+        app))) == bv2nat:
+      args1.add Z3_get_app_arg(ctx.raw, app, 0)
+  const lim = 1'i64 shl 62
+    # Every bound is kept within [-2^62, 2^62], so two bounds add or
+    # subtract without overflowing an `int64`.
+  type Rng = tuple[ok: bool, lo, hi: int64]
+  var memo = initTable[int, Rng]()
+  proc fit(lo, hi: int64; w: int): Rng =
+    ## `[lo, hi]` when it lies in the signed range of `w` bits and in
+    ## [-2^62, 2^62]: then the bit-vector operation that produced it did
+    ## not wrap, and its value is the integer one. At 63 bits the top is
+    ## 2^62 - 1, one below `lim`: 2^62 is that width's sign bit.
+    let top = if w >= 64: lim else: min(lim, (1'i64 shl (w - 1)) - 1)
+    let bot = if w >= 64: -lim else: -(1'i64 shl (w - 1))
+    if lo >= bot and hi <= top: (true, lo, hi) else: (false, 0'i64, 0'i64)
+  proc rangeOf(t0: RawZ3Ast; depth: int): Rng =
+    let t = peelSelect(ctx, t0)
+    let id = astId(ctx, t)
+    if id in memo: return memo[id]
+    chargeWalkerTerms(1)
+    result = (false, 0'i64, 0'i64)
+    if Z3_get_sort_kind(ctx.raw, Z3_get_sort(ctx.raw, t)) != Z3_BV_SORT:
+      memo[id] = result
+      return
+    let w = int(Z3_get_bv_sort_size(ctx.raw, Z3_get_sort(ctx.raw, t)))
+    let isCard = isBitSetCard(ctx, id)
+    if w > 64 and not isCard:
+      memo[id] = result
+      return
+    if isCard:
+      result = (true, 0'i64, int64(bitSetCardSets[id].n))
+    elif Z3_is_numeral_ast(ctx.raw, t):
+      var u: uint64
+      if Z3_get_numeral_uint64(ctx.raw, t, addr u):
+        let v = if w < 64 and u >= (1'u64 shl (w - 1)): int64(u) - (1'i64 shl w)
+                elif w == 64: cast[int64](u)
+                else: int64(u)
+        result = fit(v, v, w)
+    elif depth < 32 and Z3_get_ast_kind(ctx.raw, t) == Z3_APP_AST:
+      let app = Z3_to_app(ctx.raw, t)
+      let k = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)))
+      let n = int(Z3_get_app_num_args(ctx.raw, app))
+      template arg(i: int): RawZ3Ast = Z3_get_app_arg(ctx.raw, app, cuint(i))
+      if n == 1 and (k == bvExtDeclKinds.zext or k == bvExtDeclKinds.sext):
+        let iw = int(Z3_get_bv_sort_size(ctx.raw, Z3_get_sort(ctx.raw, arg(0))))
+        if iw >= 1 and iw < w and iw <= 62:
+          result =
+            if k == bvExtDeclKinds.zext: (true, 0'i64, (1'i64 shl iw) - 1)
+            else: (true, -(1'i64 shl (iw - 1)), (1'i64 shl (iw - 1)) - 1)
+      elif k == intDivDeclKinds.bvadd and n >= 1:
+        result = (true, 0'i64, 0'i64)
+        for i in 0 ..< n:
+          let r = rangeOf(arg(i), depth + 1)
+          if not r.ok:
+            result = (false, 0'i64, 0'i64)
+            break
+          result = fit(result.lo + r.lo, result.hi + r.hi, w)
+          if not result.ok: break
+      elif k == intDivDeclKinds.bvsub and n == 2:
+        let x = rangeOf(arg(0), depth + 1)
+        let y = rangeOf(arg(1), depth + 1)
+        if x.ok and y.ok: result = fit(x.lo - y.hi, x.hi - y.lo, w)
+      elif k == bvExtDeclKinds.iteK and n == 3:
+        let x = rangeOf(arg(1), depth + 1)
+        let y = rangeOf(arg(2), depth + 1)
+        if x.ok and y.ok: result = (true, min(x.lo, y.lo), max(x.hi, y.hi))
+    memo[id] = result
+  var done: HashSet[int]
+  for x in args1:
+    if result.len >= 2 * maxViewRangeFacts: break
+    let xid = astId(ctx, x)
+    if xid in done: continue
+    done.incl xid
+    if Z3_is_numeral_ast(ctx.raw, x): continue   # the rewriter folds it
+    # Held from the start: a bare handle in a reference-counted context is
+    # freed by the next API call.
+    let v = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x, true))
+    if astId(ctx, v.raw) notin seen: continue   # only the views the query holds
+    let r = rangeOf(x, 0)
+    if not r.ok: continue
+    result.add v >= mkBigInt(ctx, $r.lo)
+    result.add v <= mkBigInt(ctx, $r.hi)
+
+proc cardFreeAbstraction*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0016 INT-62. `roots` and their `int` views' ranges
+  ## (`bvViewRangeFacts`) with each builtin set's `card` term replaced by a
+  ## fresh bit-vector of its width, or nothing when `roots` count no set's
+  ## members. A model of `roots` is one of the result with each fresh
+  ## variable read as its count, so the result's models are a SUPERSET of
+  ## the query's and its UNSAT is the query's own (as S8bj's query without
+  ## the recursive definitions). The range facts are taken before the
+  ## replacement, so each count's `[0, n]` stays beside its variable, and
+  ## the 256-bit set and its adder tree are no longer in the formula: an
+  ## `int` accumulator's overflow side over a count is linear arithmetic
+  ## over ranged views. Before, every query of a packed program after a
+  ## `set[char]` row bit-blasted that row's set again (100-200k units each,
+  ## against a few thousand without it).
+  if bitSetCardIds.len == 0: return
+  var seen: HashSet[int]
+  var stack: seq[RawZ3Ast]
+  var froms, tos: seq[RawZ3Ast]
+  var held: seq[Z3AnyAst]
+  for r in roots: stack.add r.raw
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    chargeWalkerTerms(1)
+    if isBitSetCard(ctx, id):
+      froms.add t
+      # Held (`held`): a bare handle in a reference-counted context is
+      # freed by the next API call.
+      held.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fresh_const(ctx.raw,
+        "__int62_card", Z3_get_sort(ctx.raw, t)))
+      tos.add held[^1].raw
+      continue
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let app = Z3_to_app(ctx.raw, t)
+    for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+      stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+  if froms.len == 0: return
+  for r in @roots & bvViewRangeFacts(ctx, roots):
+    result.add wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw,
+      cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+
 const recFactsRLimit* = 100_000'u
   ## RFC-0005 S8bt. The budget of `checkCapped`'s check without the
   ## recursive `replace` definitions (S8bj ran it under `factsFirstRLimit`).
@@ -11497,9 +12157,15 @@ proc checkExact(ctx: Z3Context; query: openArray[Z3Bool];
   # `x == int2bv(sbv2int(x))` (`bvIntInverseFacts`): theorems too.
   # RFC-0005 S8bv: and the part identities of its `card` terms
   # (`bitSetCardFacts`), theorems too.
+  # RFC-0016 INT-61: and the structural bounds of its string lengths
+  # (`seqLenBoundFacts`), theorems too.
+  # RFC-0016 INT-59: a query a float interval refutes (`fpIntervalRefutes`)
+  # is asked as `false`: the same UNSAT, with no bit-blast.
+  let query = if fpIntervalRefutes(ctx, query): @[mkBool(ctx, false)]
+              else: @query
   var rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
     bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query) &
-    bitSetCardFacts(ctx, query))
+    bitSetCardFacts(ctx, query) & seqLenBoundFacts(ctx, query))
   let qto = settings.budget.queryTimeoutMs   # RFC-0005 S8bu
   # RFC-0005 S8bq: a query that counts a builtin set's members runs under
   # `seqQueryRLimit` too, when that is the smaller bound: its bit count can
@@ -11569,6 +12235,18 @@ proc checkExact(ctx: Z3Context; query: openArray[Z3Bool];
           r.raw, cuint(froms.len),
           cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
           cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+  # RFC-0016 INT-62: a query that counts a builtin set's members is asked
+  # first with each count a fresh variable in its range
+  # (`cardFreeAbstraction`), under the small budget of step 0: a superset
+  # of the real models, so an UNSAT is the query's own, and no bit-blast of
+  # the set.
+  block:
+    let cardFree = cardFreeAbstraction(ctx, query)
+    if cardFree.len > 0:
+      let pre = if rlimit == 0: recFactsRLimit else: min(rlimit, recFactsRLimit)
+      let sAbs = ownContextSolver(ctx, cardFree, pre)
+      if counted("cardFree", ownContextCheck(sAbs)) == zsUnsat:
+        return (zsUnsat, sAbs, nil, "")
   template plain(): untyped =
     let s = ownContextSolver(ctx, rootsIn, rlimit)
     let r = counted("plain", ownContextCheck(s))
@@ -11976,7 +12654,10 @@ proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
       cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
   let savedTimeout = queryTimeoutMsCur
   defer: queryTimeoutMsCur = savedTimeout
-  if queryTimeoutMsCur == 0'u or queryTimeoutMsCur > pointTimeoutMs:
+  # RFC-0016 INT-59: the cut applies under a run clock only. With none
+  # (the pin settings) the step bound alone ends the check, so its answer
+  # is the same on every host.
+  if queryTimeoutMsCur > pointTimeoutMs:
     queryTimeoutMsCur = pointTimeoutMs
   var stopWhy = "the search found no point whose value the query accepts"
   proc operands(st: RegexPointSite; m: Z3Model):
@@ -12254,7 +12935,10 @@ proc limitWorldRefuted(ctx: Z3Context; query: openArray[Z3Bool];
       cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
   let savedTimeout = queryTimeoutMsCur
   defer: queryTimeoutMsCur = savedTimeout
-  if queryTimeoutMsCur == 0'u or queryTimeoutMsCur > limitWorldTimeoutMs:
+  # RFC-0016 INT-59: the cut applies under a run clock only. With none
+  # (the pin settings) the step bound alone ends the check, so its answer
+  # is the same on every host.
+  if queryTimeoutMsCur > limitWorldTimeoutMs:
     queryTimeoutMsCur = limitWorldTimeoutMs
   for k in sites:
     let stopped = regexLimitSites[k]
@@ -13924,6 +14608,7 @@ proc shouldStop(w: WalkCtx): bool {.inline.} =
   ## label's sxSat is never computed. All raise-flavoured targets: an sxRaised IS
   ## the terminal answer (unchanged).
   if walkWorkExhausted: return true   ## RFC-0016 K7: out of solver work
+  if walkStalled: return true         ## RFC-0016 INT-57: the stall backstop
   if tailWorkExhausted: return true   ## RFC-0016 W3-z R9: the tail's budget
   for r in w.found:
     if r.status == sxSat: return true
@@ -26559,7 +27244,11 @@ proc runSymex*(prog: SymexProgram,
   # has returned on every path it catches; `runSymexImpl` cannot do it in a
   # `finally` (CR-13's goto-exception caveat).
   let prevCtx = currentContext()
+  # RFC-0016 INT-57: with no run clock the run's solves share one stall
+  # deadline (`stallBackstopMs`), and the one it replaces is back after.
+  let prevStall = beginStallDeadline(settings.budget.queryTimeoutMs)
   result = runSymexCaught(prog, target, settings, replay)
+  endStallDeadline(prevStall)
   dropWitnessPins(result)
   # The caller path-condition stacks hold Z3 terms and are read only by the
   # walk that pushed them. The tail check's walk leaves its last entries in
@@ -26684,6 +27373,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   walkerWorkBase = walkerWorkUnits
   walkRLimitCur = settings.budget.walkRLimit
   walkWorkExhausted = false
+  walkStalled = false                                  ## RFC-0016 INT-57
   tailUnitsCeil = 0                                    ## RFC-0016 W3-z R9
   tailWorkExhausted = false
   tailUnitsRun = 0                                     ## RFC-0016 W3-z int4r
@@ -27415,6 +28105,16 @@ proc runSymexImpl(prog: SymexProgram,
            $walkUnitsSpent() & " spent) ended the walk -- the paths not yet " &
            "decided are unexplored (beBudgetExhaustedPrune)",
       cap = ckWalkWork)
+  if walkStalled:
+    # RFC-0016 INT-57. A solve ran past the run's stall deadline with no run
+    # clock (`stallBackstopMs`) and `shouldStop` ended the walk: the paths
+    # not yet decided are dropped, and the run is `rdQueryTimeout` (not
+    # cached). Never a verdict: `sxUnknown` unless a sound witness was found.
+    w.halted(beSolverUndef,
+      "solver stall backstop (" & $stallBackstopMs & " ms for the run, " &
+           "queryTimeoutMs = 0) ended the walk: Z3 had stopped answering a " &
+           "solve its step bound had not ended -- the paths not yet decided " &
+           "are unexplored (the run's, not the program's)")
   currentLowerSinks = nil
   currentWalkCtxPtr = nil   ## (a) normal-path clear: walk() completed without raising
   stampLoweringPendingLeak(w)  ## RFC-0005 S1: pending-taint leak pin (§2.2)
@@ -28066,6 +28766,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # a `finally` on the raise path does not apply).
   let prevCtx = currentContext()
   defer: setCurrentContext(prevCtx)
+  let prevStall = beginStallDeadline(settings.budget.queryTimeoutMs)  ## RFC-0016 INT-57
+  defer: endStallDeadline(prevStall)
   let ctx = resetSymexRunState(settings)
   var counters: ConcolicYieldCounters
   let cappedLen = min(trace.len, maxDraws)

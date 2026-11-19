@@ -1808,6 +1808,14 @@ task test, "Run the test suite":
             "tsymex_0016_int70_templatetype",
             # RFC-0016 INT-76: a `c_longdouble` value declines, never faults.
             "tsymex_0016_int76_longdouble",
+            # RFC-0016 INT-59 / INT-61 / INT-62: a float interval refutation;
+            # a string length's structural bound; a packed program's cost.
+            "tsymex_0016_int59_fpinterval",
+            "tsymex_0016_int61_strlenbound",
+            "tsymex_0016_int62_packcost",
+            # RFC-0016 INT-71: a template's declaration type slot is no code
+            # to the global-route scan.
+            "tsymex_0016_int71_gensymseqroute",
             "tsymex_0016_k5a_fwrapv",
             "tsymex_0016_k5a_profile",
             "tsymex_0016_k5a_reads",
@@ -1930,6 +1938,18 @@ task test, "Run the test suite":
             "tsymex_0016_w1e_floatwidth",
             # RFC-0016 W1-p: the three probe agreements, natively (SND-07, SND-12, INT-21).
             "tsymex_0016_w1p_probes",
+            "tsymex_0016_int57_strlenstall",
+            "tsymex_0016_int57_backstop",
+            # RFC-0016 INT-57 / INT-74: the rendering order proved per band; a
+            # byte and a slice of a rendering decided without strings.
+            "tsymex_0016_int57_orderproof_small",
+            "tsymex_0016_int57_orderproof_s19",
+            "tsymex_0016_int57_orderproof_s20",
+            "tsymex_0016_int57_orderproof_b19_same",
+            "tsymex_0016_int57_orderproof_b19_mixed",
+            "tsymex_0016_int57_orderproof_b20_same",
+            "tsymex_0016_int57_orderproof_b20_mixed",
+            "tsymex_0016_int74_renderslice",
             # RFC-0016 K2-0: the probe batch (SND-13, CRH-06, CRH-08, CRH-09, INT-11, INT-12, INT-15, INT-22, PND-13, W-19b, W-19c, W-22, W-24).
             "tsymex_0016_k20_probes",
             "tsymex_0016_k20_probes_child",

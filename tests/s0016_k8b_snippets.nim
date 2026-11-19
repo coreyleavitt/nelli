@@ -786,27 +786,13 @@ func bk(axis: AxisScope; key, row, why: string): Blocked =
   Blocked(axis: axis, key: key, row: row, why: why)
 
 const
-  int57Why = "a `$n` query (`str.from_int`) beside integer arithmetic stalls Z3's step counter; the walk never returns"
-  blockedRows*: seq[Blocked] = @[
-    bk(axMagic, "IntToStr", "INT-57", int57Why),
-    bk(axMagic, "Int64ToStr", "INT-57", int57Why),
-    bk(axMagic, "BoolToStr", "INT-57", int57Why),
-    bk(axMagic, "EqStr", "INT-57", int57Why),
-    bk(axMagic, "LeStr", "INT-57", int57Why),
-    bk(axMagic, "LtStr", "INT-57", int57Why),
-    bk(axMagic, "LengthStr", "INT-57", int57Why),
-    bk(axMagic, "ConStrStr", "INT-57", int57Why),
-    bk(axMagic, "AppendStrStr", "INT-57", int57Why),
-    bk(axMagic, "CharToStr", "INT-61",
-       "the length of a string built from a char costs 84-95 s alone on c"),
-    bk(axMagic, "AppendStrCh", "INT-61",
-       "the length of a string built from a char costs 106-114 s alone on c"),
-    bk(axTypeClass, "string", "INT-57", int57Why),
-    bk(axTypeOp, "letCursor/string", "INT-57", int57Why),
-    bk(axTypeOp, "fieldDefault/string", "INT-57", int57Why),
-    bk(axStdlibBody, "math.trunc", "INT-59",
-       "about 60 s alone on c, with no step bound to cap it"),
-  ]
+  blockedRows*: seq[Blocked] = @[]
+    ## Empty. INT-57 (walker 428) readmitted its twelve (magic `IntToStr`,
+    ## `Int64ToStr`, `BoolToStr`, `EqStr`, `LeStr`, `LtStr`, `LengthStr`,
+    ## `ConStrStr`, `AppendStrStr`; typeclass `string`; typeop
+    ## `letCursor/string`, `fieldDefault/string`); readmitting them moved
+    ## `Slice` onto a target its fragment cannot reach, INT-74, which
+    ## walker 431 readmitted. A new entry is `bk(axis, key, row, why)`.
 
 func isBlocked*(axis: AxisScope; key: string): bool =
   for b in blockedRows:

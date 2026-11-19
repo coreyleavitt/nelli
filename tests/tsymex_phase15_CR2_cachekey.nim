@@ -1338,6 +1338,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## is a routine or nil; 424-433 reserved): 423->434.
     ## RFC-0016 INT-76 (a `c_longdouble` value declines and halts the
     ## path): 434->435.
+    ## RFC-0016 INT-59 / INT-61 / INT-62 (a float interval refutes a query;
+    ## a string length's structural bound; 418-420 reserved): 417->421.
+    ## RFC-0016 INT-71 (the route scan reads a declaration's type slot as
+    ## its names' type; 422-424 reserved): 421->425.
+    ## RFC-0016 INT-57 (an integer's rendering is decided without strings;
+    ## the solver stall backstop; 426-427 reserved): 425->428.
+    ## RFC-0016 INT-57 / INT-74 (a byte and a slice of a rendering are
+    ## decided without strings; 429-430 reserved): 428->431.
     check symexWalkerVersion == "435"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

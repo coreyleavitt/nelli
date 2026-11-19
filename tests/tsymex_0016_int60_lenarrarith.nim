@@ -27,6 +27,21 @@ proc i60Let(a, b: int8) =
   let arr = [t, int(b), 1]
   if arr.len + t == 3: symexTarget("hit")
 
+var g60 = 0
+proc f60(x: int): array[2, int] =
+  inc g60
+  [x, 1]
+
+proc i60Eff(a, b: int8) =
+  # `len` of an array-valued call whose callee has a visible effect. Native
+  # Nim folds `len` (and `high`) of an array to its type's count without
+  # evaluating the argument (the code generator's `genArrayLen` emits
+  # `lengthOrd`; probed on c and cpp: `g60` stays 0), so the walker's fold,
+  # which does not evaluate it either, is the faithful model.
+  g60 = 0
+  let n = len(f60(int(a)))
+  if g60 == 0 and n == 2 and a == 4: symexTarget("hit")
+
 proc i60Cmp(a, b: int8) =
   if len([int(a), 2]) == 2 and a == 4: symexTarget("hit")
 
@@ -41,6 +56,14 @@ suite "INT-60: `len` of an array as an arithmetic operand is exact":
     check r.status == sxSat
   test "a literal array: `len([int(a), 2]) + int(a) == 6` is exact (sat)":
     let r = pinExact(i60Lit, cellKey(axMagic, "LengthArray"), tLabel("hit"), all)
+    check r.status == sxSat
+  test "native: `len(f())` of an array does not run `f`":
+    g60 = 0
+    let n = len(f60(5))
+    check n == 2
+    check g60 == 0
+  test "an effectful array call under `len` is not evaluated, as natively (sat)":
+    let r = pinExact(i60Eff, cellKey(axMagic, "LengthArray"), tLabel("hit"), all)
     check r.status == sxSat
   test "a let-bound array: `arr.len + t == 3` is exact (sat)":
     let r = pinExact(i60Let, cellKey(axMagic, "LengthArray"), tLabel("hit"), all)

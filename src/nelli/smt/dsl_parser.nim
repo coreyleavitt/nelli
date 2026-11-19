@@ -25490,10 +25490,35 @@ const threadStartRoutines = ["createThread", "spawn", "spawnX", "pinnedSpawn"]
   ## The stdlib's ways to start a thread: a write it makes lands at no point of
   ## the walk.
 
+proc routeTypedName(n: NimNode): bool =
+  ## RFC-0016 INT-71. `n`, a name an `IdentDefs` declares, is a symbol whose
+  ## type `routeScan`'s symbol arm routes (`getTypeInst`): that of a variable,
+  ## a parameter, a constant or a temporary, typed.
+  let s = if n.kind == nnkPragmaExpr and n.len > 0: n[0] else: n
+  s.kind == nnkSym and
+    symKind(s) in {nskVar, nskLet, nskParam, nskForVar, nskResult, nskConst,
+                   nskTemp} and
+    s.typeKind != ntyNone
+
 proc routeScan(n: NimNode; acc: var RouteBody) =
   ## One routine's text: the type of every value it names or builds, and every
   ## routine it names.
   case n.kind
+  of nnkIdentDefs:
+    # RFC-0016 INT-71. The type slot is a type expression the compiler
+    # evaluates: it runs nothing. What it may hold is the declared names'
+    # type, routed through each name's symbol, resolved. As written it need
+    # not be resolved: a template's `var x {.gensym.}: seq[int]` keeps its
+    # `seq[int]` as `[](seq, int)` over the open choice of every `[]` in scope
+    # at the template, so reading it as code named those routines (`z3`'s
+    # among them) as callees. A name without a typed symbol keeps the slot
+    # read, as every other kind is.
+    var named = n.len >= 3
+    for i in 0 ..< n.len - 2:
+      if not routeTypedName(n[i]): named = false
+    for i in 0 ..< n.len:
+      if named and i == n.len - 2: continue
+      routeScan(n[i], acc)
   of nnkBracketExpr:
     # `Gen[int]` as a type: the instance, whose head alone says nothing.
     # RFC-0016 INT-70: an untyped one (a template body's) names no value; see
@@ -25587,8 +25612,8 @@ proc routeScan(n: NimNode; acc: var RouteBody) =
     discard
   of mayScanNoCodeKinds + mayScanStructuralKinds + RoutineNodes + {nnkRecList,
      nnkRecCase, nnkRecWhen, nnkOfInherit, nnkEnumFieldDef, nnkAsmStmt} -
-     {nnkBracketExpr, nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix,
-      nnkCallStrLit, nnkHiddenCallConv}:
+     {nnkIdentDefs, nnkBracketExpr, nnkCall, nnkCommand, nnkInfix, nnkPrefix,
+      nnkPostfix, nnkCallStrLit, nnkHiddenCallConv}:
     # RFC-0016 K2F-3: no value or routine of its own; a type it names is a
     # symbol (above), read even where no value of it is built (over-
     # approximation). `asm` (and `emit`, a pragma) is foreign code: what it

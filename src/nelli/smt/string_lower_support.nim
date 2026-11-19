@@ -14,6 +14,7 @@ import std/tables
 import std/options
 import std/sets
 import std/algorithm
+import std/strutils
 import z3
 import ./types
 
@@ -420,6 +421,551 @@ proc indexSplitRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
          astId(ctx, indexSplits[b].c.raw) == n:
         result.add indexSplitLastLink(indexSplits[a], indexSplits[b])
 
+# ---- RFC-0016 INT-57: an integer's rendering, decided without strings --------
+#
+# `$v` of a bit-vector `v` (`iekIntToStr`) is the Z3 term
+# `ite(v < 0, "-" ++ str.from_int(-v), str.from_int(v))`. Its length, or a
+# string order or equality between two such renderings, put to Z3 as string
+# terms is decided by the sequence solver, whose step counter stopped
+# advancing on `len($t) + t + 129 <= 3` (a 900 s kill under the pin settings,
+# which run with no wall clock). Each is a function of `v` alone, and `v`
+# ranges over at most 2^64 values whose decimal digits Nim renders with a
+# leading `-` for a negative value (`$low(int)` is `-9223372036854775808`), so
+# each is restated here as a bit-vector formula, exact for every value: the
+# digit count is an `ite` chain over `v`'s powers-of-ten thresholds, and the
+# byte order of two renderings is that of their magnitudes' digit strings,
+# which is the order of `(m * 10^(L - digits(m)), m)` (the digit string padded
+# on the right with zeros to `L` digits, its length breaking a tie: a shorter
+# string equal so far is a prefix, and a prefix sorts first). `'-'` (0x2D)
+# sorts before every digit. A term that is not a registered rendering keeps
+# the string lowering.
+
+type IntRender = object
+  term: Z3String     ## the rendering (held: its address keys `intRenders`)
+  v: Z3AnyAst        ## the bit-vector it renders
+  width: int
+  signed: bool
+
+var intRenders {.threadvar.}: Table[uint, IntRender]
+  ## RFC-0016 INT-57. Every `$v` of a bit-vector lowered this run, keyed by
+  ## the rendering term's address (the entry holds the term, so the address
+  ## is not reused while it is listed, as `intOfBV`'s are).
+
+proc registerIntRender*(term: Z3String; v: Z3AnyAst; width: int;
+                        signed: bool) =
+  ## RFC-0016 INT-57. `term` is `$v`, `v` a `width`-bit bit-vector. RFC-0016
+  ## INT-74: a `v` that is a narrower kind's value extended (`int(a)` for an
+  ## `int8` `a` is `sign_extend(56, a)`) is recorded as that kind: the same
+  ## integer, so the same rendering, and its narrower bands are the ones
+  ## `tsymex_0016_int74_renderslice` proves (a sign extension of a signed
+  ## value, a zero extension of any, read as unsigned).
+  if width notin [8, 16, 32, 64]: return
+  let ctx = term.ctx
+  var (v, width, signed) = (v, width, signed)
+  let probe = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw,
+    Z3_mk_string_symbol(ctx.raw, "__int74_ext"),
+    ctx.checkErr Z3_mk_bv_sort(ctx.raw, 8)))
+  let sk = Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw,
+    ctx.checkErr Z3_mk_sign_ext(ctx.raw, 8, probe.raw))))
+  let zk = Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw,
+    ctx.checkErr Z3_mk_zero_ext(ctx.raw, 8, probe.raw))))
+  while Z3_get_ast_kind(ctx.raw, v.raw) == Z3_APP_AST:
+    let app = Z3_to_app(ctx.raw, v.raw)
+    if Z3_get_app_num_args(ctx.raw, app) != 1: break
+    let k = Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))
+    let inner = Z3_get_app_arg(ctx.raw, app, 0)
+    let iw = int(Z3_get_bv_sort_size(ctx.raw, Z3_get_sort(ctx.raw, inner)))
+    if iw notin [8, 16, 32]: break
+    if k == sk and signed: discard
+    elif k == zk: signed = false
+    else: break
+    v = wrap[Z3AnyAst](ctx, inner)
+    width = iw
+  intRenders[cast[uint](cast[pointer](term.raw))] =
+    IntRender(term: term, v: v, width: width, signed: signed)
+
+proc renderOf(t: Z3String): Option[IntRender] =
+  let k = cast[uint](cast[pointer](t.raw))
+  if k in intRenders and
+     cast[pointer](intRenders[k].term.raw) == cast[pointer](t.raw):
+    return some(intRenders[k])
+
+proc renderKindOf*(t: Z3String):
+    Option[tuple[v: Z3AnyAst, width: int, signed: bool]] =
+  ## RFC-0016 INT-74. The value, width and signedness `t` is registered as
+  ## (after `registerIntRender`'s narrowing), for the narrowing proof.
+  let r = renderOf(t)
+  if r.isSome: return some((r.get.v, r.get.width, r.get.signed))
+
+proc digitCount(x: uint64): int =
+  var y = x
+  result = 1
+  while y >= 10'u64:
+    y = y div 10'u64
+    inc result
+
+proc pow10Text(k: int): string = "1" & repeat('0', k)
+
+proc maxMagnitude(r: IntRender): uint64 =
+  ## The largest magnitude `r` renders: `2^(w-1)` (`low`) signed, `2^w - 1`.
+  if r.signed: 1'u64 shl (r.width - 1)
+  elif r.width == 64: high(uint64)
+  else: (1'u64 shl r.width) - 1
+
+proc bvNum(ctx: Z3Context; text: string; width: int): Z3AnyAst =
+  let s = ctx.checkErr Z3_mk_bv_sort(ctx.raw, cuint(width))
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring, s))
+
+proc rbool(ctx: Z3Context; raw: RawZ3Ast): Z3Bool = wrap[Z3Bool](ctx, raw)
+
+proc isNeg(ctx: Z3Context; r: IntRender): Z3Bool =
+  if not r.signed: return mkBool(ctx, false)
+  rbool(ctx, ctx.checkErr Z3_mk_bvslt(ctx.raw, r.v.raw,
+                                      bvNum(ctx, "0", r.width).raw))
+
+proc renderLen(ctx: Z3Context; r: IntRender): Z3Int =
+  ## `len($v)`: the digit count of `v`'s magnitude, one more when negative.
+  proc chain(ctx: Z3Context; top: int; below: proc (k: int): Z3Bool): Z3Int =
+    result = mkInt(ctx, top)
+    for k in countdown(top - 1, 1):
+      result = ite(below(k), mkInt(ctx, k), result)
+  let w = r.width
+  let v = r.v
+  if not r.signed:
+    return chain(ctx, digitCount(maxMagnitude(r)), proc (k: int): Z3Bool =
+      rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, v.raw,
+                                          bvNum(ctx, pow10Text(k), w).raw)))
+  let posLen = chain(ctx, digitCount(maxMagnitude(r) - 1),
+    proc (k: int): Z3Bool =
+      rbool(ctx, ctx.checkErr Z3_mk_bvslt(ctx.raw, v.raw,
+                                          bvNum(ctx, pow10Text(k), w).raw)))
+  let negLen = chain(ctx, digitCount(maxMagnitude(r)),
+    proc (k: int): Z3Bool =
+      rbool(ctx, ctx.checkErr Z3_mk_bvsgt(ctx.raw, v.raw,
+                                          bvNum(ctx, "-" & pow10Text(k), w).raw)))
+  ite(isNeg(ctx, r), mkInt(ctx, 1) + negLen, posLen)
+
+proc magnitude(ctx: Z3Context; r: IntRender; width: int): Z3AnyAst =
+  ## `|v|` as an unsigned `width`-bit vector (`-low` is `2^(w-1)` unsigned).
+  var m = r.v
+  if r.signed:
+    let neg = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvneg(ctx.raw, r.v.raw))
+    m = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+      isNeg(ctx, r).raw, neg.raw, r.v.raw))
+  if width > r.width:
+    m = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_zero_ext(ctx.raw,
+      cuint(width - r.width), m.raw))
+  m
+
+proc renderKeyWidth*(L: int): int =
+  ## RFC-0016 INT-57. The bits a padded key of `L` digits is computed in:
+  ## `10^L - 1` and one to spare.
+  (L * 33220 + 9999) div 10000 + 1
+
+proc renderPad*(ctx: Z3Context; m: Z3AnyAst; L: int): Z3AnyAst =
+  ## RFC-0016 INT-57. `L - digits(m)` (8 bits) for a magnitude `m` of at
+  ## most `L` digits: an `ite` chain over `m`'s thresholds.
+  const ew = 8
+  let width = renderKeyWidth(L)
+  result = bvNum(ctx, "0", ew)
+  for k in countdown(L - 1, 1):
+    let below = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, m.raw,
+                                         bvNum(ctx, pow10Text(k), width).raw))
+    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, below.raw,
+      bvNum(ctx, $(L - k), ew).raw, result.raw))
+
+proc renderScale*(ctx: Z3Context; m, pad: Z3AnyAst; L: int): Z3AnyAst =
+  ## RFC-0016 INT-57. `m * 10^pad` for an 8-bit `pad < L`: `m` scaled by
+  ## `10^(2^i)` for each set bit `i` of `pad`.
+  let width = renderKeyWidth(L)
+  let one = bvNum(ctx, "1", 1)
+  result = m
+  var i = 0
+  while (1 shl i) <= L - 1:
+    let bit = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw, cuint(i),
+                                                              cuint(i), pad.raw))
+    let isSet = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, bit.raw, one.raw))
+    let scaled = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvmul(ctx.raw,
+      result.raw, bvNum(ctx, pow10Text(1 shl i), width).raw))
+    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, isSet.raw,
+                                                         scaled.raw, result.raw))
+    inc i
+
+proc renderKey*(ctx: Z3Context; m: Z3AnyAst; L: int):
+    tuple[key, pad: Z3AnyAst] =
+  ## RFC-0016 INT-57. For a magnitude `m` of at most `L` digits
+  ## (`renderKeyWidth(L)` bits): its digit string padded right with zeros to
+  ## `L` digits, as a number (`key = m * 10^pad`), and the pad
+  ## `pad = L - digits(m)` (8 bits). The pad is an `ite` chain over `m`'s
+  ## thresholds, and `m` is scaled by `10^(2^i)` for each set bit `i` of it:
+  ## about `log2(L)` constant multiplications a side, not one per digit
+  ## count. One full-width product per digit count (19 a side over two
+  ## 64-bit renderings) stalled Z3's step counter on `$a < $b` alone, and
+  ## narrowing each product to the bits its branch leaves `m` still took Z3
+  ## 2.3 s on a bare solver against 0.5 s for this form. Every partial
+  ## product divides the key, so none overflows the width.
+  ## `tsymex_0016_int57_orderproof` proves both per digit count.
+  let pad = renderPad(ctx, m, L)
+  (renderScale(ctx, m, pad, L), pad)
+
+proc renderDigits*(t: Z3String): int =
+  ## RFC-0016 INT-57. The most digits a registered rendering's magnitude
+  ## has (`digitCount(maxMagnitude)`), `0` when `t` is none.
+  let r = renderOf(t)
+  if r.isSome: digitCount(maxMagnitude(r.get)) else: 0
+
+proc renderSignMag*(t: Z3String; width: int): tuple[neg: Z3Bool, m: Z3AnyAst] =
+  ## RFC-0016 INT-57. A registered rendering's sign (`v < 0`) and magnitude
+  ## `|v|`, unsigned, zero-extended to `width` bits (at least `v`'s).
+  let r = renderOf(t).get
+  (isNeg(t.ctx, r), magnitude(t.ctx, r, width))
+
+proc renderOrder*(ctx: Z3Context; nx: Z3Bool; kx, px: Z3AnyAst; ny: Z3Bool;
+                  ky, py: Z3AnyAst; op: IRBinop): Z3Bool =
+  ## RFC-0016 INT-57. `x op y` in Nim's byte order (`op` in `==`, `<`, `<=`)
+  ## for `x` the rendering of sign `nx` whose magnitude has the padded key
+  ## `kx` and pad `px` (`renderKey`), `y` likewise, at one `L`. A `-` (0x2D)
+  ## sorts before every digit. Two renderings of one sign order as their
+  ## magnitudes' digit strings: by the padded keys (two digit strings of `L`
+  ## digits order as numbers), and on a tie, where one string is the other's
+  ## prefix, the shorter (the longer pad) first. Equal renderings have one
+  ## sign, one key and one pad.
+  ## `tsymex_0016_int57_orderproof` proves it per pair of digit counts.
+  let keyEq = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, kx.raw, ky.raw))
+  let padEq = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, px.raw, py.raw))
+  if op == bEq:
+    return (nx == ny) and keyEq and padEq
+  doAssert op in {bLt, bLe}
+  let keyLt = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, kx.raw, ky.raw))
+  let tie = if op == bLt:
+              rbool(ctx, ctx.checkErr Z3_mk_bvugt(ctx.raw, px.raw, py.raw))
+            else:
+              rbool(ctx, ctx.checkErr Z3_mk_bvuge(ctx.raw, px.raw, py.raw))
+  let lex = keyLt or (keyEq and tie)
+  ite(nx and not ny, mkBool(ctx, true),
+      ite(ny and not nx, mkBool(ctx, false), lex))
+
+proc renderCmp*(a, b: Z3String; op: IRBinop): Option[Z3Bool] =
+  ## RFC-0016 INT-57. `a op b` (`==`, `!=`, `<`, `<=`, `>`, `>=`, the byte
+  ## order Nim's `cmp` gives) when `a` and `b` are both renderings of
+  ## bit-vectors, as a bit-vector formula (`renderOrder` over each one's sign
+  ## and padded key, `renderKey`); `none` otherwise.
+  if op notin {bEq, bNe, bLt, bLe, bGt, bGe}: return
+  if renderOf(a).isNone or renderOf(b).isNone: return
+  if op in {bGt, bGe}:
+    return renderCmp(b, a, if op == bGt: bLt else: bLe)
+  if op == bNe:
+    return some(not renderCmp(a, b, bEq).get)
+  let L = max(renderDigits(a), renderDigits(b))
+  let width = renderKeyWidth(L)
+  let x = renderSignMag(a, width)
+  let y = renderSignMag(b, width)
+  let kx = renderKey(a.ctx, x.m, L)
+  let ky = renderKey(a.ctx, y.m, L)
+  some(renderOrder(a.ctx, x.neg, kx.key, kx.pad, y.neg, ky.key, ky.pad, op))
+
+const z3OpIte = 0x104
+  ## `Z3_OP_ITE` in `z3_api.h`'s `Z3_decl_kind` (`Z3_OP_TRUE` 0x100, `FALSE`,
+  ## `EQ`, `DISTINCT`, `ITE`), the same in every Z3 nelli links. nim-z3's
+  ## `Z3DeclKindFFI` declares only the proof rules, so the kind is read as its
+  ## ordinal (`heap_model.nim` does the same).
+
+proc isIteApp*(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0016 INT-57. `t` is an application of Z3's `ite`, by its declaration
+  ## kind, not its display name.
+  if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
+  let app = Z3_to_app(ctx.raw, t)
+  Z3_get_app_num_args(ctx.raw, app) == 3 and
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) == z3OpIte
+
+proc litCases(t: Z3String; budget: var int):
+    Option[seq[tuple[c: Z3Bool, s: string]]] =
+  ## The literal values `t` takes, each with its condition, when `t` is a
+  ## tree of `ite`s over string literals (a merged `$b`, `$e`); `none` past
+  ## `budget` leaves or at any other term.
+  let ctx = t.ctx
+  let lit = literalLen(t)
+  if lit >= 0:
+    let bytes = literalStringBytes(t)
+    if not bytes.ok: return
+    dec budget
+    if budget < 0: return
+    return some(@[(c: mkBool(ctx, true), s: bytes.s)])
+  if not isIteApp(ctx, t.raw): return
+  let (_, args) = unpackApp(t)
+  let c = asZ3Bool(args[0])
+  let th = litCases(wrap[Z3String](ctx, args[1].raw), budget)
+  if th.isNone: return
+  let el = litCases(wrap[Z3String](ctx, args[2].raw), budget)
+  if el.isNone: return
+  var res: seq[tuple[c: Z3Bool, s: string]]
+  for x in th.get: res.add (c: c and x.c, s: x.s)
+  for x in el.get: res.add (c: (not c) and x.c, s: x.s)
+  some(res)
+
+proc isConcatApp(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0016 INT-57. `t` is a string concatenation (`str.++`), by its
+  ## declaration kind. `Z3_OP_SEQ_CONCAT` has no fixed ordinal across the Z3
+  ## builds nelli links (it follows an unnumbered run of the enum), so the
+  ## kind is read off a concatenation built here.
+  if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
+  let app = Z3_to_app(ctx.raw, t)
+  if Z3_get_app_num_args(ctx.raw, app) < 2: return false
+  let probe = mkStringVar(ctx, "__int57_cat_a") & mkStringVar(ctx, "__int57_cat_b")
+  let pk = Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw,
+                                                     Z3_to_app(ctx.raw, probe.raw)))
+  Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)) == pk
+
+proc isSubstrApp(ctx: Z3Context; t: RawZ3Ast): bool =
+  ## RFC-0016 INT-74. `t` is a `str.substr`, by its declaration kind (read
+  ## off one built here, as `isConcatApp` does).
+  if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
+  let app = Z3_to_app(ctx.raw, t)
+  if Z3_get_app_num_args(ctx.raw, app) != 3: return false
+  let probe = substr(mkStringVar(ctx, "__int74_sub_s"),
+                     mkIntVar(ctx, "__int74_sub_i"), mkIntVar(ctx, "__int74_sub_n"))
+  let pk = Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw,
+                                                     Z3_to_app(ctx.raw, probe.raw)))
+  Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)) == pk
+
+proc smallNumeral(ctx: Z3Context; t: RawZ3Ast): Option[int] =
+  ## RFC-0016 INT-74. `t`'s value when it folds to an integer numeral in
+  ## `-2^31 .. 2^31`.
+  let folded = ctx.checkErr Z3_simplify(ctx.raw, t)
+  if not Z3_is_numeral_ast(ctx.raw, folded): return
+  var v: int64
+  if not Z3_get_numeral_int64(ctx.raw, folded, addr v): return
+  if v < -(1'i64 shl 31) or v > (1'i64 shl 31): return
+  some(int(v))
+
+proc substrLen*(lenU, i, n: Z3Int): Z3Int =
+  ## RFC-0016 INT-74. `len(str.substr(u, i, n))` given `len(u)`: SMT-LIB's
+  ## definition, `min(n, len(u) - i)`, and `0` when `i < 0`, `n <= 0` or
+  ## `i >= len(u)`.
+  let ctx = lenU.ctx
+  let rest = lenU - i
+  let zero = mkInt(ctx, 0)
+  ite((i < zero) or (n <= zero) or (rest <= zero), zero, ite(rest < n, rest, n))
+
+proc strLenOpt(t: Z3String): Option[Z3Int] =
+  ## `len(t)` without the string when `t` is a rendering (`renderLen`), a
+  ## literal, or an `ite` tree over those; a concatenation with such a part
+  ## (`"ab" & $t`, `s.add $t`) is the sum of its parts' lengths, the others
+  ## kept as `str.len` (the theory's own identity); a `str.substr(u, i, n)`
+  ## of such a `u` is `min(n, len(u) - i)`, `0` when `i < 0`, `n <= 0` or
+  ## `i >= len(u)` (SMT-LIB's definition, for any `i` and `n`; INT-74);
+  ## `none` otherwise.
+  let ctx = t.ctx
+  if isSubstrApp(ctx, t.raw):
+    let (_, args) = unpackApp(t)
+    let base = strLenOpt(wrap[Z3String](ctx, args[0].raw))
+    if base.isNone: return
+    return some(substrLen(base.get, wrap[Z3Int](ctx, args[1].raw),
+                          wrap[Z3Int](ctx, args[2].raw)))
+  let r = renderOf(t)
+  if r.isSome: return some(renderLen(ctx, r.get))
+  let lit = literalLen(t)
+  if lit >= 0: return some(mkInt(ctx, lit))
+  if isConcatApp(ctx, t.raw):
+    let (_, parts) = unpackApp(t)
+    var any = false
+    var sum = mkInt(ctx, 0)
+    for i, part in parts:
+      let ps = wrap[Z3String](ctx, part.raw)
+      let o = strLenOpt(ps)
+      if o.isSome and literalLen(ps) < 0: any = true
+      let l = if o.isSome: o.get else: len(ps)
+      sum = if i == 0: l else: sum + l
+    if any: return some(sum)
+    return
+  if not isIteApp(ctx, t.raw): return
+  let (_, args) = unpackApp(t)
+  let th = strLenOpt(wrap[Z3String](ctx, args[1].raw))
+  if th.isNone: return
+  let el = strLenOpt(wrap[Z3String](ctx, args[2].raw))
+  if el.isNone: return
+  some(ite(asZ3Bool(args[0]), th.get, el.get))
+
+proc strLenOf*(t: Z3String): Z3Int =
+  ## RFC-0016 INT-57. `len(t)`, restated without the string when `t` is a
+  ## rendering of a bit-vector or an `ite` tree over renderings and
+  ## literals (`strLenOpt`), else `str.len(t)`. Exact either way.
+  let o = strLenOpt(t)
+  if o.isSome: o.get else: len(t)
+
+# RFC-0016 INT-74. A byte of a rendering, and of a slice or a concatenation
+# over one, at a fixed index, as a bit-vector formula: `$v`'s byte `k` is `-`
+# (0x2D) at 0 for a negative `v`, else digit `j` (from the left) of `v`'s
+# magnitude `m` with `l` digits, `48 + (m div 10^(l-1-j)) mod 10`, or past the
+# end. The walker reads `s[k]` as `int2bv[8](str.to_code(str.at(s, k)))`, so
+# past the end is `-1`, `0xFF` as a byte; every formula here keeps that. A
+# byte of a concatenation is its part's at the part's offset (the parts'
+# lengths are `strLenOf`'s, split over the few offsets a fixed `k` allows); a
+# byte of `str.substr(u, i, n)` at `k` is `u`'s at `i + k` when `0 <= k < n`
+# and `i >= 0`, else past the end. Exact rewrites: the sequence solver never
+# decided `($t & "ab")[0 .. 1][0]` against an unreachable value.
+
+const byteAtMaxIndex = 32
+  ## The largest fixed index rewritten: a concatenation's byte splits over
+  ## `k + 1` offsets of each part.
+const byteAtMaxParts = 8
+const byteAtMaxWidth = 16
+  ## The widest rendering restated: `tsymex_0016_int74_renderslice` proves
+  ## every band of the 8- and 16-bit kinds against Nim's digits; a 32-bit
+  ## band of seven or more digits was open at 120 s with a division by
+  ## `10^k`, and at 60 s with the chain of divisions by ten below, so a
+  ## wider rendering's byte stays the walker's `str.at`.
+
+proc bvByte(ctx: Z3Context; b: int): Z3AnyAst = bvNum(ctx, $b, 8)
+
+proc digitByte(ctx: Z3Context; m: Z3AnyAst; w, digits, j: int): Z3AnyAst =
+  ## Byte `j` (from the left) of the digits of `m` (a `w`-bit unsigned
+  ## magnitude of at most `digits` digits), `0xFF` past its last digit. Digit
+  ## `j` of an `l`-digit `m` is `q(l - 1 - j) mod 10`, where `q(0) = m` and
+  ## `q(k + 1) = q(k) div 10`: one division by ten per step.
+  var qs = @[m]
+  for k in 1 ..< digits:
+    qs.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvudiv(ctx.raw, qs[^1].raw,
+      bvNum(ctx, "10", w).raw))
+  proc val(l: int): Z3AnyAst =
+    if j >= l: return bvByte(ctx, 0xFF)
+    let d = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvurem(ctx.raw,
+      qs[l - 1 - j].raw, bvNum(ctx, "10", w).raw))
+    let d8 = if w == 8: d
+             else: wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw, 7, 0, d.raw))
+    wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvadd(ctx.raw, d8.raw,
+                                                 bvByte(ctx, 48).raw))
+  if j >= digits: return bvByte(ctx, 0xFF)
+  result = val(digits)
+  for l in countdown(digits - 1, 1):
+    # wrapped (held) before `val` builds more terms
+    let below = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, m.raw,
+                                         bvNum(ctx, pow10Text(l), w).raw))
+    let lv = val(l)
+    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, below.raw,
+                                                         lv.raw, result.raw))
+
+proc renderByte(ctx: Z3Context; r: IntRender; k: int): Z3AnyAst =
+  ## Byte `k` of `$v` (`0xFF` past the end), as an 8-bit vector.
+  let digits = digitCount(maxMagnitude(r))
+  let m = magnitude(ctx, r, r.width)
+  let pos = digitByte(ctx, m, r.width, digits, k)
+  if not r.signed: return pos
+  let negB = if k == 0: bvByte(ctx, 0x2D)
+             else: digitByte(ctx, m, r.width, digits, k - 1)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, isNeg(ctx, r).raw,
+                                             negB.raw, pos.raw))
+
+proc byteAtOpt(t: Z3String; k: int; hit: var bool): Z3AnyAst =
+  ## Byte `k` of `t` (`0xFF` past the end). A rendering, a literal, a
+  ## concatenation, a `str.substr` with numeral bounds and an `ite` are
+  ## restated; any other term is the walker's own read of it. `hit` is set
+  ## when a rendering was restated.
+  let ctx = t.ctx
+  proc walkerRead(): Z3AnyAst =
+    wrap[Z3AnyAst](ctx, intToBv[8](toCode(at(t, mkInt(ctx, k))), Z3BitVec[8]).raw)
+  if k < 0: return bvByte(ctx, 0xFF)
+  let r = renderOf(t)
+  if r.isSome:
+    if r.get.width > byteAtMaxWidth: return walkerRead()
+    hit = true
+    return renderByte(ctx, r.get, k)
+  if literalLen(t) >= 0:
+    let bytes = literalStringBytes(t)
+    if not bytes.ok: return walkerRead()
+    return bvByte(ctx, if k < bytes.s.len: ord(bytes.s[k]) else: 0xFF)
+  if isConcatApp(ctx, t.raw):
+    let (_, parts) = unpackApp(t)
+    if parts.len > byteAtMaxParts: return walkerRead()
+    var memo = initTable[(int, int), Z3AnyAst]()
+    var h = false     # a closure cannot capture the `var` parameter
+    proc fromPart(p, kk: int): Z3AnyAst =
+      ## Byte `kk` of `parts[p] ++ ... ++ parts[^1]`.
+      if (p, kk) in memo: return memo[(p, kk)]
+      let x = wrap[Z3String](ctx, parts[p].raw)
+      if p == parts.high:
+        result = byteAtOpt(x, kk, h)
+      else:
+        let lx = strLenOf(x)
+        # `x` holds byte `kk` when it is longer; else the byte is the
+        # rest's at `kk - len(x)`, one of `kk + 1` offsets (`len(x) = kk`
+        # the last)
+        result = fromPart(p + 1, 0)
+        for j in 0 ..< kk:
+          let lenJ = lx == mkInt(ctx, j)
+          let rest = fromPart(p + 1, kk - j)
+          result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+            lenJ.raw, rest.raw, result.raw))
+        let longer = lx > mkInt(ctx, kk)
+        let own = byteAtOpt(x, kk, h)
+        result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+          longer.raw, own.raw, result.raw))
+      memo[(p, kk)] = result
+    result = fromPart(0, k)
+    if h: hit = true
+    return
+  if isSubstrApp(ctx, t.raw):
+    let (_, args) = unpackApp(t)
+    let i = smallNumeral(ctx, args[1].raw)
+    let n = smallNumeral(ctx, args[2].raw)
+    if i.isNone or n.isNone: return walkerRead()
+    if i.get < 0 or n.get <= 0 or k >= n.get: return bvByte(ctx, 0xFF)
+    if i.get + k > byteAtMaxIndex: return walkerRead()
+    return byteAtOpt(wrap[Z3String](ctx, args[0].raw), i.get + k, hit)
+  if isIteApp(ctx, t.raw):
+    let (_, args) = unpackApp(t)
+    let th = byteAtOpt(wrap[Z3String](ctx, args[1].raw), k, hit)
+    let el = byteAtOpt(wrap[Z3String](ctx, args[2].raw), k, hit)
+    return wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, args[0].raw,
+                                                       th.raw, el.raw))
+  walkerRead()
+
+proc strByteRewrite*(s: Z3String; k: int): Z3BitVec[8] =
+  ## RFC-0016 INT-74. `byteAtOpt` whatever `s` holds (a part it does not
+  ## restate is the walker's read of it): the restatement the proofs in
+  ## `tsymex_0016_int74_renderslice` check, rule by rule.
+  var hit = false
+  wrap[Z3BitVec[8]](s.ctx, byteAtOpt(s, k, hit).raw)
+
+proc strByteAt*(s: Z3String; i: Z3Int): Z3BitVec[8] =
+  ## RFC-0016 INT-74. `s[i]` as the walker reads it,
+  ## `int2bv[8](str.to_code(str.at(s, i)))` (`0xFF` out of bounds), restated
+  ## as a bit-vector formula when `i` is a numeral in `0 .. 32` and `s`'s
+  ## byte there comes from a rendering (`byteAtOpt`); else that term.
+  let ctx = s.ctx
+  let k = smallNumeral(ctx, i.raw)
+  if k.isSome and k.get in 0 .. byteAtMaxIndex:
+    var hit = false
+    let b = byteAtOpt(s, k.get, hit)
+    if hit: return wrap[Z3BitVec[8]](ctx, b.raw)
+  intToBv[8](toCode(at(s, i)), Z3BitVec[8])
+
+proc litCmp*(a, b: Z3String; op: IRBinop): Option[Z3Bool] =
+  ## RFC-0016 INT-57. `a op b` by cases when each of `a` and `b` takes one
+  ## of a few literal values (`litCases`; a merged `$b` or `$e`, at most 16
+  ## pairs), the order Nim's `cmp` gives decided here; `none` otherwise.
+  if op notin {bEq, bNe, bLt, bLe, bGt, bGe}: return
+  if literalLen(a) >= 0 and literalLen(b) >= 0: return
+  var budget = 4
+  let ca = litCases(a, budget)
+  if ca.isNone: return
+  budget = 4
+  let cb = litCases(b, budget)
+  if cb.isNone: return
+  var res = mkBool(a.ctx, false)
+  for x in ca.get:
+    for y in cb.get:
+      let c = cmp(x.s, y.s)
+      let holds = case op
+        of bEq: c == 0
+        of bNe: c != 0
+        of bLt: c < 0
+        of bLe: c <= 0
+        of bGt: c > 0
+        else: c >= 0
+      if holds: res = res or (x.c and y.c)
+  some(res)
+
 proc resetStringSupport*() =
   ## The per-run reset of the split registry. `notInFormOverride` is a test
   ## hook and `linkedNotInForm` a probe of the linked Z3 (the same in every
@@ -427,6 +973,7 @@ proc resetStringSupport*() =
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   indexSplitOf = (ctx: Z3Context(nil), ids: initTable[int, int]())  ## RFC-0005 S8ag
   indexSplitCounter = 0                  ## RFC-0005 S8ag: reset split fresh-name counter
+  intRenders = initTable[uint, IntRender]()  ## RFC-0016 INT-57: the run's renderings
 
 # RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
 # default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
@@ -436,6 +983,6 @@ import ../thread_state
 
 proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
   releaseToDefault(indexSplits, indexSplitOf, indexSplitCounter,
-    notInFormOverride, linkedNotInForm)
+    notInFormOverride, linkedNotInForm, intRenders)
 
 registerThreadStateRelease(releaseThreadState)

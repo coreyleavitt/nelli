@@ -152,10 +152,13 @@ type
       ## not a clock), so a query it cuts off is the same `beSolverUndef` on
       ## every machine, and cacheable. Ignored when `maxSeqLen == 0` (no
       ## cap, no bound: the caller opted out of both).
-    queryTimeoutMs*: uint = 600_000
+    queryTimeoutMs*: uint = 1_200_000
       ## RFC-0005 S8bu. A wall-clock bound, in milliseconds, on every solve
       ## the walker issues (Z3's `timeout` solver parameter), beside the
-      ## step bounds above. `0` means none. A solve it cuts off is
+      ## step bounds above. `0` means no run clock, not no bound: the run's
+      ## step-bounded solves then share the solver stall backstop, a 600 s
+      ## deadline for the whole run (`stallBackstopMs`; RFC-0016 INT-57),
+      ## and a solve with no step bound either is the only unbounded one. A solve it cuts off is
       ## `zsUnknown`: `sxUnknown` with `beSolverUndef` naming this field,
       ## and the run's verdict is not written to the verdict cache (it is
       ## the machine's, not the program's).
@@ -167,12 +170,18 @@ type
       ## there: at 60 s it had 12.47M, and under a 20M `rlimit` it ran past
       ## 250 s without returning; Z3's `timeout` stopped it on time. A
       ## step bound cannot end a search that takes no steps, so without a
-      ## clock no default bounded every query. `600_000` (10 minutes) is
+      ## clock no default bounded every query. `1_200_000` (20 minutes) is
       ## past where `seqQueryRLimit` / `queryRLimit` end the slowest search
       ## measured (the sequence solver spends 20M units in about 6-8
-      ## minutes at 40-55k units/s), so on a query whose counter advances
-      ## the step bound, which is deterministic, still answers first; the
-      ## clock is the backstop for one whose counter does not.
+      ## minutes at 40-55k units/s, 500 s at the slowest rate), so on a
+      ## query whose counter advances the step bound, which is
+      ## deterministic, still answers first; the clock is the backstop for
+      ## one whose counter does not. RFC-0016 INT-59: it was `600_000`, a
+      ## margin of 1.2 over that 500 s, which a host running a sweep's
+      ## parallel suites (each slower by its share of the cores) can spend,
+      ## so the clock, not the step bound, answered a query whose counter
+      ## advanced: a host-dependent `sxUnknown`. 2.4 keeps the step bound
+      ## first at half speed.
     walkRLimit*: uint = 1_000_000_000
       ## RFC-0016 K7. The total work units every solver check of ONE walk may
       ## spend together (Z3 `rlimit` units plus, at `walkerTermUnits` per term

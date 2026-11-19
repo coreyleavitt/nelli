@@ -1469,11 +1469,12 @@ type
         ## The facts `blkArith` was decided from: the emit writes them as a
         ## literal and the generated code re-decides (`stampFor` is const-pure).
       blkScoped*: bool
-        ## RFC-0016 PRC-07. A routine body in a build with a check off
-        ## (`rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks`): the body
-        ## is walked under `blkOn`, the checks its own options turn back on
-        ## (`withCheckScope`). A routine that turns none on is scoped with the
-        ## empty set, which keeps it from inheriting its caller's.
+        ## RFC-0016 PRC-07, int6. A routine body, in every build: the body is
+        ## walked under `blkOn`, the effective set of `rangeChecks`,
+        ## `boundChecks`, `fieldChecks`, `objChecks` it is compiled with
+        ## (`withCheckScope`): the build's, less what its position pushed off,
+        ## plus what it pushed back on. Every body is scoped, which keeps it
+        ## from inheriting its caller's.
       blkOn*: set[CheckOption]
       blkLabel*: string
         ## RFC-0005 S8m. "" for a plain statement sequence. Non-empty: a
@@ -3136,10 +3137,10 @@ proc mkRoutineBlock*(facts: RoutineArithFacts; stmts: seq[IRStmt]): IRStmt =
   mkArithBlock(stampFor(facts), stmts, facts)
 
 proc withCheckScope*(b: IRStmt; on: set[CheckOption]): IRStmt =
-  ## RFC-0016 PRC-07. `b`, a routine body block, walked under the checks `on`
-  ## (those of `rangeChecks`, `boundChecks`, `fieldChecks`, `objChecks` its
-  ## own options turn on in a build with them off); each other check of the
-  ## four follows the build.
+  ## RFC-0016 PRC-07, int6. `b`, a routine body block, walked under the checks
+  ## `on`: the effective set of `rangeChecks`, `boundChecks`, `fieldChecks`,
+  ## `objChecks` it is compiled with. A check of the four not in `on` is off
+  ## there, whatever the build says.
   b.blkScoped = true
   b.blkOn = on
   b

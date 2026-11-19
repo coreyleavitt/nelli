@@ -156,7 +156,8 @@ proc implKey*(fn: NimNode): ImplKey =
       elif impl.len > 6: scanOpen(impl[6], result.open)
     let c = routineChecks(impl)
     canon.add "R" & $r.symKind & ":" & $r.strVal.len & ":" & r.strVal &
-      "|ck=" & $c.checks & (if c.why.len > 0: "|ck?" else: "") & "|"
+      "|ck=" & $c.checks & (if c.why.len > 0: "|ck?" else: "") &
+      (if c.offModelled != {}: "|om=" & $c.offModelled else: "") & "|"
     # The whole definition: name, parameters, pragmas, body. A foreign
     # routine's body slot is empty; its pragmas name what it binds to.
     serialise(impl, canon, work)

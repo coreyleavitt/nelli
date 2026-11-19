@@ -1369,8 +1369,20 @@ const renderAsChoicesVersion* = "12"
   ##   container type is read as the container's type
   ##   (`containerHoldsLongDouble`), and declines `feUnsupportedParamType`;
   ##   each was a `weInternalWalkerFault`. No key bytes change.
+  ## - RFC-0016 int6 check scopes (463->465; 464 is reserved by a sibling
+  ##   branch): a check option belongs to the code region it was compiled
+  ##   under, in both directions. A routine declared under `push
+  ##   rangeChecks: off` (bound, field, object alike) in a checked build is
+  ##   walked unchecked instead of declining `feCheckOption`; one declared
+  ##   under `push rangeChecks: on` in an off build raises `RangeDefect`
+  ##   (it was a false `sxUnsat`: the range drain read the build's bit).
+  ##   Each body takes the scope of its own declaration, never its
+  ##   caller's; system's range store of `*=` and of a float range's `op=`
+  ##   takes the build's, and its operand the caller's. Key bytes change:
+  ##   every routine body carries `@on{...}:` in every build, and those
+  ##   stores gain a block (their operand a `let`).
 
-const symexWalkerVersion* = "463"
+const symexWalkerVersion* = "465"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

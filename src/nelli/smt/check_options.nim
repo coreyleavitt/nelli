@@ -260,24 +260,34 @@ type RoutineChecks* = object
   rangeOn*: bool
     ## RFC-0016 PRC-07. The routine's position was read and `rangeChecks` is
     ## on there on every reading: in a build whose own range checks are off, a
-    ## `push rangeChecks: on`, which the walker does not model (it follows the
-    ## build's bit). `checks` never carries `coRange` in such a build: the
+    ## `push rangeChecks: on`. RFC-0016 int6: modelled, the routine's body is
+    ## scoped checked (`checkedIn` in the parser), so its conversions raise
+    ## `RangeDefect`. `checks` never carries `coRange` in such a build: the
     ## option being off is the build, not a deviation.
   boundOn*: bool
     ## RFC-0016 PRC-07. `rangeOn`'s twin for `boundChecks`: in a build whose
-    ## own bound checks are off, the routine pushed them back on (not
-    ## modelled: its `s[i]` raises `IndexDefect`, the walker follows the
-    ## build). `checks` never carries `coBound` in such a build.
+    ## own bound checks are off, the routine pushed them back on, and its
+    ## `s[i]` raises `IndexDefect` (modelled, int6). `checks` never carries
+    ## `coBound` in such a build.
   objOn*: bool
-    ## RFC-0016 PRC-07. `boundOn`'s twin for `objChecks`: in a build whose own
-    ## object checks are off, the routine pushed them back on (not modelled:
-    ## its down-conversion raises `ObjectConversionDefect`). `checks` never
-    ## carries `coObj` in such a build.
+    ## RFC-0016 PRC-07. `boundOn`'s twin for `objChecks`: the routine pushed
+    ## them back on in a build whose own object checks are off, and its
+    ## down-conversion raises `ObjectConversionDefect` (modelled, int6).
+    ## `checks` never carries `coObj` in such a build.
   fieldOn*: bool
     ## RFC-0016 PRC-07. `boundOn`'s twin for `fieldChecks`: the routine pushed
-    ## them back on in a build whose own field checks are off (not modelled:
-    ## its variant access raises `FieldDefect`). `checks` never carries
+    ## them back on in a build whose own field checks are off, and its variant
+    ## access raises `FieldDefect` (modelled, int6). `checks` never carries
     ## `coField` in such a build.
+  offModelled*: set[CheckOption]
+    ## RFC-0016 int6. Of the four checks (range, bound, field, object), those
+    ## on in the build and off at the routine's position on every reading, in
+    ## a user module, with no importer's push reaching it: the routine is
+    ## walked with them off (its body's check scope leaves them out), as the
+    ## build route walks a build that has them off. They are not in `checks`.
+    ## A position that may be either way keeps the option in `checks` and
+    ## declines; so does a stdlib module's push (the K4c delta, no row models
+    ## it).
   nanOn*, infOn*: bool
     ## RFC-0016 PRC-07 (float half). The routine's position was read and
     ## `nanChecks` (`infChecks`) is on there on every reading, from the build
@@ -311,30 +321,35 @@ proc findRoutineDef(n: NimNode; name: string; line: int): NimNode =
     let r = findRoutineDef(c, name, line)
     if r != nil: return r
 
-proc inRoutineChecks(n: NimNode; off: set[CheckOption]): string =
+proc inRoutineChecks(n: NimNode; off, on: set[CheckOption]): string =
   ## "" or the first check pragma under `n` that names a check of `off` with a
-  ## value other than a literal `off`: `{.push rangeChecks: on.}` in a body, or
-  ## the routine's own `{.rangeChecks: on.}`. Neither is seen by the scan of
-  ## the module's statements, which does not enter a routine.
+  ## value other than a literal `off`, or a check of `on` with a value other
+  ## than a literal `on`: `{.push rangeChecks: on.}` in a body, or the
+  ## routine's own `{.rangeChecks: off.}`. Neither is seen by the scan of the
+  ## module's statements, which does not enter a routine.
   if n.kind == nnkExprColonExpr and n.len == 2:
-    let opts = checksNamed(nameOf(n[0])) * off
-    if opts != {} and turnsOn(n[1]) != 0:
+    let named = checksNamed(nameOf(n[0]))
+    let t = turnsOn(n[1])
+    if (named * off != {} and t != 0) or (named * on != {} and t != 1):
       return "`" & nameOf(n[0]) & ": " & n[1].repr & "` at line " &
              $n.lineInfoObj.line
   for c in n:
-    let r = inRoutineChecks(c, off)
+    let r = inRoutineChecks(c, off, on)
     if r.len > 0: return r
 
 proc positionUnreadable(impl: NimNode; file: string; line: int;
                         st: CheckState): string =
-  ## RFC-0016 PRC-07. Why the routine's check state at the options its build has
-  ## off cannot be taken as one answer: "" when it can. The walker models a
-  ## routine compiled with such an option off as unchecked (the build's bit) or
-  ## walks it checked where it was pushed on; a routine that is checked at some
-  ## positions only, or whose position is ambiguous, is neither, and is never
-  ## assumed to be the build's setting.
+  ## RFC-0016 PRC-07. Why the routine's check state at the four checks cannot be
+  ## taken as one answer: "" when it can. The walker models a routine compiled
+  ## with such an option off as unchecked and one compiled with it on as
+  ## checked, at its position (RFC-0016 int6, in both build directions); a
+  ## routine that is checked at some positions only, or whose position is
+  ## ambiguous, is neither, and is never assumed to be the build's setting.
+  ## In a build with the option on, an ambiguous position is a deviation
+  ## already (`checks` keeps it, and the routine declines); a pragma inside the
+  ## routine's own definition is not, and is caught here.
   let off = fourChecks - buildSemantics.checks
-  if off == {}: return
+  let on = fourChecks * buildSemantics.checks
   let both = off * st.maybeOn * st.maybeOff
   if both != {}:
     return "its position is both pushed on and off for " & $both
@@ -350,7 +365,7 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
     if ast != nil:
       let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
       if def != nil:
-        let hit = inRoutineChecks(def, off)
+        let hit = inRoutineChecks(def, off, on)
         if hit.len > 0:
           return "it carries " & hit & " inside its own definition, so it is " &
                  "checked at some positions and not others"
@@ -439,6 +454,15 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   if unreadable.len > 0:
     result.why = "the routine's range, bound, field or object checks differ " &
       "within it, not modelled as one setting: " & unreadable
+  # RFC-0016 int6: a check the build has on and the routine's position has off
+  # on every reading is modelled (`offModelled`): the walker scopes the body
+  # without it. Ambiguous, leaked and stdlib positions stay deviations.
+  if result.why.len == 0 and not rootStdlib:
+    for co in fourChecks * buildSemantics.checks:
+      if co in result.checks and co in st.maybeOff and co notin st.maybeOn and
+         co notin leaked:
+        result.checks.excl co
+        result.offModelled.incl co
   if coRange notin buildSemantics.checks:
     result.rangeOn = coRange notin result.checks
     result.checks = result.checks - {coRange}

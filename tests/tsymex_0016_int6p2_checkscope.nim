@@ -17,7 +17,13 @@
 ##   * a nested `push rangeChecks: on` inside the push raises, and the outer
 ##     push is restored after its `pop`;
 ##   * under `{.push boundChecks: off.}` `s[i]` is a plain C subscript: in
-##     bounds exact, out of bounds undefined (`index/unchecked`).
+##     bounds exact, out of bounds undefined (`index/unchecked`), the path
+##     halting there as in a `--boundChecks:off` build
+##     (`tsymex_0016_boundoff`);
+##   * a `push rangeChecks: off` inside a routine body leaves the routine
+##     unchecked at one position only (`R(300)` keeps 300 there): neither
+##     setting, so it declines `feCheckOption` (it was walked checked, a
+##     false `sxUnsat` for the label).
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -81,6 +87,12 @@ proc idxOffOob(v: int) =
   if v < 0 or v > 2: symexTarget("hit")
 {.pop.}
 
+proc innerOff(v: int) =
+  {.push rangeChecks: off.}
+  let r = R(v)
+  {.pop.}
+  if int(r) == 300: symexTarget("hit")
+
 template keeps(fn: untyped) =
   let r = pinFind(fn, tLabel("hit"))
   checkpoint show(r.errors)
@@ -121,7 +133,10 @@ suite "int6 check scopes: a pushed-off region in a checked build":
     let r = pinFind(idxOff, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
-    pinUndefined(idxOffOob, ik, UbKind(ubArrayOutOfBounds))
+    pinDecline(idxOffOob, ik, ubArrayOutOfBounds, excluding = {feCheckOption})
+  test "a push inside a routine body declines, it is not read as checked":
+    check native(innerOff(300)) == "hit"
+    pinDecline(innerOff, cellKey(faGeneric, "int6p2_checkscope"), feCheckOption)
 
 suite "int6 check scopes: walker version":
   test "walker version floor >= 465":

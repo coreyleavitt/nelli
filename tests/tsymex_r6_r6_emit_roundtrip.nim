@@ -221,11 +221,23 @@ proc fieldwiseEqExceptHandlers(a, b: seq[ExceptHandler]): bool =
     if not fieldwiseEq(a[i].body, b[i].body): return false
   true
 
+proc sameBits(a, b: float64): bool =
+  ## RFC-0016 int6: a float bound compared by its bits, so a bound emitted
+  ## through `newLit` instead of `floatOfBits` (losing -0.0's sign, or a
+  ## float32 bound's exact float64 widening to a decimal round trip) and a
+  ## NaN payload are both observable; `==` sees neither.
+  cast[uint64](a) == cast[uint64](b)
+
 proc fieldwiseEq(a, b: IRType): bool =
   if a.isNil or b.isNil: return a.isNil and b.isNil
   if a.kind != b.kind: return false
   case a.kind
-  of itBool, itString, itFloat32, itFloat64: true
+  of itBool, itString: true
+  of itFloat32, itFloat64:
+    # RFC-0016 INT-77: a float range's bounds (`withFloatRange`) were not
+    # compared here, so a dropped bound would have passed this audit.
+    a.floatRange == b.floatRange and sameBits(a.floatLo, b.floatLo) and
+      sameBits(a.floatHi, b.floatHi)
   of itInt: a.width == b.width and a.signed == b.signed
   of itUninterp: a.uninterpName == b.uninterpName
   of itDistinct: a.distinctName == b.distinctName and fieldwiseEq(a.distinctBase, b.distinctBase)
@@ -289,6 +301,12 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     # fails the BUILD, not a test that might not get run.
     fieldwiseEq(a.cirOperand, b.cirOperand) and a.cirWidth == b.cirWidth and
       a.cirTgtSigned == b.cirTgtSigned
+  of iekConvFloatRange:
+    # RFC-0016 int6 (08039ffb): this arm was missing, and this file failed
+    # to compile -- the exhaustiveness gate doing its job. The bounds are
+    # compared by bits: the emit arm carries them as `floatOfBits`.
+    fieldwiseEq(a.cfrOperand, b.cfrOperand) and a.cfrWidth == b.cfrWidth and
+      sameBits(a.cfrLo, b.cfrLo) and sameBits(a.cfrHi, b.cfrHi)
   of iekMathCall: a.mathOp == b.mathOp and fieldwiseEqExprSeq(a.mathArgs, b.mathArgs)
   of iekBoolLit: a.bval == b.bval
   of iekVar: a.vname == b.vname
@@ -487,6 +505,18 @@ proc sBoolType(): IRType = tBool()
 proc sStringType(): IRType = tString()
 proc sFloat32Type(): IRType = tFloat32()
 proc sFloat64Type(): IRType = tFloat64()
+
+type
+  SentinelR32 = range[0.1'f32 .. 0.7'f32]   ## RFC-0016 int6 sentinels: a
+  SentinelR64 = range[-0.0 .. 1.5]          ## float32 range whose bounds have
+                                            ## no short float64 decimal, and
+                                            ## a float64 range from -0.0
+proc sFloat32RangeType(): IRType =
+  ## What `dsl_typebridge` classifies `SentinelR32` as (`withFloatRange`
+  ## over the float32 bounds, widened exactly to float64).
+  tFloat32().withFloatRange(float64(low(SentinelR32)), float64(high(SentinelR32)))
+proc sFloat64RangeType(): IRType =
+  tFloat64().withFloatRange(low(SentinelR64), high(SentinelR64))
 proc sUninterpType(): IRType = tUninterp("SentinelSort")
 proc sDistinctType(): IRType = tDistinct("Meters", tInt(41, true))
 proc sRefType(): IRType = tRef(tInt(23, false))
@@ -543,6 +573,14 @@ suite "R6 emit round-trip -- IRType kinds":
   test "itFloat32 / itFloat64 (shared discard arm)":
     check fieldwiseEq(sFloat32Type(), roundtripType(sFloat32Type()))
     check fieldwiseEq(sFloat64Type(), roundtripType(sFloat64Type()))
+  test "itFloat32 / itFloat64 with float range bounds (RFC-0016 INT-77)":
+    let r32 = roundtripType(sFloat32RangeType())
+    check fieldwiseEq(sFloat32RangeType(), r32)
+    check r32.floatRange
+    check float32(r32.floatLo) == 0.1'f32 and float32(r32.floatHi) == 0.7'f32
+    let r64 = roundtripType(sFloat64RangeType())
+    check fieldwiseEq(sFloat64RangeType(), r64)
+    check r64.floatRange
   test "itUninterp":
     check fieldwiseEq(sUninterpType(), roundtripType(sUninterpType()))
   test "itDistinct (recursive base)":
@@ -618,6 +656,20 @@ proc sConvIntToFloat(): IRExpr = mkConvIntToFloat(mkIntLit(9), 32)
 proc sConvFloatToInt(): IRExpr = mkConvFloatToInt(mkFloatLit(9.5, 64), 32)
 proc sConvIntWidth(): IRExpr = mkConvIntWidth(mkVar("w"), 8, true, 64, false)
 proc sConvIntReinterpret(): IRExpr = mkConvIntReinterpret(mkVar("w2"), 32, false)
+proc sConvFloatRangeNarrowed(): IRExpr =
+  ## RFC-0016 int6. What `convIntoFloatRange` (dsl_parser.nim) lowers
+  ## `SentinelR32(x)` to for a float64 `x`: the K2b width change first
+  ## (`toFloat32`, an `iekMathCall`), then `mkFloatRangeCheck` over the
+  ## classified range's width and bounds.
+  let tgt = sFloat32RangeType()
+  mkConvFloatRange(
+    mkMathCall(admitFloatCall("toFloat32", 1), "toFloat32", @[mkVar("x64")]),
+    32, tgt.floatLo, tgt.floatHi)
+proc sConvFloatRangeNegZero(): IRExpr =
+  ## RFC-0016 int6. `w = v` into `SentinelR64` for a float64 `v`: no width
+  ## change, the check alone, its lower bound -0.0.
+  let tgt = sFloat64RangeType()
+  mkConvFloatRange(mkVar("v64"), 64, tgt.floatLo, tgt.floatHi)
 proc sMathCall(): IRExpr =
   mkMathCall(admitFloatCall("copySign", 2), "copySign", @[mkIntLit(1), mkIntLit(2)])
 proc sBoolLit(): IRExpr = mkBoolLit(true)
@@ -737,6 +789,20 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sConvIntWidth(), roundtripExpr(sConvIntWidth()))
   test "iekConvIntReinterpret (item 7b -- was missing from this audit entirely)":
     check fieldwiseEq(sConvIntReinterpret(), roundtripExpr(sConvIntReinterpret()))
+  test "iekConvFloatRange (RFC-0016 int6: float32 range over a narrowed float64)":
+    let reconstructed = roundtripExpr(sConvFloatRangeNarrowed())
+    check fieldwiseEq(sConvFloatRangeNarrowed(), reconstructed)
+    check reconstructed.cfrWidth == 32
+    check reconstructed.cfrOperand.kind == iekMathCall
+    check reconstructed.cfrOperand.mathOp == "toFloat32"
+    check float32(reconstructed.cfrLo) == 0.1'f32
+    check float32(reconstructed.cfrHi) == 0.7'f32
+  test "iekConvFloatRange (RFC-0016 int6: float64 range from -0.0)":
+    let reconstructed = roundtripExpr(sConvFloatRangeNegZero())
+    check fieldwiseEq(sConvFloatRangeNegZero(), reconstructed)
+    check reconstructed.cfrWidth == 64
+    check cast[uint64](reconstructed.cfrLo) == cast[uint64](-0.0)
+    check reconstructed.cfrHi == 1.5
   test "iekMathCall":
     check fieldwiseEq(sMathCall(), roundtripExpr(sMathCall()))
   test "iekBoolLit":
@@ -863,6 +929,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekConvFloatToInt: discard              ## "iekConvFloatToInt"
       of iekConvIntWidth: discard                ## "iekConvIntWidth"
       of iekConvIntReinterpret: discard          ## "iekConvIntReinterpret" (item 7b)
+      of iekConvFloatRange: discard              ## "iekConvFloatRange" (RFC-0016 int6; 2 tests: narrowed float32, -0.0 float64)
       of iekMathCall: discard                    ## "iekMathCall"
       of iekBoolLit: discard                     ## "iekBoolLit"
       of iekVar: discard                         ## "iekVar"

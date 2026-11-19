@@ -1766,6 +1766,11 @@ proc heapCellWfConds*(ctx: Z3Context; key: string; refSort: RawZ3Sort;
   let sv = heapCellSelect(ctx, input, refAst, valTy)
   svCellWf(sv, valTy, false)
 
+var crossSortAccessed*, crossSortWritten* {.threadvar.}: bool
+  ## RFC-0016 INT-90. Some path of the run read a pointee's heap
+  ## (`crossSortLink`) or stored into one (`heapCellStore`) so far
+  ## (`crossSortEnter`).
+
 proc heapCellStore*(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
                    valSV: SymVal; valTy: IRType): HeapCell =
   ## RFC-0005 S8ap. `cell` with `valSV` stored at `refAst`, leaf by leaf. A
@@ -1776,6 +1781,7 @@ proc heapCellStore*(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
   ## `seUnsupportedCompoundSortLeaf` through `allocDegrade` (drained onto the
   ## path by the caller, as the scalar store's decline is) and each leaf
   ## stores a fresh term of its sort.
+  crossSortWritten = true   # RFC-0016 INT-90 (`crossSortEnter`)
   if heapStandInTy(valTy):
     # RFC-0005 S8ar: a by-value case object, a distinct over a composite
     # base, or an aggregate with a part that is neither, is not a cell value
@@ -2275,9 +2281,10 @@ var pointerDecls {.threadvar.}: tuple[ctx: pointer; decls: Table[string, RawZ3Fu
 # consequence of a shared byte array only where two sorts meet:
 #
 #   * a VIEW is a typed access whose bytes the model spells exactly: a
-#     fixed-width integer, a float, or a flat object/tuple of those whose
-#     layout is the target's (`viewLeaves`, runtime_heap.nim: no run-type
-#     header, no padding, since the IR does not say `{.packed.}`). A bool
+#     fixed-width integer, a float, or a flat object/tuple of those with
+#     no run-type header, at the offsets the compiler lays it out at for
+#     the target (`viewLeaves`, `IRType.cFieldOffsets`; its padding bytes
+#     are no leaf, so free). A bool
 #     (natively only the bytes 0 and 1), an enum (sized by its ordinals), a
 #     ref, a string, a seq, a case object are not views: a pair holding one
 #     keeps INT-88's lossy, untrusted verdict.
@@ -2332,6 +2339,27 @@ var crossSortAnyDesync* {.threadvar.}: bool
   ## a cell held at two view sorts may then hold two values no bytes do, and
   ## the witness keeps INT-88's lossy marking (`crossSortCellFidelity`).
 
+var crossSortFactsOff* {.threadvar.}: bool
+  ## RFC-0016 INT-90. A sort entered the `pointer` space after a heap write
+  ## of the run (`crossSortEnter`): that write was spliced into no sort
+  ## that was not yet in the space, so a later fact relating the written
+  ## heap to one of those would force the other sort's ENTRY bytes to the
+  ## written value -- asserted into every check, a false `sxUnsat` for a
+  ## path that reads them unwritten. No fact is emitted after it.
+
+proc crossSortEnter*(tid: string) =
+  ## RFC-0016 INT-90. The sort `tid` joins the `pointer` space
+  ## (`pointerSortsUsed`, at its first cast). After a write of the run, no
+  ## further cross-sort fact is sound (`crossSortFactsOff`); after a read
+  ## or a write, a view's entry bytes may disagree with what an earlier,
+  ## unrelated access saw, so the witness is not the model's
+  ## (`crossSortAnyDesync`). Accesses after every cast, the shape of a
+  ## program that compares the addresses first, keep both.
+  if tid in pointerSortsUsed: return
+  if crossSortWritten: crossSortFactsOff = true
+  if crossSortAccessed or crossSortWritten: crossSortAnyDesync = true
+  pointerSortsUsed.incl tid
+
 proc addCrossSortFact*(ctx: Z3Context; f: Z3Bool) =
   ## RFC-0016 INT-90. `f` into `crossSortFacts`, once.
   if not crossSortFactIds.containsOrIncl(astId(ctx, f.raw)):
@@ -2370,13 +2398,16 @@ func viewOffsets(sizes: seq[int]; packed: bool): seq[int] =
 proc viewLeaves*(ty: IRType; typeId: string): seq[ViewLeaf] =
   ## RFC-0016 INT-90. The scalar leaves of a view of `ty` at their native
   ## byte offsets, or empty where the model does not know the layout. A
-  ## scalar is one leaf at 0. A flat object or tuple of scalars is a leaf
-  ## per field at C's natural alignment -- Nim lays an object out as the C
-  ## struct it emits -- provided it has no run-type header (`inheritChain`)
-  ## and the packed offsets are the same (the IR does not carry
-  ## `{.packed.}`, so an object with padding is declined rather than
-  ## guessed). A nested object, a case object, an array, a ref, a string, a
-  ## seq, an enum: no leaves.
+  ## scalar is one leaf at 0. A flat object or tuple of scalars with no
+  ## run-type header (`inheritChain`) is a leaf per field at the offset the
+  ## compiler gives it for the target (`cFieldOffsets`, `macros.getOffset`:
+  ## its natural C alignment, padding included, or none under
+  ## `{.packed.}`); its padding bytes are no leaf, so they are free. One
+  ## whose offsets the parser did not read (an anonymous tuple) is laid out
+  ## only where no padding can be (the natural offsets are the packed
+  ## ones, under any alignment no wider than a scalar's size). An unknown
+  ## offset (an `importc` struct), a nested object, a case object, an
+  ## array, a ref, a string, a seq, an enum: no leaves.
   if viewExactTy(ty):
     return @[(typeId, 0, viewScalarSize(ty), ty)]
   if ty == nil or ty.kind != itTuple or ty.inheritChain.len > 0 or
@@ -2386,37 +2417,34 @@ proc viewLeaves*(ty: IRType; typeId: string): seq[ViewLeaf] =
   for f in ty.fields:
     if not viewExactTy(f): return
     sizes.add viewScalarSize(f)
-  let offs = viewOffsets(sizes, false)
-  if offs != viewOffsets(sizes, true): return
+  var offs: seq[int]
+  if ty.cFieldOffsets.len > 0:
+    if ty.cFieldOffsets.len != ty.fields.len: return
+    for o in ty.cFieldOffsets:
+      if o < 0: return
+    offs = ty.cFieldOffsets
+  else:
+    offs = viewOffsets(sizes, false)
+    if offs != viewOffsets(sizes, true): return
   for i, f in ty.fields:
     if ty.fieldNames[i].len == 0: return
     result.add (fieldHeapKey(ty, ty.fieldNames[i]), offs[i], sizes[i], f)
 
-proc viewByteSize*(leaves: seq[ViewLeaf]): int =
-  ## RFC-0016 INT-90. The bytes a view's leaves span.
-  for l in leaves: result = max(result, l.off + l.size)
-
-proc crossSortExactCell*(sorts: seq[string]; ownerSort: string): bool =
+proc crossSortExactCell*(sorts: seq[string]): bool =
   ## RFC-0016 INT-90. A cell held at the `Ref_<T>` sorts `sorts` is the
-  ## model's when built from its owner's bytes: every sort is a view of the
-  ## `pointer` space whose leaves the owner's bytes cover, and no path
-  ## desynced (so each view's value at the address IS the owner's bytes
-  ## read as the view, by `crossSortLink`'s facts).
+  ## model's when every sort is a view of the `pointer` space and no path
+  ## desynced: the witness writes each view's rendered leaves into the one
+  ## allocation at their own bytes (`resolveRef`, a view wider than its
+  ## owner included), and the bytes two views share agree wherever the path
+  ## read them before writing them (`crossSortLink`'s facts relate every
+  ## view sort at each read), so the order of the writes does not matter.
+  ## A byte no view's leaf holds (padding) is no constraint of the model.
   if crossSortAnyDesync: return false
-  var ownerSize = 0
-  var sizes: seq[int]
   for s in sorts:
     if not s.startsWith("Ref_"): return false
     let tid = s["Ref_".len .. ^1]
     if not pointerSortTypes.hasKey(tid): return false
-    let lv = viewLeaves(pointerSortTypes[tid], tid)
-    if lv.len == 0: return false
-    let n = viewByteSize(lv)
-    sizes.add n
-    if s == ownerSort: ownerSize = n
-  if ownerSize == 0: return false
-  for n in sizes:
-    if n > ownerSize: return false
+    if viewLeaves(pointerSortTypes[tid], tid).len == 0: return false
   true
 
 proc pointerDecl(ctx: Z3Context; name: string; dom, rng: RawZ3Sort): RawZ3FuncDecl =
@@ -2543,6 +2571,9 @@ proc resetHeapModel*() =
   crossSortFacts = @[]
   crossSortFactIds = initHashSet[int]()
   crossSortAnyDesync = false
+  crossSortAccessed = false
+  crossSortWritten = false
+  crossSortFactsOff = false
   currentBorrowReboxCounter = 0
   heapKeyShapes = initTable[string, HeapKeyShape]()
   heapFieldOwners = initTable[string, tuple[code: int64; depth: int]]()   ## RFC-0016 INT-81

@@ -772,11 +772,16 @@ func keepStrBuf*(stored, v: SymVal): SymVal =
   if result.kind == svString and v.kind == svString:
     result.strBuf = v.strBuf
 
+proc crossSortUnspliced(p: Path; typeId: string)
+
 proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                    v: SymVal): SymVal =
   ## RFC-0005 S8ax. Store `v` into the address cell at `refAst` on `p` (a
   ## path the caller just forked) and return the cell's value read back:
   ## the variable's new binding, so the two stay one term.
+  ## RFC-0016 INT-90: the store is spliced into no other sort of the
+  ## `pointer` space (`crossSortPropagate` is the deref write's).
+  crossSortUnspliced(p, refPointeeTypeId(ty))
   if ty.kind == itVariant:   # RFC-0005 S8be
     if v.kind == svVariant: variantCellStore(ctx, p, ty, refAst, v)
     return variantCellValue(ctx, p, ty, refAst)
@@ -2137,6 +2142,16 @@ proc crossSortOthers(typeId: string):
     let lv = viewLeaves(ty, tid)
     if lv.len > 0: result.add (tid, ty, lv)
 
+proc crossSortUnspliced(p: Path; typeId: string) =
+  ## RFC-0016 INT-90. A store into the sort `typeId`'s heap on `p` that is
+  ## not spliced into the other sorts' (a write to a variable by name, a
+  ## `ptr` target's guarded store): when another view sort shares the
+  ## `pointer` space, `p` desyncs (`crossSortDesyncKey`), so no later fact
+  ## relates the written heap to an unwritten one.
+  if crossSortOthers(typeId).len == 0: return
+  p.allocCounters[crossSortDesyncKey] = 1
+  crossSortAnyDesync = true
+
 proc crossSortDesynced(p: Path): bool =
   ## RFC-0016 INT-90. `p`'s heaps no longer describe one instant: a store
   ## went unreflected (`crossSortDesyncKey`) or an opaque call havocked a
@@ -2151,7 +2166,10 @@ proc crossSortLink(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
   ## bytes of its view and of every other view sort's at the same address
   ## agree, leaf pair by overlapping leaf pair, over the path's current
   ## heaps (`crossSortFacts`). Nothing when the sort is no view, the path is
-  ## desynced, or no other view sort is in the `pointer` space.
+  ## desynced, or no other view sort is in the `pointer` space, or a sort
+  ## entered the space after a write (`crossSortFactsOff`).
+  crossSortAccessed = true
+  if crossSortFactsOff: return
   let mine = viewLeaves(ty, typeId)
   if mine.len == 0: return
   let others = crossSortOthers(typeId)

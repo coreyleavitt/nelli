@@ -2648,14 +2648,14 @@ proc lowerPtrCast(env: Env, e: IRExpr): SymVal =
   if toPointer:
     for t in pointerReadSorts:
       if t != srcTid: return punned(srcTid)
-    pointerSortsUsed.incl srcTid
+    crossSortEnter(srcTid)   # RFC-0016 INT-90 (`pointerSortsUsed`)
     let whole = v.kind == svRef and pointerWholeObject(ctx, ast.raw)
     SymVal(kind: svPtr, ptrFamily: true, ptrPointee: pointerPointeeTy(),
            ptrAst: pointerAddrOf(ctx, ast, srcPointee, whole))
   elif srcTid == pointerTypeId:
     for t in pointerSortsUsed:
       if t != dstTid: return punned(dstTid)
-    pointerSortsUsed.incl dstTid
+    crossSortEnter(dstTid)   # RFC-0016 INT-90 (`pointerSortsUsed`)
     pointerReadSorts.incl dstTid
     let typed = pointerAsTyped(ctx, ast, dstPointee)
     if e.pcTy.kind == itRef:
@@ -8299,6 +8299,8 @@ type
                                              ## cell was rendered for
     refPos: HashSet[string]          ## RFC-0016 INT-88: the positions that
                                      ## are a `ref` (not a `ptr`)
+    aliases: seq[RefPos]             ## RFC-0016 INT-90: the positions that
+                                     ## hold another position's cell
 
 proc heapSortObserved(typeId: string): bool =
   ## RFC-0016 INT-88. The walk materialised a heap of the sort `typeId` (its
@@ -8338,11 +8340,12 @@ proc crossSortCellFidelity(b: SnapshotBuild) =
     for srt in held:
       if heapSortObserved(srt["Ref_".len .. ^1]): observed.add srt
     let ownerSort = b.entries[b.entryOf[cell]].sort
-    # RFC-0016 INT-90: a cell held at view sorts the walk relates byte-wise
-    # (`crossSortLink`), whose owner's bytes cover every view, IS the
-    # model's: each view's value at the address is the owner's bytes read
-    # as the view. A wider view than its owner, or a desynced run, is not.
-    let exactViews = not anyRef and crossSortExactCell(held, ownerSort)
+    # RFC-0016 INT-90: a cell held only at view sorts the walk relates
+    # byte-wise (`crossSortLink`) IS the model's: the witness writes every
+    # view's leaves into the one allocation (`renderCrossSortViews`,
+    # `resolveRef`), a view wider than its owner included. A desynced run
+    # is not.
+    let exactViews = not anyRef and crossSortExactCell(held)
     let why =
       if anyRef: "a `ref` shares it"
       elif exactViews: ""
@@ -8361,6 +8364,29 @@ proc crossSortCellFidelity(b: SnapshotBuild) =
       scope: walkSite())
     extractionErrors.add err     # threadvar: fallback
     syncExtractionError(err)     # CR-9 Stage 5: LIVE WalkCtx field
+
+proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                cell: RefPos): Option[string]
+
+proc renderCrossSortViews(b: var SnapshotBuild, m: Z3Model,
+                          w: var RawWitness) =
+  ## RFC-0016 INT-90. Each position holding a cell at another view sort than
+  ## its owner's (`a: ptr int32` beside `b: ptr int64` at one address) has
+  ## its own leaves rendered under its name from its sort's input heap, so
+  ## the witness writes them into the shared allocation (`resolveRef`): the
+  ## bytes of a view wider than its owner, or over its owner's padding, are
+  ## the model's, not the allocation's zeros. Only view sorts (`viewLeaves`;
+  ## no `ref`, whose object a view cannot outgrow).
+  for pos in b.aliases:
+    if pos.isRef or pos.name in b.refPos: continue
+    var owner = ""
+    for e in b.entries:
+      if e.name == pos.name and e.aliasRef.isSome: owner = e.aliasRef.get
+    if not b.entryOf.hasKey(owner): continue
+    let sortName = "Ref_" & refPointeeTypeId(pos.pointee)
+    if b.entries[b.entryOf[owner]].sort == sortName: continue
+    if viewLeaves(pos.pointee, refPointeeTypeId(pos.pointee)).len == 0: continue
+    discard renderCell(b, m, w, pos)
 
 proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
                  inlineNil: bool): string =
@@ -8388,6 +8414,7 @@ proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
     b.entries.add HeapSnapshotEntry(name: pos.name, sort: sortName,
       value: rendering, pointsTo: none(string),
       aliasRef: some(b.cellOf[address]))
+    b.aliases.add pos   # RFC-0016 INT-90
   else:
     b.cellOf[address] = pos.name
     b.entryOf[pos.name] = b.entries.len
@@ -8852,6 +8879,7 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
         b.entries[b.entryOf[cell.name]].pointsTo = renderCell(b, m, w, cell)
         again = true
     if not again and i >= b.queue.len: break
+  renderCrossSortViews(b, m, w)   # RFC-0016 INT-90
   crossSortCellFidelity(b)   # RFC-0016 INT-88
   # RFC-0005 S8bh (item 2). A `ptr` cell whose input target (`sel`, see
   # `ptrTargets`) is a field of an object the snapshot holds as a cell
@@ -28896,10 +28924,34 @@ proc validDefault[F](f: var F) =
 
 proc fillCell[T: ref | ptr](c: RefWitness; cell, leaves: string; x: var T)
 
+proc viewLeavesInto[V](c: RefWitness; path: string; x: var V) =
+  ## RFC-0016 INT-90. The scalar leaves rendered under `path` for a typed
+  ## view (`renderCrossSortViews`), each written into `x` in place; a leaf
+  ## the snapshot did not render leaves its bytes as they are.
+  when V is object or V is tuple:
+    for fname, fv in fieldPairs(x):
+      when typeof(fv) is SomeNumber:
+        readCellField(c, path & "." & fname, fv)
+  elif V is SomeNumber:
+    readCellField(c, path, x)
+
 proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
   ## RFC-0005 S8h. The witness value of the `ref`/`ptr` position `pos`.
   var cell = cellNameOf(c, pos)
   if cell.len == 0: return nil
+  when T is ptr:
+    # RFC-0016 INT-88. A position holding the cell at another sort than its
+    # owner is a typed view of the owner's one allocation, not a cell of its
+    # own: `cast[ptr float](addr x)` beside `addr x`. RFC-0016 INT-90: the
+    # leaves the snapshot rendered for the view (`renderCrossSortViews`) are
+    # written into it at their own bytes, before or after the owner's (the
+    # bytes they share agree): a view wider than its owner, or over its
+    # padding, holds the model's bytes there, not the allocation's zeros.
+    if not cell.startsWith("&") and not cell.startsWith(ptrAimPrefix) and
+       cellForeignView(c, pos, cell):
+      let p = cellAlloc(c, cell, sizeof(result[]))
+      viewLeavesInto(c, pos, cast[T](p)[])
+      return cast[T](p)
   let built = cellBuilt(c, cell)
   if built != nil: return cast[T](built)
   # RFC-0005 S8bh (item 2). A pointer to a field (`"&<cell>.<field>"`) is
@@ -28917,12 +28969,6 @@ proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
     leaves = pos
   elif cell.startsWith(ptrAimPrefix):
     leaves = pos
-  when T is ptr:
-    # RFC-0016 INT-88. A position holding the cell at another sort than its
-    # owner is a typed view of the owner's one allocation, not a cell of its
-    # own: `cast[ptr float](addr x)` beside `addr x`.
-    if cellForeignView(c, pos, cell):
-      return cast[T](cellAlloc(c, cell, sizeof(result[])))
   when T is ref:
     # RFC-0016 INT-81. A cell is built ONCE, as the dynamic type the model
     # gave its address (its run-type tags), not as the static type of the

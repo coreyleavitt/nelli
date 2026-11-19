@@ -31,6 +31,19 @@ type
   Rec = object
     a, b: uint16
     c: float32
+  Pad = object        # natural layout: `a` at 0, three padding bytes, `b` at 4
+    a: int8
+    b: int32
+  Mixed = object      # 0, 8, 16; size 24 (seven bytes after `c`)
+    a: int16
+    b: int64
+    c: int8
+  Outer = object      # a nested object: `inner` at 4
+    x: int8
+    inner: Pair
+  Packed {.packed.} = object   # no padding: `b` at 1, size 5
+    a: int8
+    b: int32
 
 # ---- int <-> float at one address --------------------------------------------
 
@@ -136,6 +149,78 @@ proc writeAfterRead(a: ptr int; b: ptr float) =
     if f0 == 2.0 and a[] == 5:
       symexTarget("hit")
 
+# ---- a padded object (its natural C layout, padding bytes free) ----------------
+
+proc padLow(p: ptr Pad; q: ptr int64) =
+  # `a` is byte 0 and `b` bytes 4..7 of the int64
+  if p != nil and q != nil and cast[pointer](p) == cast[pointer](q) and
+     p.a == 1 and p.b == 2 and (q[] and 0xFF) != 1:
+    symexTarget("hit")
+
+proc padHigh(p: ptr Pad; q: ptr int64) =
+  if p != nil and q != nil and cast[pointer](p) == cast[pointer](q) and
+     p.a == 1 and p.b == 2 and (q[] shr 32) != 2:
+    symexTarget("hit")
+
+proc padGap(a: ptr int64; p: ptr Pad) =
+  # the padding bytes 1..3 are no part of `Pad`: any value
+  if a != nil and p != nil and cast[pointer](a) == cast[pointer](p) and
+     p.a == 1 and p.b == 2 and a[] == ((2'i64 shl 32) or 0x7701):
+    symexTarget("hit")
+
+proc padWrite(p: ptr Pad; q: ptr int64) =
+  if p != nil and q != nil and cast[pointer](p) == cast[pointer](q):
+    p.b = 3
+    if (q[] shr 32) != 3:
+      symexTarget("hit")
+
+proc mixedMid(a: ptr array[3, int64]; m: ptr Mixed) =
+  # `b` is the second eight bytes; an array is no view, so lossy
+  if a != nil and m != nil and cast[pointer](a) == cast[pointer](m) and
+     m.b == 9 and a[1] != 9:
+    symexTarget("hit")
+
+proc padBytes(p: ptr Pad; q: ptr array[8, uint8]) =
+  # a byte array is no view the model spells: the pair keeps the lossy verdict
+  if p != nil and q != nil and cast[pointer](p) == cast[pointer](q) and
+     p.a == 1 and q[0] != 1:
+    symexTarget("hit")
+
+proc packedLow(p: ptr Packed; q: ptr int64) =
+  if p != nil and q != nil and cast[pointer](p) == cast[pointer](q) and
+     p.a == 1 and p.b == 2 and (q[] and 0xFF_FFFF_FFFF'i64) != 0x2_01:
+    symexTarget("hit")
+
+# ---- a wider view than its owner -------------------------------------------------
+
+proc wideTail(a: ptr int32; b: ptr int64) =
+  # the int32 owns the cell; the int64's high bytes are past it
+  if a != nil and b != nil and cast[pointer](a) == cast[pointer](b) and
+     a[] == 7 and b[] == 0x5_0000_0007'i64:
+    symexTarget("hit")
+
+proc widePad(a: ptr int32; p: ptr Pad) =
+  # `p.b` is past the int32 owner
+  if a != nil and p != nil and cast[pointer](a) == cast[pointer](p) and
+     a[] == 1 and p.b == 9:
+    symexTarget("hit")
+
+proc widePadGap(a: ptr Pad; q: ptr int64) =
+  # the int64 constrains the owner's padding, which the owner does not hold
+  if a != nil and q != nil and cast[pointer](a) == cast[pointer](q) and
+     a.a == 1 and a.b == 2 and q[] == ((2'i64 shl 32) or 0x7701):
+    symexTarget("hit")
+
+# ---- a write before the casts ------------------------------------------------------
+
+proc lateCast(a: ptr int; b: ptr float; c: bool) =
+  # the write precedes the sorts' casts, so it is spliced into no other
+  # sort; the path that skips it reads the float's entry bytes, 2.0's
+  if a != nil and b != nil:
+    if c: a[] = 5
+    if cast[pointer](a) == cast[pointer](b) and b[] == 2.0:
+      symexTarget("hit")
+
 suite "INT-90: two sorts' heaps at one address":
   test "natively: the target's layout is the model's":
     check sizeof(int) == 8
@@ -148,6 +233,27 @@ suite "INT-90: two sorts' heaps at one address":
     check offsetOf(Rec, a) == 0
     check offsetOf(Rec, b) == 2
     check offsetOf(Rec, c) == 4
+    check sizeof(Pad) == 8
+    check offsetOf(Pad, a) == 0
+    check offsetOf(Pad, b) == 4
+    check sizeof(Mixed) == 24
+    check offsetOf(Mixed, b) == 8
+    check offsetOf(Mixed, c) == 16
+    check sizeof(Outer) == 12
+    check offsetOf(Outer, inner) == 4
+    check sizeof(Packed) == 5
+    check offsetOf(Packed, b) == 1
+
+  test "natively: a padded object's padding is bytes no field holds":
+    var q: int64 = (2'i64 shl 32) or 0x7701
+    let p = cast[ptr Pad](addr q)
+    check p.a == 1 and p.b == 2
+    p.b = 3
+    check (q shr 32) == 3
+    var arr: array[3, int64] = [0'i64, 9, 0]
+    check cast[ptr Mixed](addr arr).b == 9
+    var w: int64 = 0x5_0000_0007'i64
+    check cast[ptr int32](addr w)[] == 7
 
   test "natively: the int 5 read as a float is no float above 1.0":
     var x = 5
@@ -229,11 +335,53 @@ suite "INT-90: two sorts' heaps at one address":
     let s = pinFind(narrowSat, tLabel("hit"))
     checkpoint show(s.errors)
     check s.status == sxSat
-    # the wider view's other bytes are free (the model admits it; the witness
-    # cell is built from one view's bytes, so the sat is not pinned)
-    let f = symexFind(narrowHighFree, tLabel("hit"))
+    check s.trusted
+    # the wider view's other bytes are free
+    let f = pinFind(narrowHighFree, tLabel("hit"))
     checkpoint show(f.errors)
-    check f.status != sxUnsat
+    check f.status == sxSat
+    check f.trusted
+
+  test "a padded object is its natural layout; its padding is free":
+    template unsat(f: untyped) =
+      let t = pinFind(f, tLabel("hit"))
+      checkpoint astToStr(f) & ": " & show(t.errors)
+      check t.status == sxUnsat
+    unsat(padLow)
+    unsat(padHigh)
+    unsat(padWrite)
+    let s = pinFind(padGap, tLabel("hit"))
+    checkpoint show(s.errors)
+    check s.status == sxSat
+    check s.trusted
+
+  test "a byte array is no view: the pair keeps the lossy verdict":
+    let r = pinFind(padBytes, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxUnsat or not r.trusted
+    # an int64 array beside a padded object: likewise (its `b` is a[1])
+    let m = pinFind(mixedMid, tLabel("hit"))
+    checkpoint show(m.errors)
+    check m.status == sxUnsat or not m.trusted
+
+  test "a {.packed.} object declines at the pragma axis":
+    let r = symexFind(packedLow, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check "packed" in show(r.errors)
+
+  test "a wider view than its owner: the tail is the view's":
+    template trustedSat(f: untyped) =
+      let s = pinFind(f, tLabel("hit"))
+      checkpoint astToStr(f) & ": " & show(s.errors)
+      check s.status == sxSat
+      check s.trusted
+    trustedSat(wideTail)
+    trustedSat(widePad)
+    # the owner's padding is bytes the witness cannot fill from the owner
+    let g = pinFind(widePadGap, tLabel("hit"))
+    checkpoint show(g.errors)
+    check g.status == sxSat
 
   test "a write at one sort is read at the other":
     let r = pinFind(writeUnsat, tLabel("hit"))
@@ -250,5 +398,15 @@ suite "INT-90: two sorts' heaps at one address":
     check r.status == sxSat
     check r.trusted
 
+  test "a write before the casts forces no entry bytes":
+    var x = 0
+    let a = addr x
+    let b = cast[ptr float](addr x)
+    b[] = 2.0
+    check cast[pointer](a) == cast[pointer](b) and b[] == 2.0
+    let r = pinFind(lateCast, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+
   test "the walker's version floor":
-    check parseInt(symexWalkerVersion) >= 451
+    check parseInt(symexWalkerVersion) >= 454

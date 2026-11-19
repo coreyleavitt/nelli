@@ -375,6 +375,18 @@ type
                                  ## for a recursion placeholder too (names
                                  ## only, no field types), so a field read
                                  ## through a placeholder keys alike.
+      cFieldOffsets*: seq[int]   ## RFC-0016 INT-90. The C byte offset of
+                                 ## each field (`fields` order) as the
+                                 ## compiler lays the object out for the
+                                 ## target (`macros.getOffset`), -1 where it
+                                 ## does not know it (an `importc` type, a
+                                 ## layout pragma other than `packed`, a
+                                 ## field the compiler sizes otherwise than
+                                 ## the IR); empty where the parser read none
+                                 ## (an anonymous tuple, a generic instance).
+                                 ## Read by `viewLeaves`. Identity only, like
+                                 ## `nominalId`: NOT part of `IRType.==` or
+                                 ## the canonical form.
     of itArray:
       elemTy*: IRType
       size*: int
@@ -3187,7 +3199,8 @@ proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              isPlaceholder: bool = false, nameIsRefAlias: bool = false,
              inheritChain: seq[string] = @[],
              ownedFieldNames: seq[string] = @[],
-             ownedFieldIds: seq[string] = @[]): IRType =
+             ownedFieldIds: seq[string] = @[],
+             cFieldOffsets: seq[int] = @[]): IRType =
   ## `fieldNames.len` must equal `fields.len` or be empty (positional).
   ## RFC-0005 S8bh: `inheritChain`/`ownedFieldNames`/`ownedFieldIds` -- see
   ## the `IRType` field docs; empty for a type declared without `of`.
@@ -3203,7 +3216,8 @@ proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
   IRType(kind: itTuple, fields: fields, fieldNames: names, objectName: objectName,
          nominalId: nominalId, isPlaceholder: isPlaceholder,
          nameIsRefAlias: nameIsRefAlias, inheritChain: inheritChain,
-         ownedFieldNames: ownedFieldNames, ownedFieldIds: ownedFieldIds)
+         ownedFieldNames: ownedFieldNames, ownedFieldIds: ownedFieldIds,
+         cFieldOffsets: cFieldOffsets)
 
 proc inheritTagCode*(nominalId: string): int64 =
   ## RFC-0005 S8bh (item 3). The run-type tag a hierarchy object stores for

@@ -884,8 +884,18 @@ const renderAsChoicesVersion* = "12"
   ##   `ptr float` at one address is `sxUnsat` (it was an untrusted, lossy
   ##   `sxSat`), and a write at one sort is read at the other. No key bytes
   ##   change.
+  ## - RFC-0016 INT-90b (451->454; 452-453 reserved; provisional): a view
+  ##   object is laid out at the offsets the compiler gives its fields for
+  ##   the target (`IRType.cFieldOffsets`, `macros.getOffset`), so a padded
+  ##   object is a view whose padding bytes are free (it declined to the
+  ##   lossy verdict); an `importc` struct or a field layout pragma other
+  ##   than `packed` leaves the offsets unknown and declines. The witness
+  ##   writes every view's rendered leaves into the shared allocation
+  ##   (`renderCrossSortViews`, `resolveRef`), so a cell held only at view
+  ##   sorts with no desync is trusted, a view wider than its owner or over
+  ##   its padding included (it was lossy). No key bytes change.
 
-const symexWalkerVersion* = "451"
+const symexWalkerVersion* = "454"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -774,6 +774,12 @@ proc emitIRType*(t: IRType): NimNode =
                          strSeqLit(t.ownedFieldNames))
       call.add newTree(nnkExprEqExpr, ident"ownedFieldIds",
                          strSeqLit(t.ownedFieldIds))
+    # RFC-0016 INT-90: the compiler's field offsets lay out a typed view
+    # (`viewLeaves`), read at walk time.
+    if t.cFieldOffsets.len > 0:
+      var b = newTree(nnkBracket)
+      for o in t.cFieldOffsets: b.add newLit(o)
+      call.add newTree(nnkExprEqExpr, ident"cFieldOffsets", prefix(b, "@"))
     call
   of itArray:
     newCall(bindSym"tArray", emitIRType(t.elemTy), newLit(t.size))

@@ -26,6 +26,7 @@ import std/strutils
 import std/strformat
 import std/options   ## RFC-0005 S8bv: `classifyEnumSubrange`
 import std/sequtils
+import std/tables   ## RFC-0016 INT-90: `classifyObjectRecordFields` offsets
 import std/algorithm   ## RFC-0016 INT-84: `sort` of a holey enum's ordinals
 import std/tables     ## RFC-0005 S8e: the witness type-symbol registry
 import std/compilesettings   ## RFC-0005 S8c: `libPath` for `isStdlibDecl`
@@ -1000,6 +1001,25 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
   # ---- Phase-4 plain-record path: only plain fields --------------
   var fields: seq[IRType]
   var names: seq[string]
+  # RFC-0016 INT-90: the compiler's own layout of each field for the target
+  # (`macros.getOffset` of the field symbols `getTypeImpl` holds; the
+  # `getImpl` record has identifiers), -1 where it does not know it.
+  var offs: seq[int]
+  var compilerOffsets: Table[string, int]
+  block:
+    var ti =
+      try: nameSym.getTypeImpl
+      except CatchableError: newEmptyNode()
+    if ti.kind == nnkBracketExpr and ti.len == 2:
+      ti = try: ti[1].getTypeImpl
+           except CatchableError: newEmptyNode()
+    if ti.kind == nnkObjectTy and ti.len > 2 and ti[2].kind == nnkRecList:
+      for m in ti[2]:
+        if m.kind != nnkIdentDefs: continue
+        for j in 0 ..< m.len - 2:
+          let fs = m[j]
+          if fs.kind == nnkSym and fs.symKind == nskField:
+            compilerOffsets[fs.strVal] = getOffset(fs)
   for member in recList:
     member.expectKind nnkIdentDefs
     # Phase 15 R9: a ref/ptr-to-object field (e.g. recursive `next: Node`)
@@ -1021,8 +1041,18 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       # hardening: the SAME fix, generalized and shared with the variant
       # path's three analogous sites).
       names.add fieldNameStr(member[j], j)
+      offs.add compilerOffsets.getOrDefault(names[^1], -1)   # RFC-0016 INT-90
+  # RFC-0016 INT-90: a layout pragma other than `packed` (an `importc`
+  # struct, an `align` field), or a field the compiler sizes otherwise than
+  # the IR, leaves the offsets unknown.
+  block:
+    let lp = layoutPragmaOf(nameSym, recList)
+    if (lp.len > 0 and lp != "packed") or
+       fieldSizeMismatchOf(recList, names, fields).len > 0:
+      for o in offs.mitems: o = -1
   return tTuple(fields, names, objectName = s, nominalId = nominalId(nameSym),
-                nameIsRefAlias = isRefWrapped).keyedBySym(nameSym)
+                nameIsRefAlias = isRefWrapped,
+                cFieldOffsets = offs).keyedBySym(nameSym)
 
 const maxArrayIndexSpan = 4096
   ## RFC-0005 S8z. The widest index type an array is modelled over. The

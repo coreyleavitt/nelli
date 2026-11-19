@@ -5315,6 +5315,6 @@ proc walkerSpec*(sp: RegexSpec): PcreParse =
 import ../thread_state
 
 proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
-  releaseToDefault(concreteCall, rnIds, selCache, verCache)
+  releaseToDefault(concreteCall, rnIds, selCache, verCache, skipGuess)
 
 registerThreadStateRelease(releaseThreadState)

@@ -101,6 +101,9 @@ type
     uncertain*: bool          ## under a `when` the scan did not decide, or in
                               ## a module read in several worlds
     call*: bool
+    callee*: string
+      ## RFC-0016 int6-m6. A call's callee name as `nimIdentNormalize` spells
+      ## it (`calleeName`); "" where the callee is not a name
     file*: string
     line*: int
 
@@ -637,11 +640,37 @@ proc recordImports(sc: var Scanner; n: NimNode): seq[string] =
       result.add found
       if found notin sc.res.imports: sc.res.imports.add found
 
+proc spelledName(n: NimNode): string =
+  ## A name as written: an identifier, or a quoted one's parts joined
+  ## (`=destroy`, `[]=`). "" for anything else.
+  result = nameOf(n)
+  if result.len == 0 and n.kind == nnkAccQuoted:
+    for p in n:
+      if p.kind in {nnkIdent, nnkSym}: result.add p.strVal
+      else: return ""
+
+proc calleeName*(n: NimNode): string =
+  ## RFC-0016 int6-m6. The routine a module-level call statement names, as
+  ## `nimIdentNormalize` spells it: `f(x)`, `f x`, `f"x"`, `f`, `f[T](x)`,
+  ## and `a.f(x)` / `a.f`, qualified or a method call, are `f`. "" for any
+  ## other callee (an operator statement, a call of a call's result).
+  var h = n
+  if n.kind in {nnkCall, nnkCommand, nnkCallStrLit}:
+    if n.len == 0: return ""
+    h = n[0]
+  elif n.kind notin {nnkIdent, nnkSym, nnkAccQuoted, nnkDotExpr}:
+    return ""
+  if h.kind == nnkBracketExpr and h.len > 0: h = h[0]
+  if h.kind == nnkDotExpr and h.len == 2: h = h[1]
+  let s = spelledName(h)
+  if s.len == 0: "" else: nimIdentNormalize(s)
+
 proc addCompileEvent(sc: var Scanner; n: NimNode; targets: seq[string];
                      call: bool) =
   ## RFC-0016 int6-a6. A statement that may compile a module, in text order.
   sc.res.events.add CompileEvent(targets: targets,
     st: merge(sc.cur, sc.hidden), uncertain: sc.undecided > 0, call: call,
+    callee: (if call: calleeName(n) else: ""),
     file: sc.res.visits[sc.visit].file, line: n.lineInfoObj.line)
 
 proc walkWhen(sc: var Scanner; n: NimNode) =
@@ -845,6 +874,164 @@ proc scanModule*(path: string; env: SourceEnv;
     result.unknown = why
     return
   scanModuleText(path, text, env, start)
+
+type
+  DefKind* = enum
+    ## RFC-0016 int6-m6. What a definition of a name is: a routine the
+    ## compiler calls (`proc`, `func`, `method`, `converter`, `iterator`), or
+    ## a template or macro, which expands to statements (an `import` among
+    ## them).
+    dkRoutine, dkExpands
+
+  ModuleDefs* = object
+    ## RFC-0016 int6-m6. A module's definition text read for names alone: its
+    ## module-level definitions (its includes' too, every `when` branch), what
+    ## it imports and what it re-exports. No check state is scanned.
+    defs*: Table[string, set[DefKind]]   ## per `nimIdentNormalize`d name
+    reexports*: seq[string]
+      ## the targets an `export` re-exports (as `CompileEvent.targets`)
+    exportedNames*: seq[string]
+      ## names an `export` hands on that are no module it imports: a symbol
+      ## of some import, which this reading does not place
+    unknown*: string          ## why the reading may miss a definition
+
+proc toSeqOf(n: NimNode): seq[NimNode] =
+  for c in n: result.add c
+
+proc targetStem(t: string): string =
+  var p = t
+  if p.startsWith("lib?:"): p = p[5 .. ^1]
+  elif p.startsWith("lib:"): p = p[4 .. ^1]
+  elif p.startsWith("?"): p = p[1 .. ^1]
+  p.baseName.stemOf
+
+proc defsWalk(sc: var Scanner; md: var ModuleDefs; n: NimNode;
+              imports: var seq[tuple[name, target: string]];
+              exports: var seq[NimNode]) =
+  case n.kind
+  of nnkStmtList, nnkStmtListExpr:
+    for c in n: defsWalk(sc, md, c, imports, exports)
+  of nnkWhenStmt:
+    # A branch the scan decides false is not compiled; every other branch,
+    # up to one it decides true, may be.
+    var atoms: seq[string]
+    for br in n:
+      if br.kind in {nnkElifBranch, nnkElifExpr}:
+        let d = decide(br[0], sc.env.defines, atoms)
+        if d == 0: continue
+        defsWalk(sc, md, br[1], imports, exports)
+        if d == 1: break
+      elif br.kind in {nnkElse, nnkElseExpr} and br.len > 0:
+        defsWalk(sc, md, br[0], imports, exports)
+  of nnkProcDef, nnkFuncDef, nnkMethodDef, nnkConverterDef, nnkIteratorDef,
+     nnkTemplateDef, nnkMacroDef:
+    var nm = n[0]
+    if nm.kind == nnkPostfix and nm.len == 2: nm = nm[1]
+    let s = spelledName(nm)
+    if s.len == 0:
+      if md.unknown.len == 0:
+        md.unknown = "a definition whose name the scan cannot read: `" &
+                     nm.repr & "`"
+      return
+    let k = if n.kind in {nnkTemplateDef, nnkMacroDef}: dkExpands else: dkRoutine
+    let key = nimIdentNormalize(s)
+    md.defs[key] = md.defs.getOrDefault(key) + {k}
+  of nnkImportStmt, nnkImportExceptStmt, nnkFromStmt:
+    # Each module by the name the text refers to it by: its file's stem, or
+    # the alias of `import x as y`.
+    let parts = if n.kind == nnkImportStmt: toSeqOf(n) else: @[n]
+    for c in parts:
+      let one = if n.kind == nnkImportStmt: newTree(nnkImportStmt, c) else: c
+      let targets = recordImports(sc, one)
+      let alias = if c.kind == nnkInfix and c.len == 3 and
+                     nameOf(c[0]) == "as": nameOf(c[2])
+                  else: ""
+      for t in targets:
+        imports.add (name: (if alias.len > 0: alias else: targetStem(t)),
+                     target: t)
+    if sc.res.unknown.len > 0 and md.unknown.len == 0:
+      md.unknown = sc.res.unknown
+  of nnkExportStmt, nnkExportExceptStmt:
+    exports.add n
+  of nnkIncludeStmt:
+    for c in n:
+      let fromFile = sc.including[^1]
+      let rel = includePathOf(c)
+      let path = if rel.len > 0: resolveInclude(sc.env, fromFile, rel) else: ""
+      if path.len == 0:
+        if md.unknown.len == 0:
+          md.unknown = "cannot place `include " & c.repr & "` from `" &
+                       fromFile & "`"
+        continue
+      var seen = false
+      for f in sc.including:
+        if normalPath(f) == normalPath(path): seen = true
+      if seen: continue
+      var text: string
+      let why = readSource(sc.env, path, text)
+      if why.len > 0:
+        if md.unknown.len == 0: md.unknown = why
+        continue
+      var ast: NimNode
+      try:
+        ast = if path in parsedFiles and parsedFiles[path].text == text:
+                parsedFiles[path].ast
+              else: parseStmt(text, path)
+      except ValueError as e:
+        if md.unknown.len == 0:
+          md.unknown = "cannot parse `" & path & "`: " & e.msg
+        continue
+      sc.including.add path
+      defsWalk(sc, md, ast, imports, exports)
+      discard sc.including.pop()
+  else:
+    discard
+
+proc moduleDefs*(env: SourceEnv; path: string): ModuleDefs =
+  ## RFC-0016 int6-m6. The names `path`'s text defines, imports and
+  ## re-exports (`ModuleDefs`). A definition a macro or a template makes at
+  ## the module's level is not read: no name is, there.
+  var text: string
+  let why = readSource(env, path, text)
+  if why.len > 0:
+    result.unknown = why
+    return
+  var ast: NimNode
+  try:
+    ast = if path in parsedFiles and parsedFiles[path].text == text:
+            parsedFiles[path].ast
+          else: parseStmt(text, path)
+  except ValueError as e:
+    result.unknown = "cannot parse `" & path & "`: " & e.msg
+    return
+  var sc = Scanner(env: env)
+  sc.including.add path
+  var imports: seq[tuple[name, target: string]]
+  var exports: seq[NimNode]
+  defsWalk(sc, result, ast, imports, exports)
+  for ex in exports:
+    var items: seq[NimNode]
+    if ex.kind == nnkExportExceptStmt:
+      if ex.len > 0: items.add ex[0]
+    else:
+      for c in ex: items.add c
+    for it in items:
+      let isQualified = it.kind == nnkDotExpr and it.len == 2
+      let name = nameOf(if isQualified: it[0] else: it)
+      var found = false
+      for t in imports:
+        if name.len > 0 and t.name == name:
+          if t.target notin result.reexports: result.reexports.add t.target
+          found = true
+      if found: continue
+      # A symbol: `m.sym` of a module not placed, or a bare `sym` of some
+      # import. It is not placed, so the name is.
+      let sym = spelledName(if isQualified: it[1] else: it)
+      if sym.len == 0:
+        if result.unknown.len == 0:
+          result.unknown = "an `export " & it.repr & "` the scan cannot place"
+      else:
+        result.exportedNames.add nimIdentNormalize(sym)
 
 proc stateAt*(m: ModuleScan; file: string; line, col: int): CheckState =
   ## The options at a position. A position inside a template or a macro is where

@@ -1480,8 +1480,17 @@ const renderAsChoicesVersion* = "12"
   ##   it was a leak that declined `feCheckOption`; a stdlib module compiled
   ##   before the push is not reached. Key bytes change: such a body's
   ##   scope, stamp and digest.
+  ## - RFC-0016 int6-m6 (477->478): a module-level call before or under an
+  ##   import under a push no longer stops the compile-order replay where
+  ##   its callee's name is defined, in every module visible at the call
+  ##   (read as definition text alone), only by `proc`, `func`, `method`,
+  ##   `converter` or `iterator` definitions: such a call imports nothing.
+  ##   A template, a macro, an overload set holding either, or a name the
+  ##   text does not place still keeps the coarse reading. Verdicts and key
+  ##   bytes move where the replay now runs: such a body's scope, stamp and
+  ##   digest.
 
-const symexWalkerVersion* = "477"
+const symexWalkerVersion* = "478"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

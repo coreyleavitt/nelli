@@ -15,24 +15,24 @@
 ##     after: `firstConv(300)` raises `RangeDefect`;
 ##   * `strutils` is compiled before any push: `cmpIgnoreStyle` is walked
 ##     under its own module's scope alone.
-## The scan replays that order, and each leak is a position state. The
-## imports under the push come before `s8cu_helpers`, whose module-level
-## `initLock` call may (to a text scan) be a macro that imports: such a call
-## before a push's import keeps the coarse reading
-## (`tsymex_0016_int6a_leakcall`).
+## The scan replays that order, and each leak is a position state.
+## `s8cu_helpers` is compiled before the push, and its module-level
+## `initLock` call is read as a proc's, which imports nothing (int6-m6); a
+## template or macro called there keeps the coarse reading
+## (`tsymex_0016_int6a_leakcalltpl`, `_leakcallmac`, `_leakcallmix`).
 
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/errorkind
 import ./s0016_int6a_leakfirst
+import ./s8cu_helpers
 
 {.push rangeChecks: off.}
 import ./s0016_int6a_leaked, ./s0016_int6a_leakfirst, ./s0016_int6a_leakvia
 {.pop.}
 
 import ./s0016_int6a_leaked
-import ./s8cu_helpers
 
 proc callsLeaked(v: int) =
   if leakConv(v) == 300: symexTarget("hit")
@@ -77,5 +77,5 @@ suite "int6-a leaked scopes: the compile order replayed":
     check not r.errors.named(feCheckOption)
 
 suite "int6-a leaked scopes: walker version":
-  test "walker version floor >= 477":
-    check parseInt(symexWalkerVersion) >= 477
+  test "walker version floor >= 478":
+    check parseInt(symexWalkerVersion) >= 478

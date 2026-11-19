@@ -2109,9 +2109,13 @@ task test, "Run the test suite":
             "tsymex_0016_int6a_scopes",
             # RFC-0016 int6-a: a push leaked through an import reaches the modules that import first compiles (the compile order replayed), and no stdlib module compiled before it.
             "tsymex_0016_int6a_leak",
-            # RFC-0016 int6-a: the leak fallbacks keep the coarse reading: an undecided when, a call before or under the push, a configured import, a stdlib import.
+            # RFC-0016 int6-a: the leak fallbacks keep the coarse reading: an undecided when, a call under the push, a configured import, a stdlib import; a proc called before the push is replayed past (int6-m6).
             "tsymex_0016_int6a_leakwhen",
             "tsymex_0016_int6a_leakcall",
+            # RFC-0016 int6-m6: a template, a macro, or a proc-and-template overload set called before the push keeps the coarse reading.
+            "tsymex_0016_int6a_leakcalltpl",
+            "tsymex_0016_int6a_leakcallmac",
+            "tsymex_0016_int6a_leakcallmix",
             "tsymex_0016_int6a_leakcallin",
             "tsymex_0016_int6a_leakcfg",
             "tsymex_0016_int6a_leaklib",

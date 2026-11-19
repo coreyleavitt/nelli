@@ -372,6 +372,56 @@ proc isUserTarget(t: string): bool =
   not t.startsWith("lib:") and not t.startsWith("lib?:") and
     not t.startsWith("?")
 
+var moduleDefsCache {.compileTime.}: Table[string, ModuleDefs]
+
+proc defsOf(path: string): ModuleDefs =
+  ## RFC-0016 int6-m6. `moduleDefs` of `path`, read once per compile.
+  let k = normalPath(path)
+  if k notin moduleDefsCache:
+    moduleDefsCache[k] = moduleDefs(compileTimeEnv(), path)
+  moduleDefsCache[k]
+
+proc callImportsNothing(m: ModuleScan; at: int; raw: string): string =
+  ## RFC-0016 int6-m6. "" where the module-level call `m.events[at]` imports
+  ## nothing: its callee name is defined, in every module visible at the
+  ## call, only by `proc`/`func`/`method`/`converter`/`iterator`
+  ## definitions, which compile no module. Visible: the calling module's own
+  ## text, `system`, every module its imports before the call name (under an
+  ## undecided `when` too), and what each of those re-exports, read as
+  ## definition text alone (`moduleDefs`). Otherwise why not: a callee that
+  ## is no name, is a template or macro anywhere so visible (an overload set
+  ## mixing the two), is defined nowhere so read, or may come from a module
+  ## the scan cannot place or read.
+  let ev = m.events[at]
+  if ev.callee.len == 0: return "its callee is not a name the scan reads"
+  var queue = @[raw, configuredLibDir / "system.nim"]
+  for j in 0 ..< at:
+    if not m.events[j].call: queue.add m.events[j].targets
+  var seen: seq[string]
+  var kinds: set[DefKind]
+  while queue.len > 0:
+    let t = queue.pop()
+    if t.startsWith("?") or t.startsWith("lib?:"):
+      return "an import before it names a module the scan cannot place (`" &
+             t & "`)"
+    let path = if t.startsWith("lib:"): t[4 .. ^1] else: t
+    let key = normalPath(path)
+    if key in seen: continue
+    seen.add key
+    let d = defsOf(path)
+    if d.unknown.len > 0:
+      return "`" & path.extractFilename & "` is not read whole: " & d.unknown
+    if ev.callee in d.exportedNames:
+      return "`" & path.extractFilename & "` re-exports `" & ev.callee &
+             "` from a module the scan does not place"
+    kinds = kinds + d.defs.getOrDefault(ev.callee)
+    queue.add d.reexports
+  if dkExpands in kinds:
+    return "`" & ev.callee & "` names a template or macro"
+  if kinds == {}:
+    return "`" & ev.callee & "` is defined in no module the scan reads"
+  ""
+
 proc replayModule(raw: string; start: CheckState) =
   ## Compiles the user module `raw` from `start`, as the first import that
   ## reaches it does, and in turn each module its statements first compile.
@@ -382,7 +432,7 @@ proc replayModule(raw: string; start: CheckState) =
   if m.unknown.len > 0:
     replayFail("`" & raw.extractFilename & "`: " & m.unknown)
     return
-  for ev0 in m.events:
+  for ei, ev0 in m.events:
     if not runReplay.exact: return
     # Nelli's own modules are library ones, as `enterGraph` reads them,
     # however the search path spelled them.
@@ -395,11 +445,16 @@ proc replayModule(raw: string; start: CheckState) =
     let dev = deviation(ev.st) - deviation(commandLineChecks)
     let at = "`" & ev.file.extractFilename & ":" & $ev.line & "`"
     if ev.call:
+      # RFC-0016 int6-m6: a call of routines alone imports nothing.
+      let why = callImportsNothing(m, ei, raw)
+      if why.len == 0: continue
       if dev != {}:
         replayFail("a module-level call at " & at & " runs with " & $dev &
-                   " pushed and may be a macro or template that imports")
+                   " pushed and may be a macro or template that imports (" &
+                   why & ")")
         return
-      if runReplay.callAt.len == 0: runReplay.callAt = at
+      if runReplay.callAt.len == 0:
+        runReplay.callAt = at & " (" & why & ")"
       continue
     if ev.uncertain:
       if dev != {}:

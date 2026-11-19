@@ -1456,7 +1456,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 int6-a6 (also 477): a push leaked through the import that
     ## first compiles a module is that module's position state, the compile
     ## order replayed.
-    check symexWalkerVersion == "477"
+    ## RFC-0016 int6-m6 (a module-level call whose callee is defined only as
+    ## a proc, func, method, converter or iterator imports nothing: the
+    ## compile order is replayed past it): 477->478.
+    check symexWalkerVersion == "478"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

@@ -125,6 +125,17 @@ where that note does not yet cover it.
   in a configuration file; and a stdlib module imported under a push that no
   earlier import compiled still makes every library routine read as under
   it.
+- **A module-level call of a proc** (migration 5b, int6-m6; walker 478). A
+  module-level call before or under an import under a push no longer stops
+  the compile-order replay where its callee's name is defined, in every
+  module visible at the call, only as a `proc`, `func`, `method`,
+  `converter` or `iterator`: such a call imports nothing (`initLock(l)` in a
+  helper module compiled first). The definitions are read as text (the
+  calling module, `system`, what its imports before the call name, and what
+  those re-export); no check scope of a library module is scanned. A
+  template, a macro, an overload set holding either, a name the text does
+  not define, an operator statement, and an import before the call that the
+  scan cannot place keep the coarse reading.
 - **Scanner text guard** (migration 1, int6-w, walker 468). The region reads
   place a routine in its module's text, read from disk during the compile. A
   routine whose text on disk ends before its position, or defines its name but

@@ -1929,7 +1929,8 @@ proc literalOn(v: NimNode): int =
   case v.kind
   of nnkIntLit .. nnkUInt64Lit: (if v.intVal == 0: 0 elif v.intVal == 1: 1
                                  else: -1)
-  else: turnsOn(v)
+  of nnkIdent, nnkSym: turnsOn(v)
+  else: -1  # k2: fail-closed: -1: parseCheckPragma declines feCheckOption on a value it cannot read
 
 proc parseCheckPragma(ctx: ParseCtx; n: NimNode): IRStmt =
   ## RFC-0016 int6-a5. A check `push` or a `pop` among a routine's statements:

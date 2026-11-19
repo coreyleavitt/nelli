@@ -209,14 +209,11 @@ suite "int6-a5: a push inside a routine body is a region of its own":
     check x.status == sxUnsat
 
   test "the region's signed overflow is undefined, as in an off build":
-    # Only the overflow reaches "hit", and it is undefined: gcc folds
-    # `v + 1 > v` to true and never reaches it, MSVC wraps and does. The
-    # walker halts that side under either; the absence of a raise is pinned.
+    # Only the overflow reaches "hit", and it is undefined: whether "hit" is
+    # reached is the C compiler's choice (gcc folds `v + 1 > v` to true,
+    # MSVC wraps); both are legal, so only the absence of a raise is pinned.
+    # The walker halts that side under either.
     let n = nativeRun(ovfRegion(high(int)))
-    when defined(vcc):
-      check "hit" in n.hits
-    else:
-      check "hit" notin n.hits
     check n.raised == ""
     pinDecline(ovfRegion, cellKey(axDefinedness, "add/signed/pushOff/bodyRegion"),
                ubSignedOverflow, excluding = {feOverflowCheckOption,

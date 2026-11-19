@@ -171,11 +171,10 @@ suite "int6-o: an overflow-off region in a checked build":
     check x.status != sxRaised
 
   test "a push inside a routine body is walked unchecked there (int6-a5)":
+    # Whether "hit" is reached is the C compiler's choice (gcc folds the
+    # comparison to true, MSVC wraps); both are legal for undefined
+    # behaviour, so only the absence of a raise is pinned.
     let n = nativeRun(sutInnerOff(high(int)))
-    when defined(vcc):
-      check "hit" in n.hits
-    else:
-      check "hit" notin n.hits
     check n.raised == ""
     pinDecline(sutInnerOff, cellKey(axDefinedness, "add/signed/pushOff/inner"),
                ubSignedOverflow, excluding = {feOverflowCheckOption,

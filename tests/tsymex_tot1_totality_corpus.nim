@@ -188,12 +188,13 @@ proc corpusReinterpretIntConvSoundness(x: int32) =
 
 # ---- Surface 2: type/witness classifier catch-all (CR-2b / CR-2c) ---------
 
-# `cstring` is not in `classifyType`'s supported scalar set. Params are
-# allocated before the body is walked, so this degrades the WHOLE RUN to
+# `c_longdouble` is not in `classifyType`'s supported scalar set (a `cstring`
+# was this row's parameter until RFC-0016 INT-87 held one by value). Params
+# are allocated before the body is walked, so this degrades the WHOLE RUN to
 # sxUnknown even though `y == 42` is trivially reachable.
-proc corpusCstringParam(s: cstring, y: int) =
+proc corpusLongDoubleParam(s: c_longdouble, y: int) =
   if y == 42:
-    symexTarget("cstring_param")
+    symexTarget("longdouble_param")
 
 type
   Widget = object
@@ -402,7 +403,7 @@ let
   rReinterpretIntConv = pinFind(corpusReinterpretIntConv, tLabel("reinterpret_int_conv"))
   rReinterpretIntConvSoundness = pinFind(corpusReinterpretIntConvSoundness,
                                             tLabel("reinterpret_int_conv_soundness"))
-  rCstring       = pinFind(corpusCstringParam,         tLabel("cstring_param"))
+  rLongDouble    = pinFind(corpusLongDoubleParam,      tLabel("longdouble_param"))
   rSeqObject     = pinFind(corpusSeqObjectWitness,     tLabel("seq_object_witness"))
   rHashSetString = pinFind(corpusHashSetStringWitness, tLabel("hashset_string_witness"))
   rNestedTuple   = pinFind(corpusNestedTupleWitness,   tLabel("nested_tuple_witness"))
@@ -448,10 +449,10 @@ let corpus = @[
              # RFC-0005 S6a: split off as `beBudgetExhaustedUnmodelled`.
              expectedKind: beBudgetExhaustedUnmodelled, hasKindCheck: true),
 
-  CorpusItem(label: "CR-2b: cstring SUT param",
+  CorpusItem(label: "CR-2b: c_longdouble SUT param",
              surface: "2. type-classifier catch-all",
              backstops: "CR-2b (classifyType param-type catch-all)",
-             status: rCstring.status, errors: rCstring.errors,
+             status: rLongDouble.status, errors: rLongDouble.errors,
              expectedKind: feUnsupportedParamType, hasKindCheck: true),
 
   CorpusItem(label: "CR-2c: seq[Widget] witness",

@@ -84,10 +84,24 @@ suite "ADM-IR: verdicts through the real parser are unchanged":
     check b.status == sxUnsat
     check pinFind(zeroSeq, tLabel("hit")).status == sxSat
 
+type
+  # an unrecognised user generic: a generic case object below another (a
+  # case part at two levels) classifies as the `__unsupported:` placeholder,
+  # whose zero is not built. (A `cstring` until INT-87 held one by value,
+  # then a `c_longdouble` until INT-76 declined its local before the zero is
+  # asked for.)
+  AdmWeirdK = enum awA, awB
+  AdmWeirdBase[T] = object of RootObj
+    case wk: AdmWeirdK
+    of awA: wx: T
+    of awB: discard
+  AdmWeird[T] = object of AdmWeirdBase[T]
+    case k: bool
+    of true: x: T
+    of false: discard
+
 proc zeroUninterp(k: int) =
-  # a `cstring` until INT-87 held one by value (its zero is nil); a
-  # `c_longdouble` (float128) is still an uninterpreted placeholder
-  var f: c_longdouble
+  var f: AdmWeird[int]
   if k == 1: symexTarget("hit")
 
 suite "ADM-IR: a declined fieldDefault row still declines through the parser":

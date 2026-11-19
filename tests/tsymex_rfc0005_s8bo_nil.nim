@@ -101,6 +101,10 @@ proc sutCStrNil(v: int) =
   var c: cstring = "a"
   if v == 1 and isNil(c): symexTarget("a")
 
+proc sutCStrNilZero(v: int) =
+  var c: cstring
+  if v == 1 and isNil(c): symexTarget("a")
+
 proc sutSwap(v: int) =
   var a = v
   var b = 3
@@ -151,9 +155,12 @@ suite "RFC-0005 S8bo (1): a conversion or cast to `pointer`":
 
 suite "RFC-0005 S8bo (1): an unlowered magic declines":
   test "a value magic with a doc-only body":
-    # RFC-0005 S8cb models `ashr`; a `cstring` has no model at all.
+    # RFC-0005 S8cb models `ashr`. RFC-0016 INT-87 holds a `cstring` by
+    # value (nil or its bytes), so its `isNil` decides: a literal is not
+    # nil, an uninitialised one is.
     verdict(sutAshr, tLabel("a"), sxSat)
-    pinDecline(sutCStrNil, declKey, feUnsupportedOp, tLabel("a"), "compiler magic `isNil`")
+    verdict(sutCStrNil, tLabel("a"), sxUnsat)
+    verdict(sutCStrNilZero, tLabel("a"), sxSat)
   # `swap` and `wasMoved` are S8bl's var-parameter magics now, modelled.
   test "a statement magic S8bl models":
     verdict(sutSwap, tLabel("a"), sxSat)

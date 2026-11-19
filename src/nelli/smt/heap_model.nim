@@ -2869,6 +2869,19 @@ proc pointerMapAddr*(ctx: Z3Context; x: Z3AnyAst; fromTy, toTy: IRType): Z3AnyAs
 
 # ---- the per-run reset ------------------------------------------------------
 
+var unionImageProgram {.threadvar.}: bool
+  ## RFC-0016 int6-f. The program being walked accesses a variant field
+  ## unchecked somewhere (`SymexProgram.fieldImage`): a `--fieldChecks:off`
+  ## build, or a routine pushed `fieldChecks: off` in a build that checks.
+  ## The variant's memory is the same C struct in every region, so the
+  ## representation the off build walks (the union image, the active member)
+  ## is carried through the checked regions too; they read the
+  ## discriminator for their `FieldDefect` as before. Set per run
+  ## (`setUnionImageProgram`), false between runs.
+
+proc setUnionImageProgram*(on: bool) =
+  unionImageProgram = on
+
 proc resetHeapModel*() =
   ## RFC-0016 review D3c-6. The per-run reset of the run-state threadvars of
   ## this module, called by `resetSymexRunState`. `storeDeclKind`,
@@ -2877,6 +2890,7 @@ proc resetHeapModel*() =
   ## context, so they are process-stable and not reset (`probeContext`).
   allocEnumZeroLegal = false
   allocInputDomain = false               # RFC-0016 INT-84
+  unionImageProgram = false              # RFC-0016 int6-f
   enumHolesMade = false
   distinctBijectivityHints = @[]
   distinctSortNames = @[]
@@ -4566,11 +4580,16 @@ proc normSlot*(v: SymVal; ty: IRType): SymVal =
                         else: svBV64)
   result.signed = ty.signed
 
+proc unionImageAt(): bool =
+  ## Whether the walk carries the off build's variant representation.
+  coField notin buildSemantics.checks or unionImageProgram
+
 proc unionImageGate*(ty: IRType): Option[vl.VariantLayout] =
   ## The layout a value variant of `ty` carries its byte image under: only a
-  ## `--fieldChecks:off` c-backend build, and only a layout derived.
+  ## c-backend program some region of which reads fields unchecked
+  ## (`unionImageAt`), and only a layout derived.
   if ty == nil or ty.kind != itVariant: return
-  if coField in buildSemantics.checks or buildSemantics.backend != beC: return
+  if not unionImageAt() or buildSemantics.backend != beC: return
   # A type with lifetime hooks (`not supportsCopyMem`): the discriminator
   # write runs the old arm's destructor/reset, so the old bytes are not the
   # new arm's slots. No image; the write is the `dwmHavoc` model.
@@ -4579,8 +4598,9 @@ proc unionImageGate*(ty: IRType): Option[vl.VariantLayout] =
   if lay.ok: some(lay) else: none(vl.VariantLayout)
 
 proc activeMemberTracked*(ty: IRType): bool =
-  ## cpp `--fieldChecks:off`: a value variant carries the arm last written.
-  ty != nil and ty.kind == itVariant and coField notin buildSemantics.checks and
+  ## cpp, a program some region of which reads fields unchecked
+  ## (`unionImageAt`): a value variant carries the arm last written.
+  ty != nil and ty.kind == itVariant and unionImageAt() and
     buildSemantics.backend == beCpp
 
 proc unionCellCount*(lay: vl.VariantLayout): int =

@@ -1434,7 +1434,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## system's integer `*=` is the build's; 466 reserved): 465->467.
     ## RFC-0016 int6-w (a routine whose module text on disk disagrees with
     ## the position the compiler parsed declines `feCheckOption`): 467->468.
-    check symexWalkerVersion == "468"
+    ## RFC-0016 int6-f (a wrong-branch variant field access under a
+    ## pushed-off `fieldChecks` is walked as the off build walks it; a
+    ## program with such a region carries the union image): 468->469.
+    check symexWalkerVersion == "469"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

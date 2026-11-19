@@ -1403,8 +1403,21 @@ const renderAsChoicesVersion* = "12"
   ##   binary never raises. A user routine whose text on disk ends before
   ##   its position, or defines its name but not starting there
   ##   (`textDisagrees`), now declines `feCheckOption`. No key bytes change.
+  ## - RFC-0016 int6-f field regions (468->469): a variant field accessed
+  ##   on the wrong branch inside a routine pushed `fieldChecks: off` in a
+  ##   checked build is walked as a `--fieldChecks:off` build walks it (the
+  ##   union's bytes on c, `ubInactiveVariantField` on cpp) instead of
+  ##   declining `feUnsupportedOp` on its path. The variant's memory is one C
+  ##   struct in every region, so a program with any such region
+  ##   (`SymexProgram.fieldImage`) carries the off build's union image (c)
+  ##   and active member (cpp) through its checked regions too, which keep
+  ##   their `FieldDefect` on the discriminator; on cpp a checked read of a
+  ##   member an unchecked write left inactive is `ubInactiveVariantField`.
+  ##   A checked access in a `--fieldChecks:off` cpp build no longer tests
+  ##   the active member for its `FieldDefect`. No key bytes change (the
+  ##   flag follows the bodies' `@on{...}` scopes).
 
-const symexWalkerVersion* = "468"
+const symexWalkerVersion* = "469"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

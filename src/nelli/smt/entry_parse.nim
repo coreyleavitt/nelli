@@ -145,6 +145,7 @@ proc entryParse*(fn: NimNode; apiName: string; settings: SymexSettings;
   let ik = implKey(fn)
   let digest = newLit(ik.digest)
   let open = newLit(ik.open)
+  let fieldImage = newLit(p.fieldImage)   ## RFC-0016 int6-f
   # RFC-0016 D1 (stack): the IR is built in a proc of its own. Inline, every
   # temporary of every IR node lands in the CALLER's frame, and a module top
   # level with many entry calls is one C function (`NimMainModule`); an MSVC
@@ -165,7 +166,8 @@ proc entryParse*(fn: NimNode; apiName: string; settings: SymexSettings;
         SymexProgram(params: `paramsExpr`, body: `bodyExpr`, procs: `procsExpr`,
                      retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
                      parseErrors: `peExpr`, annotationViolations: `avExpr`,
-                     implDigest: `digest`, implOpen: `open`)
+                     implDigest: `digest`, implOpen: `open`,
+                     fieldImage: `fieldImage`)
       var `progSym` = `build`()
       `progSym`.globals = `glExpr`
       `progSym`

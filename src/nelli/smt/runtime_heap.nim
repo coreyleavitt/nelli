@@ -3821,6 +3821,19 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           else:
             discard forkDefect(forkPath(cpA, basePc, cpA.env),
                                not inArmCond, "FieldDefect", none(string), w)
+            # RFC-0016 int6-f (cpp, a tracked cell): a checked read the
+            # discriminator admits is undefined where an unchecked write left
+            # another arm's member active (`isVariantField`'s value twin).
+            if heapActiveTracked(objTy):
+              let act = cellActive(ctx, cpA, objTy, refAst, discReal)
+              var actIn = mkBool(false)
+              for hit in armHits:
+                actIn = actIn or variantDiscEq(act, int64(hit.tagOrd))
+              let inactive = inArmCond and not actIn
+              decideUndefined(forkPath(cpA, basePc, cpA.env), inactiveFieldUb(),
+                inactive, opSite("a checked variant field read through a " &
+                  "member an unchecked write left inactive", ""), w)
+              basePc = basePc & @[not inactive]
           if w.shouldStop: return exact(survivors)
           # In-arm continuation: assert inArmCond on the range-constrained base.
           var childPc = basePc & @[inArmCond]
@@ -4687,7 +4700,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
             # names among them, as a value variant's `lowerVariantFieldSet`).
             # On c the image needs no store: its active arm's bytes are read
             # from the field heaps (`cellImage`).
-            if cppActiveW:
+            # int6-f: a checked write makes its member active too.
+            if heapActiveTracked(objTy):
               var act = discConst(objTy.vDiscTy, int64(armHitsW[0].tagOrd))
               for k in 1 ..< armHitsW.len:
                 let t = int64(armHitsW[k].tagOrd)

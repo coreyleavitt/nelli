@@ -1441,6 +1441,14 @@ type
                                    ## `fieldChecks`, `objChecks` its own
                                    ## options turn on in a build with them
                                    ## off. Read through `checkedHere`.
+                                   ## Opened only through `openCheckScope`.
+    fieldsUncheckedSomewhere*: bool
+                                   ## RFC-0016 int6-f. A region of the parse
+                                   ## was opened without `fieldChecks`
+                                   ## (`openCheckScope`): its variant fields
+                                   ## are plain union member accesses, so the
+                                   ## program carries the off build's union
+                                   ## image (`SymexProgram.fieldImage`).
     arith*: ArithFrames
                                    ## RFC-0016 WA-A, D1 S3. Per routine being
                                    ## parsed, innermost last: the regime of
@@ -1831,11 +1839,18 @@ func checkedIn(c: RoutineChecks): set[CheckOption] =
   if c.why.len > 0: return buildSemantics.checks * scopeChecks
   (buildSemantics.checks * scopeChecks - c.offModelled) + pushedOn(c)
 
+proc openCheckScope(ctx: ParseCtx; on: set[CheckOption]) =
+  ## RFC-0016 int6-f. Pushes the check scope `on` for a region's parse, and
+  ## records a region parsed without `fieldChecks`
+  ## (`fieldsUncheckedSomewhere`).
+  if coField notin on: ctx.fieldsUncheckedSomewhere = true
+  ctx.checkScopes.add on
+
 proc pushArithScope(ctx: ParseCtx; c: RoutineChecks; inherit = false) =
   ## Opens the routine's arithmetic scope for its parse, and its check scope.
   ctx.arith.enterParse arithFacts(c, inherit)
-  ctx.checkScopes.add(if inherit and ctx.checkScopes.len > 0: ctx.checkScopes[^1]
-                      else: checkedIn(c) + floatOn(c))
+  ctx.openCheckScope(if inherit and ctx.checkScopes.len > 0: ctx.checkScopes[^1]
+                     else: checkedIn(c) + floatOn(c))
 
 proc popArithScope(ctx: ParseCtx) =
   ctx.arith.leave()
@@ -19703,7 +19718,7 @@ proc parseForBody(forBodyNode: NimNode; ctx: ParseCtx): IRStmt =
   # The for-body is outside the iterator: its own entry leaves the stack.
   let entry = ctx.iterBodies.pop()
   var caller = entry.caller   # a copy: the body below may push iterator bodies (VM let-aliasing, S8ab)
-  ctx.checkScopes.add caller
+  ctx.openCheckScope caller
   result = parseJumpedBody(forBodyNode, ctx)
   discard ctx.checkScopes.pop()
   ctx.iterBodies.add entry
@@ -24383,7 +24398,7 @@ proc parseStmtInner(n: NimNode,
         let callerTop = if ctx.checkScopes.len > 0: ctx.checkScopes[^1]
                         else: buildSemantics.checks * scopeChecks
         ctx.iterBodies.add (own: ownScope, caller: callerTop)
-        if ownScope: ctx.checkScopes.add(checkedIn(iterChecks) + floatOn(iterChecks))
+        if ownScope: ctx.openCheckScope(checkedIn(iterChecks) + floatOn(iterChecks))
         # RFC-0016 W3-z P13. The expansion is a block a for-body's `break`
         # leaves (`parseForBody`); the iterator's own loops bind their own.
         ctx.pushJumpTarget(isLoop = false)
@@ -26686,6 +26701,7 @@ type
                               ## RFC-0016 PRC-44 (`ParseCtx.dupModelled`).
     dupUnprobed*: seq[NimNode]
                               ## RFC-0016 PRC-44 (`dupHookProbes`).
+    fieldImage*: bool         ## RFC-0016 int6-f (`SymexProgram.fieldImage`).
 
 func isLiteralInit(v: NimNode): bool =
   ## RFC-0005 S8as. `v` is a literal, possibly behind the conversion Nim
@@ -27130,6 +27146,8 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   result.procs = ctx.procs
   result.dupModelled = ctx.dupModelled   ## RFC-0016 PRC-44
   result.dupUnprobed = ctx.dupUnprobed
+  result.fieldImage = coField notin buildSemantics.checks or
+                      ctx.fieldsUncheckedSomewhere   ## RFC-0016 int6-f
   result.userExnHierarchyNimNode = emitStrStrTable(ctx.userExnHierarchy)
   # RFC-0005 S8as: after every routine is parsed, so every global the walk
   # can reach has been named.

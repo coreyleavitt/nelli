@@ -1,8 +1,7 @@
 ## RFC-0016 K9c-g. The `seq[seq[int]]` unbacked-element probes
-## (`k9cg_probes.nim`) over `newSeq[seq[int]](k)` (N) and a parameter (P):
-## each is exact or a classified decline, never `weInternalWalkerFault`.
-## Split from `tsymex_0016_k9cg_unbacked.nim` so each file fits the bounded
-## runner's default cap.
+## (`k9cg_probes.nim`) over `newSeq[seq[int]](k)` (N): each is exact or a
+## classified decline, never `weInternalWalkerFault`. One source per file, so
+## each fits the CI ceiling (see `tsymex_0016_k9cg_unbacked_e.nim`).
 ##
 ## The termination pin. The costliest probe of the set is `sFilterItN`: a
 ## `filterIt` over a `newSeq` whose element reads decline, unrolled to
@@ -14,11 +13,11 @@
 import std/[os, strutils]
 import ./k9cg_probes
 
-genProbes("s", "b", "seq[int]", "@[1]", "@[2]", seqNames, "NP")
+genProbes("s", "b", "seq[int]", "@[1]", "@[2]", seqNames, "N")
 
-suite "K9c-g unbacked element paths (seq[seq[int]], newSeq and parameter)":
-  test "seq[seq[int]] newSeq and parameter paths never record weInternalWalkerFault":
-    checkProbes("s", seqNames, "NP")
+suite "K9c-g unbacked element paths (seq[seq[int]], newSeq)":
+  test "seq[seq[int]] newSeq paths never record weInternalWalkerFault":
+    checkProbes("s", seqNames, "N")
 
   test "the costliest unbacked probe (filterIt over newSeq) ends within 50M units":
     let log = getTempDir() / "k9cg_filterit_units.log"

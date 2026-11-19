@@ -3,22 +3,25 @@
 ## decline `seNestedSeqUnsupported`. None may record `weInternalWalkerFault`,
 ## which is the label for a walker bug, not for a known modelling gap.
 ##
-## The probes live in `k9cg_probes.nim`. This file runs the `seq[seq[int]]`
-## probes over an empty literal (E) and a non-empty literal (L);
-## `tsymex_0016_k9cg_unbacked_np.nim` runs them over `newSeq` (N) and a
-## parameter (P), and `tsymex_0016_k9cg_unbacked_table.nim` runs the
-## `seq[Table[int,int]]` probes. The 184 walks in one file took about 240 s
-## (152 s of it compiling), past `scripts/dt-bounded.sh`'s default 180 s cap,
-## which killed it as HUNG; split, each file fits.
+## The probes live in `k9cg_probes.nim`. The `seq[seq[int]]` probes run one
+## source per file: this file an empty literal (E),
+## `tsymex_0016_k9cg_unbacked_l.nim` a non-empty literal (L),
+## `tsymex_0016_k9cg_unbacked_n.nim` `newSeq` (N) and
+## `tsymex_0016_k9cg_unbacked_p.nim` a parameter (P);
+## `tsymex_0016_k9cg_unbacked_table.nim` runs the `seq[Table[int,int]]`
+## probes. The 184 walks in one file took about 240 s (152 s of it
+## compiling), past `scripts/dt-bounded.sh`'s default 180 s cap; two sources
+## per file still ran over the CI ceiling's 150 s on msvc (RFC-0016 INT-51),
+## so each source has its own file.
 import std/strutils
 import ./k9cg_probes
 import nelli/smt/canonicalize
 
-genProbes("s", "b", "seq[int]", "@[1]", "@[2]", seqNames, "EL")
+genProbes("s", "b", "seq[int]", "@[1]", "@[2]", seqNames, "E")
 
-suite "K9c-g unbacked element paths (seq[seq[int]], literal sources)":
-  test "seq[seq[int]] literal paths never record weInternalWalkerFault":
-    checkProbes("s", seqNames, "EL")
+suite "K9c-g unbacked element paths (seq[seq[int]], empty literal)":
+  test "seq[seq[int]] empty-literal paths never record weInternalWalkerFault":
+    checkProbes("s", seqNames, "E")
 
   test "insert into an empty seq of an unbacked element declines as a gap":
     let r = symexFind(sInsertE, tLabel("t"))

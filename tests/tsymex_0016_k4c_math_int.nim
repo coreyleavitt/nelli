@@ -13,16 +13,21 @@
 ##   * a float-first call is lowered by name, never walked: the modelled
 ##     routines are pinned exact, and every other routine of the region is a
 ##     declined row (`feUnsupportedOp`) naming its cell, one pin each.
+##
+## Split (RFC-0016 INT-51) into three files so each compiles inside the CI
+## ceiling: `tsymex_0016_k4c_math_int` (the integer routines and `ceilDiv`),
+## `tsymex_0016_k4c_math_float` (the modelled float routines, the allowlisted
+## float rows and the names std/math lacks) and `tsymex_0016_k4c_math_libm`
+## (the declined float rows). Every pin of the one file is in exactly one of
+## them.
 import std/[unittest, math, options]
 import nelli/symex
 import nelli/smt/errorkind
 import nelli/smt/admission
 import nelli/smt/stdlib_rows
-import nelli/smt/stdlib_models
 import ./s8cu_helpers
 
 const smallInts = sampled([-7, -5, -3, -1, 0, 1, 2, 3, 5, 7, 8, 9])
-const floats = sampled([-2.5, -0.0, 0.0, 0.5, 2.5, 9.0, 4.5])
 
 proc sNextPow2(a: int) =
   if nextPowerOfTwo(a) == 8 and a == 5: symexTarget("hit")
@@ -202,193 +207,3 @@ suite "PRC-09: math.ceilDiv is lowered by name, as compiled":
       pinDecline(cdZeroU, cdKey, feCheckOption, needle = render(cdKey))
       check native(cdZeroI(1, 0)) == "AssertionDefect"
       pinDecline(cdZeroI, cdKey, feCheckOption, needle = render(cdKey))
-
-proc fSqrt(a: float) =
-  if sqrt(a) == 3.0 and a == 9.0: symexTarget("hit")
-proc fFloor(a: float) =
-  if floor(a) == -3.0 and a == -2.5: symexTarget("hit")
-proc fCeil(a: float) =
-  if ceil(a) == -2.0 and a == -2.5: symexTarget("hit")
-proc fTrunc(a: float) =
-  if trunc(a) == -2.0 and a == -2.5: symexTarget("hit")
-proc fRound(a: float) =
-  if round(a) == 3.0 and a == 2.5: symexTarget("hit")
-proc fRoundEven(a: float) =
-  if round(a) == 4.0 and a == 4.5: symexTarget("hit")
-proc fSignbit(a: float) =
-  if signbit(a) and a == 0.0: symexTarget("hit")
-proc fIsNaN(a: float) =
-  if isNaN(a): symexTarget("hit")
-proc fCopySign(a, b: float) =
-  if copySign(a, b) == -2.5 and a == 2.5: symexTarget("hit")
-proc fClassify(a: float) =
-  if classify(a) == fcNegZero: symexTarget("hit")
-proc fRoundPlaces(a: float) =
-  if round(a, 1) == 2.5 and a == 2.5: symexTarget("hit")
-
-template floatExact(sut: untyped; key: static string) =
-  test "math." & key:
-    let r = pinExact(sut, cellKey(axStdlibBody, "math." & key),
-                     domain = floats)
-    check r.status == sxSat
-
-suite "K4c PRC-09: the modelled float routines are pinned exact":
-  floatExact(fSqrt, "sqrt")
-  floatExact(fFloor, "floor")
-  floatExact(fCeil, "ceil")
-  floatExact(fTrunc, "trunc")
-  floatExact(fRound, "round")
-  floatExact(fSignbit, "signbit")
-  floatExact(fIsNaN, "isNaN")
-  floatExact(fCopySign, "copySign")
-  floatExact(fClassify, "classify")
-  test "math.round: ties go away from zero (4.5 rounds to 5.0, not 4.0)":
-    check native(fRoundEven(4.5)) != "hit"
-    let r = pinExact(fRoundEven, cellKey(axStdlibBody, "math.round"),
-                     domain = floats)
-    check r.status == sxUnsat
-  test "math.round/places is a declined facet":
-    let c = cellKey(axStdlibBody, "math.round/places")
-    pinDecline(fRoundPlaces, c, feUnsupportedOpAborted, needle = render(c))
-
-template declined1(sut: untyped; name: static string; expr: untyped) =
-  proc sut(a {.inject.}: float) =
-    if expr > 0.5: symexTarget("hit")
-  test "math." & name:
-    let c = cellKey(axStdlibBody, "math." & name)
-    pinDecline(sut, c, feUnsupportedOpAborted, needle = render(c))
-
-template declined2(sut: untyped; name: static string; expr: untyped) =
-  proc sut(a {.inject.}, b {.inject.}: float) =
-    if expr > 0.5: symexTarget("hit")
-  test "math." & name:
-    let c = cellKey(axStdlibBody, "math." & name)
-    pinDecline(sut, c, feUnsupportedOpAborted, needle = render(c))
-
-suite "K4c PRC-09: a libm routine is a declined row":
-  declined1(dCbrt, "cbrt", cbrt(a))
-  declined1(dLn, "ln", ln(a))
-  declined1(dLog10, "log10", log10(a))
-  declined1(dLog2, "log2", log2(a))
-  declined1(dExp, "exp", exp(a))
-  declined1(dSin, "sin", sin(a))
-  declined1(dCos, "cos", cos(a))
-  declined1(dTan, "tan", tan(a))
-  declined1(dSinh, "sinh", sinh(a))
-  declined1(dCosh, "cosh", cosh(a))
-  declined1(dTanh, "tanh", tanh(a))
-  declined1(dArcsin, "arcsin", arcsin(a))
-  declined1(dArccos, "arccos", arccos(a))
-  declined1(dArctan, "arctan", arctan(a))
-  declined2(dArctan2, "arctan2", arctan2(a, b))
-  declined1(dArcsinh, "arcsinh", arcsinh(a))
-  declined1(dArccosh, "arccosh", arccosh(a))
-  declined1(dArctanh, "arctanh", arctanh(a))
-  declined2(dHypot, "hypot", hypot(a, b))
-  declined2(dPow, "pow", pow(a, b))
-  declined1(dErf, "erf", erf(a))
-  declined1(dErfc, "erfc", erfc(a))
-  declined1(dGamma, "gamma", gamma(a))
-  declined1(dLgamma, "lgamma", lgamma(a))
-
-suite "K4c PRC-09: a reciprocal or composition is a declined row":
-  declined2(dLog, "log", log(a, b))
-  declined1(dCot, "cot", cot(a))
-  declined1(dSec, "sec", sec(a))
-  declined1(dCsc, "csc", csc(a))
-  declined1(dCoth, "coth", coth(a))
-  declined1(dSech, "sech", sech(a))
-  declined1(dCsch, "csch", csch(a))
-  declined1(dArccot, "arccot", arccot(a))
-  declined1(dArcsec, "arcsec", arcsec(a))
-  declined1(dArccsc, "arccsc", arccsc(a))
-  declined1(dArccoth, "arccoth", arccoth(a))
-  declined1(dArcsech, "arcsech", arcsech(a))
-  declined1(dArccsch, "arccsch", arccsch(a))
-
-suite "K4c PRC-09: decompositions and float comparisons are declined rows":
-  declined1(dFrexp, "frexp", frexp(a).frac)
-  declined1(dSplitDecimal, "splitDecimal", splitDecimal(a).floatpart)
-  declined1(dDegToRad, "degToRad", degToRad(a))
-  declined1(dRadToDeg, "radToDeg", radToDeg(a))
-  declined2(dMod, "mod", a mod b)
-
-proc dAlmostEq(a, b: float) =
-  if almostEqual(a, b): symexTarget("hit")
-suite "K4c PRC-09: almostEqual":
-  test "math.almostEqual":
-    let c = cellKey(axStdlibBody, "math.almostEqual")
-    pinDecline(dAlmostEq, c, feUnsupportedOpAborted, needle = render(c))
-
-suite "K4c PRC-09: the modelled names agree with the lowering":
-  test "the modelled float names are rows admitted at ssFloatCall":
-    for n in ["sqrt", "floor", "ceil", "trunc", "round", "signbit", "isNaN",
-              "copySign", "classify"]:
-      check n in mathFpModeledOps
-      check admitStdlibBody("math." & n, ssFloatCall).admitted
-  test "a math name the lowering models has an admitted row, or none":
-    for n in mathFpModeledOps:
-      if stdlibAxis.hasRow("math." & n):
-        check admitStdlibBody("math." & n, ssFloatCall).admitted
-
-# --- W3-z E2b: the allowlisted float rows, pinned exact ----------------------
-#
-# `abs`, `min` and `max` are std/system routines. `isInf`, `isFinite` and
-# `isNormal` are NOT in std/math on this toolchain (see the `compiles` facts
-# below), so their rows are never cells; a SUT routine of that name is a user
-# routine, walked as its own body (tsymex_0016_p10_floatnames).
-# `toFloat32`/`toFloat64` are the lowering's names for `float32(x)` and
-# `float(x)` on a float operand (dsl_parser `convertFloatWidth`), not routines.
-const
-  narrow = sampled([-2.5'f32, -0.0'f32, 0.0'f32, 0.5'f32, 2.5'f32, 9.0'f32])
-
-proc fAbs(a: float) =
-  if abs(a) == 2.5 and a < 0.0: symexTarget("hit")
-proc fMin(a, b: float) =
-  if min(a, b) == -2.5 and b == 0.5: symexTarget("hit")
-proc fMax(a, b: float) =
-  if max(a, b) == 2.5 and b == 0.5: symexTarget("hit")
-
-proc fTo32Exact(a: float) =
-  if float32(a) == 2.5'f32 and a == 2.5: symexTarget("hit")
-proc fTo64(a: float32) =
-  if float(a) == 2.5 and a == 2.5'f32: symexTarget("hit")
-
-suite "W3-z E2b: the allowlisted float rows are pinned exact":
-  test "math.abs":
-    check pinExact(fAbs, cellKey(axStdlibBody, "math.abs"),
-                   domain = floats).status == sxSat
-  test "math.min":
-    check pinExact(fMin, cellKey(axStdlibBody, "math.min"),
-                   domain = floats).status == sxSat
-  test "math.max":
-    check pinExact(fMax, cellKey(axStdlibBody, "math.max"),
-                   domain = floats).status == sxSat
-  test "math.toFloat32 (float32(x) on a float operand)":
-    check pinExact(fTo32Exact, cellKey(axStdlibBody, "math.toFloat32"),
-                   domain = floats).status == sxSat
-  test "math.toFloat64 (float(x) on a float32 operand)":
-    check pinExact(fTo64, cellKey(axStdlibBody, "math.toFloat64"),
-                   domain = narrow).status == sxSat
-
-suite "W3-z P10: math.isInf/isFinite/isNormal are not in std/math here":
-  test "the three are never cells, nrPlatform":
-    var x = 1.5
-    pinNever(cellKey(axStdlibBody, "math.isInf"), not compiles(isInf(x)),
-             "std/math (Nim 2.2.10) has no isInf")
-    pinNever(cellKey(axStdlibBody, "math.isFinite"), not compiles(isFinite(x)),
-             "std/math (Nim 2.2.10) has no isFinite")
-    pinNever(cellKey(axStdlibBody, "math.isNormal"), not compiles(isNormal(x)),
-             "std/math (Nim 2.2.10) has no isNormal")
-    for n in ["isInf", "isFinite", "isNormal"]:
-      check not admitFloatCall(n, 1).admitted
-      check n notin mathFpModeledOps
-
-suite "W3-z E2b: math.nextafter is not in std/math here":
-  test "math.nextafter is a never cell, nrPlatform":
-    var x = 1.5
-    let named = compiles(nextafter(x, 2.0))
-    pinNever(cellKey(axStdlibBody, "math.nextafter"), not named,
-             "std/math (Nim 2.2.10) has no nextafter: compiles(nextafter(x, y)) is " &
-             $named)
-    check not admitFloatCall("nextafter", 2).admitted

@@ -1,8 +1,9 @@
-## RFC-0016 D1 stack-frame probe. The shape of `tsymex_0016_k4a_dispatch`: many
-## `symexFind` expansions in ONE module top level, so every expansion's
-## temporaries share the frame of `NimMainModule`. Each SUT calls a chain of
-## routines, so each expansion's IR carries a stamped body per routine. Built
-## and run by `tsymex_0016_d1vcc_frame` under a reduced stack; not a test itself.
+## RFC-0016 D1 stack-frame probe. The shape of `tsymex_0016_k4a_dispatch`
+## (as one file): many `symexFind` expansions in ONE module top level, so
+## every expansion's temporaries share the frame of `NimMainModule`. Each SUT
+## calls a chain of routines, so each expansion's IR carries a stamped body
+## per routine. Built and run by `tsymex_0016_d1vcc_frame` under a reduced
+## stack; not a test itself.
 import nelli
 import nelli/symex
 

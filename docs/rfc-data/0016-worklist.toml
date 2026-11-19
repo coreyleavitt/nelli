@@ -485,7 +485,7 @@ note = ": done (2026-11-09, rfc-0016-rangeoff, rfc-0016-prc0708): `--rangeChecks
 source = "S8cu"
 evidence = "S8cu's fail-closed decline (`feCheckOption`, `feOverflowCheckOption`) closed a false `sxRaised`. (2026-11-07, W1-z): a `--rangeChecks:off` build declines every routine `feCheckOption`"
 cells = []
-pins = ["tsymex_0016_rangeoff", "tsymex_0016_fieldrangeoff", "tsymex_0016_boundoff", "tsymex_0016_fieldoff", "tsymex_0016_objoff", "tsymex_0016_floatchecks", "tsymex_0016_checksoff"]
+pins = ["tsymex_0016_rangeoff", "tsymex_0016_fieldrangeoff", "tsymex_0016_boundoff", "tsymex_0016_fieldoff", "tsymex_0016_objoff", "tsymex_0016_floatchecks_nan", "tsymex_0016_floatchecks_inf", "tsymex_0016_floatchecks_caught", "tsymex_0016_checksoff"]
 
 [[row]]
 id = "PRC-08"
@@ -508,7 +508,7 @@ source = "S8cu"
 evidence = "every routine in a pushed region of `std/math` declines"
 slice = "K4c"
 cells = ["stdlib:math.ceil", "stdlib:math.ceilDiv", "stdlib:math.classify", "stdlib:math.copySign", "stdlib:math.euclDiv", "stdlib:math.euclMod", "stdlib:math.floor", "stdlib:math.floorDiv", "stdlib:math.floorMod", "stdlib:math.isNaN", "stdlib:math.isPowerOfTwo", "stdlib:math.nextPowerOfTwo", "stdlib:math.round", "stdlib:math.sgn", "stdlib:math.signbit", "stdlib:math.sqrt", "stdlib:math.trunc"]
-pins = ["tsymex_0016_k4c_math"]
+pins = ["tsymex_0016_k4c_math_int", "tsymex_0016_k4c_math_float", "tsymex_0016_k4c_math_libm"]
 
 [[row]]
 id = "PRC-41"
@@ -2341,7 +2341,7 @@ table = "5.8c"
 title = "Intake #173, #174 and #175 (`[nightly] ceiling-cpp:*`, `ceiling-msvc:*`, `ceiling-z3-4.13.4:*`), new-offenders half: unlisted tests over the 150 s fail line (60 s x 2.5). `tsymex_0016_k5b_cfg_release` (cpp 404 s), `tsymex_0016_floatchecks` (281 s), `tfuzzconcolicundefined` (218 s), `tsymex_0016_d1vcc_frame` (msvc 215 s), `tsymex_0016_fieldoff` (msvc 166 s), `tsymex_0016_k4a_dispatch` (z3-4.13.4 182 s). They are split or sped up, never added to `tests/0016-allowlist/ceiling-offenders-*.txt`"
 class = "test harness (CI-D ceiling); no verdict change"
 state = "open"
-note = ": a Wave 4 split slice splits or speeds up each of the six; the row closes when a nightly's ceiling step lists none of them"
+note = ": `rfc-0016-w4int51` splits or speeds up all but one, every check kept, against main nightly 44169016729 (sha 316b086e; its new offenders: cpp `k5b_cfg_release` 322.6 s, `floatchecks` 219.5, `k4c_math` 163.2, `tfuzzconcolicundefined` 151.5; msvc `d1vcc_frame` 242.6, `k5b_cfg_release` 203.0, `k9cg_unbacked` 169.3, `k9cg_unbacked_np` 153.4; z3-4.13.4 `floatchecks` 170.1, `d1vcc_frame` 166.9, `k9cg_unbacked_np` 158.9, `tfuzzconcolicundefined` 157.6). Split: `tsymex_0016_floatchecks` into `_nan`, `_inf` and `_caught`; `tsymex_0016_k4c_math` into `_int`, `_float` and `_libm`; `tsymex_0016_k4a_dispatch` (149.4 s on cpp) into `_signed`, `_scalar` and `_stmt`; `tsymex_0016_k9cg_unbacked` and `_np` into one seq source per file (`_e`, `_l`, `_n`, `_p`); `tfuzzconcolicundefined` into `_div` and `_clean`, whose `divGate` campaign, run twice with the same seed, now runs once. Sped up: `tsymex_0016_d1vcc_frame` no longer compiles the engine for itself (the child-build helpers moved from `s8cu_helpers` to `tests/probe_build.nim`, which imports no engine module), so only the probe's child build is left. `tsymex_0016_fieldoff` ran 77 to 123 s in that nightly and is unchanged. Open: `tsymex_0016_k5b_cfg_release` is one compile, the release `-O3` of `smt/runtime.nim`'s 13.6 MB of generated C++ (449 s of a 546 s local cpp run; the suite itself runs in 4 s), which no split of the test reduces; it waits on a decision. The row closes when a nightly's ceiling step lists none of them"
 slice = "W4-z"
 home = "a Wave 4 split slice (split or speed up; never list)"
 source = "CI-B nightly, run 42608737906 (2026-11-09, sha 8af8f2fe), intake #173 #174 #175"
@@ -2354,10 +2354,11 @@ id = "INT-52"
 table = "5.8c"
 title = "Intake #177 (`[nightly] cpp:tsymex_0016_k6b_hookcopy`): the suite did not compile on the cpp backend (red on every nightly cpp leg from 2026-11-10, run 42804432874, to 2026-11-17, run 44076804398). Its emitted hook body wrote `a->v` for a hook's `var` parameter, which the cpp backend passes as a C++ reference, so the six hookcopy cells had no cpp records and the cpp universe join failed with them. A test emit defect, not a walker one: the c backend and the walker's verdicts are unaffected"
 class = "test portability (cpp emit)"
-state = "open"
-note = ": fixed, pending a nightly on main. `rfc-0016-w4k8cb` (840c3a68) makes the emit per backend, and `field/inactiveBytes`, pinned on the c backend only (the cpp layout is the `inactiveBranch` pin), gets a `rows=linux-cpp` entry in `tests/0016-allowlist/defined.txt` (rows= ceiling 12 to 13). The branch nightly 44057977835 was green in every job, cpp and asan included; the fix lands through integration batch int5 (`rfc-0016-w4int5`). The row closes when a nightly cpp leg on main runs the suite green"
+state = "closed"
+note = "fixed by `rfc-0016-w4k8cb` (840c3a68, landed through integration batch int5): the emit is per backend, and `field/inactiveBytes`, pinned on the c backend only (the cpp layout is the `inactiveBranch` pin), has a `rows=linux-cpp` entry in `tests/0016-allowlist/defined.txt`. Main nightly 44169016729 (2026-11-17, sha 316b086e) ran the suite green on cpp (63.7 s; the cpp gate lists only the INT-43 known-red), and every cpp sweep shard, the cpp universe job and the asan job were green"
+sha = "840c3a68"
 slice = "W4-z"
-home = "`rfc-0016-w4k8cb` (840c3a68, landing via `rfc-0016-w4int5`)"
+home = "`rfc-0016-w4k8cb` (840c3a68, landed via `rfc-0016-w4int5`)"
 source = "CI-B nightly, run 42804432874 (2026-11-10, sha db6c3da6), intake #177"
 evidence = "the cpp gate of every nightly since run 42804432874 lists `tsymex_0016_k6b_hookcopy` under new failures; run 44076804398's cpp universe job fails on its cells"
 aliases = ["F-0011"]

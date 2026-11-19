@@ -98,7 +98,7 @@ suite "K4c: the delta pinned both ways (user routine checked, stdlib body not)":
 suite "K4c: a routine of the pushed region lowered by name":
   test "math.ceilDiv is in the pushed region and is lowered as compiled":
     ## RFC-0016 PRC-09: its row was declined (`feCheckOption`); it is now
-    ## lowered by name (`parseCeilDiv`), `tsymex_0016_k4c_math` pins it.
+    ## lowered by name (`parseCeilDiv`), `tsymex_0016_k4c_math_int` pins it.
     if hostAdmission().isSome:
       skipUnadmitted()
     else:

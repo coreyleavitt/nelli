@@ -10,6 +10,13 @@
 ##     the walker's verdict reproduced natively, one record per `magic:` cell.
 ## The cells no SUT can reach (compile-time-only, folded, macro and DrNim
 ## magics) stay allowlisted with their reason.
+##
+## Split (RFC-0016 INT-51) into three files so each compiles inside the CI
+## ceiling: `tsymex_0016_k4a_dispatch_signed` (the registry, and the signed
+## integer magics), `tsymex_0016_k4a_dispatch_scalar` (unsigned, float, bool
+## and char) and `tsymex_0016_k4a_dispatch_stmt` (the statement-position
+## magics, strings, sequences, arrays and sets). Every pin of the one file is
+## in exactly one of them.
 import std/[unittest, options, sets, sequtils, strutils]
 import nelli
 import nelli/symex
@@ -87,7 +94,6 @@ suite "K4a-dispatch: the registry and the generated case":
     check not a.admitted
     check a.decline[0] == some(feUnsupportedOp)
     check "magic:AshrI" in a.decline[1]
-
 # --- SUTs ------------------------------------------------------------------
 
 template sutI2(name, cond: untyped) {.dirty.} =
@@ -142,152 +148,6 @@ sutI2(sDivUs, b != 0 and a /% b == 3)
 sutI2(sModUs, b != 0 and a %% b == 2)
 sutI2(sLtUs, a <% b and b == 3)
 sutI2(sLeUs, a <=% b and b == 3)
-# Unsigned
-sutU2(sAddU, a + b == 7)
-sutU2(sSubU, a - b == 7)
-sutU2(sMulU, a * b == 12)
-sutU2(sDivU, b != 0 and a div b == 3)
-sutU2(sModU, b != 0 and a mod b == 2)
-sutU2(sLeU, a <= b and b == 3)
-sutU2(sLtU, a < b and b == 3)
-# Float
-sutF2(sAddF, a + b == 7.5)
-sutF2(sSubF, a - b == 7.5)
-sutF2(sMulF, a * b == 6.0 and a == 2.0)
-# b is pinned like sMulF pins a: the division circuit over two free operands is
-# a query some Z3 builds answer unknown (CI Z3 5.1.0.0 did); b == 2.5 leaves
-# a / 2.5 == 2.0, witness a == 5.0, inside fDom.
-sutF2(sDivF, b == 2.5 and a / b == 2.0)
-sutF1(sNegF, -a == 2.5)
-sutF1(sPlusF, +a == 2.5)
-sutF2(sEqF, a == b and a == 2.5)
-sutF2(sLeF, a <= b and b == 3.0)
-sutF2(sLtF, a < b and b == 3.0)
-# Bool and char
-sutI2(sEqB, (a > 0) == (b > 0) and a == 3 and b == 4)
-sutI2(sLeB, (a > 0) <= (b > 0) and a < 0)
-sutI2(sLtB, (a > 0) < (b > 0) and b > 0)
-sutI2(sNotB, not (a > 0) and b == 2)
-sutI2(sAnd, a > 0 and b > 0 and a + b == 7)
-sutI2(sOr, a > 0 or b > 0 and a + b == 7)
-sutI2(sXorB, (a > 0) xor (b > 0) and a == 3)
-sutC1(sEqCh, a == b and a == 'x')
-sutC1(sLeCh, a <= b and b == 'x')
-sutC1(sLtCh, a < b and b == 'x')
-sutI1(sOrd, ord(a > 3) == 1 and a == 9)
-sutI1(sChr, a >= 0 and a <= 255 and chr(a) == 'x')
-
-# Statement-position magics (the msVarStmt arms and the older arms)
-proc sInc(a: int) =
-  var x = a
-  inc x
-  if x == 5: symexTarget("hit")
-proc sDec(a: int) =
-  var x = a
-  dec(x, 2)
-  if x == 5: symexTarget("hit")
-proc sSwap(a, b: int) =
-  var x = a
-  var y = b
-  swap(x, y)
-  if x == 3 and y == 4: symexTarget("hit")
-proc sWasMoved(a: int) =
-  var x = a
-  wasMoved(x)
-  if x == 0 and a == 5: symexTarget("hit")
-proc sMove(a: int) =
-  var x = a
-  let y = move(x)
-  if y == 5 and x == 0: symexTarget("hit")
-proc sEnsureMove(a: int) =
-  var x = a
-  let y = ensureMove(x)
-  if y == 5: symexTarget("hit")
-proc sNew(a: int) =
-  var r: ref int
-  new(r)
-  r[] = a
-  if r[] == 5: symexTarget("hit")
-proc sIsNil(a: int) =
-  var r: ref int
-  if a > 3: new(r)
-  if r.isNil and a == 2: symexTarget("hit")
-proc sSetLenSeq(a: int) =
-  var s = @[1, 2]
-  if a >= 0 and a < 8:
-    setLen(s, a)
-    if s.len == 3 and a == 3: symexTarget("hit")
-proc sSetLenStr(a: int) =
-  var s = "ab"
-  if a >= 0 and a < 8:
-    setLen(s, a)
-    if s.len == 3 and a == 3: symexTarget("hit")
-proc sNewString(a: int) =
-  if a >= 0 and a < 8:
-    let s = newString(a)
-    if s.len == 3: symexTarget("hit")
-proc sNewStringOfCap(a: int) =
-  if a >= 0 and a < 8:
-    let s = newStringOfCap(a)
-    if s.len == 0 and a == 5: symexTarget("hit")
-
-# Strings, sequences, arrays and sets
-proc sLenStr(s: string) =
-  if s.len == 2: symexTarget("hit")
-proc sLenSeq(s: seq[int]) =
-  if s.len == 2: symexTarget("hit")
-proc sLenArr(a: int) =
-  var arr: array[3, int]
-  arr[0] = a
-  if arr.len == 3 and a == 4: symexTarget("hit")
-proc sHigh(a: int) =
-  var arr: array[3, int]
-  arr[0] = a
-  if arr.high == 2 and arr.low == 0 and a == 4: symexTarget("hit")
-proc sEqStr(s: string) =
-  if s == "ab": symexTarget("hit")
-proc sLeStr(s: string) =
-  if s <= "ab" and s.len == 2: symexTarget("hit")
-proc sLtStr(s: string) =
-  if s < "ab" and s.len == 2: symexTarget("hit")
-proc sConStr(s: string) =
-  if s & "x" == "abx": symexTarget("hit")
-proc sAppendCh(s: string) =
-  var t = s
-  t.add 'x'
-  if t == "abx": symexTarget("hit")
-proc sAppendStr(s: string) =
-  var t = s
-  t &= "xy"
-  if t == "abxy": symexTarget("hit")
-proc sAppendElem(s: seq[int]) =
-  var t = s
-  t.add 7
-  if t.len == 3 and t[2] == 7: symexTarget("hit")
-proc sArrGet(i: int) =
-  let arr = [5, 6, 7]
-  if i >= 0 and i < 3 and arr[i] == 6: symexTarget("hit")
-proc sArrPut(i: int) =
-  var arr = [5, 6, 7]
-  if i >= 0 and i < 3:
-    arr[i] = 9
-    if arr[1] == 9 and i == 1: symexTarget("hit")
-proc sCharToStr(c: char) =
-  if $c == "x": symexTarget("hit")
-proc sInSet(c: char) =
-  if c in {'a', 'b'} and c != 'a': symexTarget("hit")
-proc sIncl(c: char) =
-  var st: set[char] = {}
-  incl(st, c)
-  if 'x' in st: symexTarget("hit")
-proc sExcl(c: char) =
-  var st: set[char] = {'x', 'y'}
-  excl(st, c)
-  if 'x' notin st: symexTarget("hit")
-proc sNewSeq(a: int) =
-  if a >= 0 and a < 8:
-    let s = newSeq[int](a)
-    if s.len == 3: symexTarget("hit")
 
 const
   uDom = sampled([0'u, 1, 3, 4, 5, 7, 10, 12, high(uint)])
@@ -338,61 +198,3 @@ suite "K4a-dispatch: pins through symexFind, one record per cell":
   pinSatStd(sModUs, "system.%%")
   pinSatStd(sLtUs, "system.<%")
   pinSatStd(sLeUs, "system.<=%")
-  pinSat(sAddU, "AddU", uDom)
-  pinSat(sSubU, "SubU", uDom)
-  pinSat(sMulU, "MulU", uDom)
-  pinSat(sDivU, "DivU", uDom)
-  pinSat(sModU, "ModU", uDom)
-  pinSat(sLeU, "LeU", uDom)
-  pinSat(sLtU, "LtU", uDom)
-  pinSat(sAddF, "AddF64", fDom)
-  pinSat(sSubF, "SubF64", fDom)
-  pinSat(sMulF, "MulF64", fDom)
-  pinSat(sDivF, "DivF64", fDom)
-  pinSat(sNegF, "UnaryMinusF64", fDom)
-  pinSat(sPlusF, "UnaryPlusF64", fDom)
-  pinSat(sEqF, "EqF64", fDom)
-  pinSat(sLeF, "LeF64", fDom)
-  pinSat(sLtF, "LtF64", fDom)
-  pinSat(sEqB, "EqB")
-  pinSat(sLeB, "LeB")
-  pinSat(sLtB, "LtB")
-  pinSat(sNotB, "Not")
-  pinSat(sAnd, "And")
-  pinSat(sOr, "Or")
-  pinSat(sXorB, "Xor")
-  pinSat(sEqCh, "EqCh", cDom)
-  pinSat(sLeCh, "LeCh", cDom)
-  pinSat(sLtCh, "LtCh", cDom)
-  pinSat(sOrd, "Ord")
-  pinSat(sChr, "Chr")
-  pinSat(sInc, "Inc")
-  pinSat(sDec, "Dec")
-  pinSat(sSwap, "Swap")
-  pinSat(sWasMoved, "WasMoved")
-  pinSat(sMove, "Move")
-  pinSat(sEnsureMove, "EnsureMove")
-  pinSat(sNew, "New")
-  pinSat(sIsNil, "IsNil")
-  pinSat(sSetLenSeq, "SetLengthSeq")
-  pinSat(sSetLenStr, "SetLengthStr")
-  pinSat(sNewString, "NewString")
-  pinSat(sNewStringOfCap, "NewStringOfCap")
-  pinSat(sLenStr, "LengthStr", sDom)
-  pinSat(sLenSeq, "LengthSeq", qDom)
-  pinSat(sLenArr, "LengthArray")
-  pinSat(sHigh, "High")
-  pinSat(sEqStr, "EqStr", sDom)
-  pinSat(sLeStr, "LeStr", sDom)
-  pinSat(sLtStr, "LtStr", sDom)
-  pinSat(sConStr, "ConStrStr", sDom)
-  pinSat(sAppendCh, "AppendStrCh", sDom)
-  pinSat(sAppendStr, "AppendStrStr", sDom)
-  pinSat(sAppendElem, "AppendSeqElem", qDom)
-  pinSat(sArrGet, "ArrGet")
-  pinSat(sArrPut, "ArrPut")
-  pinSat(sCharToStr, "CharToStr", chDom)
-  pinSat(sInSet, "InSet", chDom)
-  pinSat(sIncl, "Incl", chDom)
-  pinSat(sExcl, "Excl", chDom)
-  pinSat(sNewSeq, "NewSeq")

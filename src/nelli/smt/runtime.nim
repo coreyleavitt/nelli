@@ -29519,11 +29519,12 @@ proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
     intDivDeclKinds, int2bvDeclKind, eqDeclKind, ctxPruneLog,
     symexIfArmsPruned, symexIfArmsChecked, symexLoopIterations,
     rfc0005RawStatus, scratchCapped, uninterpDeclKind, paramBoundaryAbort,
-    ptrAims)
+    ptrAims, eqsSplitCaps)
   when defined(symexTestInjectWalkerFault):
     releaseToDefault(injectedShape)
   when defined(symexQueryStats):
     releaseToDefault(symexQueryStats, symexQueryStatsPaused,
-      symexFactsFirstOff, symexStepStats, symexPerturbConsts, perturbSerial)
+      symexFactsFirstOff, symexStepStats, symexPerturbConsts, perturbSerial,
+      symexEqsSplits)
 
 registerThreadStateRelease(releaseThreadState)

@@ -642,6 +642,6 @@ import ../thread_state
 
 proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
   releaseToDefault(loweringDegradeErrors, loweringPendingUb,
-    loweringPendingTaint)
+    loweringPendingTaint, rawKeep)
 
 registerThreadStateRelease(releaseThreadState)

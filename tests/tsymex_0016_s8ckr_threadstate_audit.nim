@@ -129,8 +129,10 @@ suite "S8ck-r: every threadvar under src/nelli is released or reviewed":
     check violations.len == 0
     # The census is at least what S8ck-r found (172 declarations in 17
     # files): a scanner that silently stopped reading declarations fails here.
+    # 16 files since RFC-0016 INT-34 (rv0005-lows) scoped the symex DB errors
+    # to their run: `engine/types.nim` holds no threadvar any more.
     check declared >= 172
-    check files >= 17
+    check files >= 16
 
   test "fixed cases: an unreleased threadvar, an unregistered release and a reasonless keep trip the audit":
     var v1: seq[Violation]

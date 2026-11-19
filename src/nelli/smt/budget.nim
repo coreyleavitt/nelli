@@ -228,6 +228,14 @@ type
       ## again `label:prod12`, now 175,363,037 (52,070 walker units, of which
       ## 50,000 are its two contexts), so the default is still about 5.7x the
       ## largest decided walk.
+      ##
+      ## Re-measured for int6 D1d (a pruning check a kept model satisfies is
+      ## not searched, `refuteStatus`; `walkerContextUnits` re-fit at 20,000):
+      ## the `FilterIt` walk still ends on this cap, now at 1,000,001,541
+      ## units (934,387,360 walker units), and gets further before it: its
+      ## unroll 4 is decided in 86.0M (was 141.4M). Unroll 5 extrapolates to
+      ## about 1.2G, past this default; the cap is kept, not raised to fit
+      ## one walk.
     tailWalkCappedChecks*: int = 5
       ## RFC-0016 W3-z R9. The work units the whole-run gate's tail walk
       ## (`verifyTailDefined`, one per label `sxSat` and per replay candidate)

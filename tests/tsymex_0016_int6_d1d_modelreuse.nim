@@ -13,8 +13,8 @@
 ## models it kept (`satByModel`) and answers SAT without a search when one
 ## fits. Measured on c, podman (int6 D1d, 2026-11-19), the `filterIt` over a
 ## `seq[seq[int]]` below (`tsymex_0016_k9cg_unbacked_p`'s FilterIt shape):
-##   unroll 3:   426 solvers,  14.0M units charged  ->  270 solvers,  9.65M
-##   unroll 4: 3,906 solvers, 141.4M units charged  ->  2,417 solvers, 98.1M
+##   unroll 3:   426 solvers,  14.0M units charged  ->  270 solvers,  8.30M
+##   unroll 4: 3,906 solvers, 141.4M units charged  ->  2,417 solvers, 86.0M
 ## (1,489 of 3,125 pruning checks decided by a kept model at unroll 4).
 import std/[unittest, strutils, sequtils]
 import nelli
@@ -33,7 +33,8 @@ proc mkUnwind4(limit: uint): SymexSettings =
 
 ## 120M units: under what unroll 4 was charged when every pruning check was
 ## searched (43.8M Z3 units and term visits + 3,906 solvers * 25,000 =
-## 141.4M), over what it is charged now (98.1M), with room on both sides.
+## 141.4M), over what it is charged now (86.0M, with `walkerContextUnits`
+## re-measured at 20,000), with room on both sides.
 const within = mkUnwind4(120_000_000)
 
 suite "int6 D1d: a pruning check a kept model satisfies is not searched":

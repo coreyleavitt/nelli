@@ -13640,9 +13640,14 @@ proc refuteStatus(ctx: Z3Context; query: openArray[Z3Bool];
   ## does run is the one it was. A satisfying model is a model, so the
   ## verdict is the search's or the search's `zsUnknown`, and these callers
   ## read both alike (not refuted); only the units and the wall time move.
-  # A walk out of work decides nothing more by a model either: the search
-  # below runs under what is left (`workLeftRLimit`), and the walk stops.
-  if not walkWorkExhausted and satByModel(ctx, query): return zsSat
+  # A walk out of work refutes nothing more: a search would run under what is
+  # left (`workLeftRLimit`, 1 unit) yet still pay its context, and the walk
+  # stops at its next `shouldStop`. `zsUnknown` is what these callers read as
+  # not refuted (the arm is kept), so no search runs and no model decides.
+  # Measured (int6 D1d, k9cg FilterIt at unroll 5): 7,217 such searches ran
+  # between the cap and the walk's end, 1,000.0M -> 1,237.2M units.
+  if walkWorkExhausted: return zsUnknown
+  if satByModel(ctx, query): return zsSat
   let r = checkCapped(ctx, query, settings, rlimit0)
   if r.status == zsSat: keepSatModel(ctx, r.m, query)
   r.status

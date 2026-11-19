@@ -2413,6 +2413,13 @@ var pointerSortsUsed* {.threadvar.}: HashSet[string]
   ## RFC-0016 INT-83. The sorts the run converted a pointer from or to.
 var pointerReadSorts* {.threadvar.}: HashSet[string]
   ## RFC-0016 INT-83. The sorts the run read a `pointer` as.
+var pointerAddrSorts* {.threadvar.}: HashSet[string]
+  ## RFC-0016 INT-83 with INT-65 (int6). The sorts of the typed addresses the
+  ## run converted to `pointer` that are not a whole object (a `ptr`, which
+  ## carries no kind tag). Two such addresses of different sorts (`addr x`
+  ## of an `int` local and `addr y` of a `float` one) are unrelated by the
+  ## model, so their `pointer`s compared equal was a trusted false `sxSat`;
+  ## mixing a sort's untagged address with another sort's address declines.
 var pointerDecls {.threadvar.}: tuple[ctx: pointer; decls: Table[string, RawZ3FuncDecl]]
   ## RFC-0016 INT-83. `@toAddr_<T>` / `@fromAddr_<T>` / `@addrKind` of the
   ## run's context.
@@ -2522,6 +2529,7 @@ proc resetHeapModel*() =
   pointerViews = @[]
   pointerSortsUsed = initHashSet[string]()
   pointerReadSorts = initHashSet[string]()
+  pointerAddrSorts = initHashSet[string]()
   pointerDecls = (ctx: nil, decls: initTable[string, RawZ3FuncDecl]())
   currentBorrowReboxCounter = 0
   heapKeyShapes = initTable[string, HeapKeyShape]()
@@ -4727,6 +4735,9 @@ proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
     distinctSortNames, containerCard, intHeapIsInt, heapKeyShapes,
     currentBorrowReboxCounter, intOfBV, globalEntryFacts, storeDeclKind,
     selectDeclKind, constArrayDeclKind, iteDeclKind, intCellFactSeen,
-    heapChainKinds)
+    heapChainKinds, allocInputDomain, enumHolesMade, heapFieldOwners,
+    preExistingNames, madeKinds, allocatedNames, preDecls, provKinds,
+    pointerFacts, pointerViews, pointerSortsUsed, pointerReadSorts,
+    pointerAddrSorts, pointerDecls)
 
 registerThreadStateRelease(releaseThreadState)

@@ -133,18 +133,27 @@ suite "INT-65: a `pointer` is an address with a nil":
                      domain = sampled([true, false]))
 
   test "the same address is equal, two variables' are not":
-    discard pinExact(i65PointerSame, cellKey(axTypeClass, "pointer"),
-                     domain = sampled([3'i8, 0'i8]))
+    # INT-83's pointer model (int6): `pointer(addr x)` is an address of the
+    # `pointer` sort, but `let p2: pointer = addr x` still holds `ptr int`,
+    # so comparing the two declines by name (a precision gap, not a verdict).
+    pinDecline(i65PointerSame, cellKey(axTypeClass, "pointer"),
+               heUnresolvedRef)
     discard pinExact(i65PointerDistinctVars, cellKey(axTypeClass, "pointer"),
                      domain = sampled([3'i8, 0'i8]))
 
   test "what the walk cannot know declines by name":
+    # Two `ptr`s of different sorts as `pointer`s: the model does not relate
+    # them, so it declines (it was a trusted false sxSat once INT-83's
+    # conversion met this program).
     pinDecline(i65PointerCrossSort, cellKey(axTypeClass, "pointer"),
                heUnresolvedRef)
     pinDecline(i65PointerArith, cellKey(axTypeClass, "pointer"),
                feUnsupportedExprKind, needle = "nnkCast")
-    pinDecline(i65PointerBackCast, cellKey(axTypeClass, "pointer"),
-               heUnsafeCast)
+
+  test "a pointer read back as its own ptr type is its cell (INT-83)":
+    check parseInt(symexWalkerVersion) >= 443
+    discard pinExact(i65PointerBackCast, cellKey(axTypeClass, "pointer"),
+                     domain = sampled([4'i8, 0'i8]))
 
 suite "INT-65: a proc value is nil or a routine":
   test "a closure local is not nil":

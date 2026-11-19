@@ -2677,8 +2677,20 @@ proc lowerPtrCast(env: Env, e: IRExpr): SymVal =
   if toPointer:
     for t in pointerReadSorts:
       if t != srcTid: return punned(srcTid)
-    pointerSortsUsed.incl srcTid
     let whole = v.kind == svRef and pointerWholeObject(ctx, ast.raw)
+    # RFC-0016 INT-65 with INT-83 (int6): an untagged address (a `ptr`, or a
+    # `ref` read out of a `pointer`) is related to no other sort's address,
+    # so two sorts' addresses meeting as `pointer`s where one is untagged
+    # would let them compare equal with nothing native behind it.
+    for t in (if whole: pointerAddrSorts else: pointerSortsUsed):
+      if t != srcTid:
+        return degradeAlloc(e.pcTy, heUnresolvedRef,
+          "`" & render(e) & "`: addresses of two types (`" & srcTid &
+            "`, `" & t & "`) meet as `pointer`s and one is not a whole " &
+            "object; whether they alias is not modelled (RFC-0016 INT-83; " &
+            "heUnresolvedRef)", "__ptrCastDegrade")
+    pointerSortsUsed.incl srcTid
+    if not whole: pointerAddrSorts.incl srcTid
     SymVal(kind: svPtr, ptrFamily: true, ptrPointee: pointerPointeeTy(),
            ptrAst: pointerAddrOf(ctx, ast, srcPointee, whole))
   elif srcTid == pointerTypeId:

@@ -97,14 +97,15 @@ proc u64Over(x: uint64) =
   symexTarget("t")
   discard n
 
-proc intNatZero(x: int) =
-  ## a width-typed Int operand (isExact): `Natural(0)` is in range
+proc intNatZero(x: range[-5 .. 20]) =
+  ## a width-typed Int operand (a declared-range param is promoted to an Int
+  ## sort): `Natural(0)` is in range
   if x == 0:
     let n = Natural(x)
     symexTarget("t")
     discard n
 
-proc intR10Top(x: int) =
+proc intR10Top(x: range[-5 .. 20]) =
   if x == 10:
     let r = R10(x)
     symexTarget("t")
@@ -129,24 +130,59 @@ suite "K9e range: conversion to a range type":
     check pinFind(u64Over, tRaisedExn("RangeDefect")).status == sxRaised
 
   test "Int operand: Natural(0) is in range (lower bound inclusive)":
-    check pinFind(intNatZero, tRaisedExn("RangeDefect"), Exact).status == sxUnsat
+    check pinFind(intNatZero, tRaisedExn("RangeDefect")).status == sxUnsat
 
   test "Int operand: range[0..10](10) is in range (upper bound inclusive)":
-    check pinFind(intR10Top, tRaisedExn("RangeDefect"), Exact).status == sxUnsat
+    check pinFind(intR10Top, tRaisedExn("RangeDefect")).status == sxUnsat
 
 # --- forkAssignRangeCheck ---------------------------------------------------
 
-proc asgRange(x: int) =
+proc asgRange(x, y: range[0 .. 100]) =
+  ## x + y reaches 200: outside 1..100 (and 0 + 0 is below it)
   var v: range[1 .. 100] = 1
-  v = x
+  v = x + y
   symexTarget("t")
   discard v
 
 suite "K9e range: assignment into a range local":
-  test "v = x raises RangeDefect outside 1..100":
+  test "v = x + y raises RangeDefect outside 1..100":
     let r = pinFind(asgRange, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     check r.raisedTypeId == "RangeDefect"
+
+# `v = x + y` takes Nim's hidden range conversion (`carriesRangeCheck`, so
+# `isAssign.aty` stays nil and `forkAssignRangeCheck` is not called). An RHS
+# of the target's own type has no conversion: the fork is built (its two
+# bound conditions reached) and its raise side is unsatisfiable, since the
+# value is already confined to the range. The survivors of the arms behind
+# the discharge (`conds.len == 0`, the `coRange` gate, the routed type) cannot
+# change a verdict for that reason; see docs/rfc-data/0016-k9e.md.
+
+type R100 = range[1 .. 100]
+type RangeBox = ref object
+  f: R100
+
+proc idR100(x: R100): R100 = x
+
+proc asgCall(x: R100) =
+  var v: R100 = 1
+  v = idR100(x)
+  symexTarget("t")
+  discard v
+
+proc asgField(p: RangeBox) =
+  if p == nil: return
+  var v: R100 = 1
+  v = p.f
+  symexTarget("t")
+  discard v
+
+suite "K9e range: assignment of a value already of the range type":
+  test "v = f(x) of the target's type cannot raise RangeDefect":
+    check pinFind(asgCall, tRaisedExn("RangeDefect")).status == sxUnsat
+
+  test "v = p.f of the target's type cannot raise RangeDefect":
+    check pinFind(asgField, tRaisedExn("RangeDefect")).status == sxUnsat
 
 # --- lowerExpr uNeg ---------------------------------------------------------
 

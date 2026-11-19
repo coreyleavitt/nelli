@@ -391,10 +391,8 @@ suite "INT-90: two sorts' heaps at one address":
     check m.status == sxUnsat or not m.trusted
 
   test "a {.packed.} object declines at the pragma axis":
-    let r = symexFind(packedLow, tLabel("hit"))
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check "packed" in show(r.errors)
+    pinDecline(packedLow, cellKey(axPragma, "type/packed"), feUnsupportedOp,
+               needle = "pragma:type/packed")
 
   test "a wider view than its owner: the tail is the view's":
     template trustedSat(f: untyped) =

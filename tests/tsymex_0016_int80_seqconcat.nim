@@ -337,11 +337,11 @@ suite "INT-80":
     exact(eX1, eX1Never)
   test "INT-79's u4: an iterator's actual computed by `&`":
     exact(eU4, eU4Never)
-  test "a seq of seqs declines by name, never faults":
-    pinDecline(eN1, cell, seNestedSeqUnsupported,
-               excluding = {weInternalWalkerFault})
-    pinDecline(eN2, cell, seNestedSeqUnsupported,
-               excluding = {weInternalWalkerFault})
+  test "a seq of seqs concatenates exactly (S8cp-r backs a seq of seqs)":
+    # Was a named decline (`seNestedSeqUnsupported`) before S8cp-r held a
+    # `seq[seq[T]]` leaf-split; re-pinned against native on integration.
+    exact(eN1, eN1Never)
+    exact(eN2, eN2Never)
   test "self-append doubles: `s.add(s)`, `add(s, s)`, `s &= s`":
     exact(eF1, eF1Never)
     exact(eF2, eF2Never)

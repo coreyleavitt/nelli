@@ -314,8 +314,12 @@ suite "RFC-0016 K2-0: soundness (SND-13)":
              "K2-0 SND-13 reproduces: false sxRaised (FieldDefect) where native reaches the label with fieldChecks off")
 
   test "a push that is never popped declines (the scan reads it to the end)":
+    # RFC-0016 int6: read to the end, the position is `fieldChecks: off` on
+    # every reading, so it is modelled; the wrong-branch write then declines
+    # on its own path (`inactiveFieldSide`, `feUnsupportedOp`).
     check native(npField(4)) == "hit"
-    pinDecline(npField, cellKey(axPragma, "push/neverPopped"), feCheckOption)
+    pinDecline(npField, cellKey(axPragma, "push/neverPopped"), feUnsupportedOp,
+               excluding = {feCheckOption})
 
 suite "RFC-0016 K2-0: closure probes (W-19c)":
   test "S1b: nested block/break binding agrees with native":

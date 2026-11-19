@@ -190,8 +190,21 @@ else:
   # a modelled global. So the maker declines at entry as well; the alias body's
   # own decline follows from `parseRoutineBody` (an alias body parsed without
   # it carries no marker); this case pins the equal verdict and kind.
-  {.push boundChecks: off.}
+  # RFC-0016 int6: a definite `push boundChecks: off` is modelled, so the
+  # pinned decline uses a position the scan cannot decide (an undecided
+  # `when`, both pushed and not), which still declines `feCheckOption`; the
+  # definite push is pinned as its native verdict (`sutIdxOff*`).
+  when not defined(w3zNoSuchSymbol):
+    {.push boundChecks: off.}
   proc mkIndexer(): proc (a, b: var int) =
+    result = proc (a, b: var int) =
+      let tab = [10, 20, 30, 40]
+      a = tab[b and 3]
+  when not defined(w3zNoSuchSymbol):
+    {.pop.}
+
+  {.push boundChecks: off.}
+  proc mkIndexerOff(): proc (a, b: var int) =
     result = proc (a, b: var int) =
       let tab = [10, 20, 30, 40]
       a = tab[b and 3]
@@ -207,6 +220,19 @@ else:
   proc sutIdxAliased(k: int) =
     var x = k
     let f = mkIndexer()
+    f(x, x)
+    if k == 1 and x == 20: symexTarget("hit")
+
+  proc sutIdxOffPlain(k: int) =
+    var x = k
+    var y = k
+    let f = mkIndexerOff()
+    f(x, y)
+    if k == 1 and x == 20: symexTarget("hit")
+
+  proc sutIdxOffAliased(k: int) =
+    var x = k
+    let f = mkIndexerOff()
     f(x, x)
     if k == 1 and x == 20: symexTarget("hit")
 
@@ -252,6 +278,15 @@ else:
       check r.status == p.status
       check r.errors.named(feCheckOption)
       check not r.errors.named(feUnsupportedOp)
+    test "a lambda pushed boundChecks off is walked unchecked (int6)":
+      # `b and 3` is always inside the array: the label is reached natively
+      # at k == 1 both ways, and the walker's witness reproduces it.
+      let r = pinFind(sutIdxOffPlain, tLabel("hit"))
+      checkpoint $r.status & " " & show(r.errors)
+      check r.status == sxSat
+      let a = pinFind(sutIdxOffAliased, tLabel("hit"))
+      checkpoint $a.status & " " & show(a.errors)
+      check a.status == sxSat
     test "a proc-typed let in the body: the plain call finds the label":
       let r = symexFind(sutLetPlain, tLabel("hit"))
       checkpoint $r.status & " " & show(r.errors)
@@ -323,3 +358,8 @@ else:
       checkAliasShape(sh)
       check sh.endsWith("true,true")
       check sh.contains("main=true,true")
+    test "the definite boundChecks-off indexer declines in neither (int6)":
+      let sh = lambdaShape(mkIndexerOff)
+      checkpoint sh
+      checkAliasShape(sh)
+      check sh.contains("main=true,false")

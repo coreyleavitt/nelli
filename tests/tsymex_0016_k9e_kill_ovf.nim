@@ -11,7 +11,8 @@
 ##   lowerConvIntRange     a conversion to a range type: the check itself, the
 ##                         top of an unsigned 8-bit source, an unsigned 64-bit
 ##                         source, and a width-typed Int operand's two bounds
-##   forkAssignRangeCheck  an assignment into a `range` local
+##   forkAssignRangeCheck  an assignment into a `range` local (`*=`: its live
+##                         raise; an RHS of the range type: no raise)
 ##   lowerExpr uNeg        `-x` of a signed BV and of a width-typed Int
 import std/unittest
 import nelli/symex
@@ -154,9 +155,27 @@ suite "K9e range: assignment into a range local":
 # `isAssign.aty` stays nil and `forkAssignRangeCheck` is not called). An RHS
 # of the target's own type has no conversion: the fork is built (its two
 # bound conditions reached) and its raise side is unsatisfiable, since the
-# value is already confined to the range. The survivors of the arms behind
-# the discharge (`conds.len == 0`, the `coRange` gate, the routed type) cannot
-# change a verdict for that reason; see docs/rfc-data/0016-k9e.md.
+# value is already confined to the range.
+#
+# `v *= x` does reach the fork with a raise side Nim takes: `system.*=` is
+# `x = x * y`, an `int` product stored into the range, so the store's own
+# conversion raises `RangeDefect` (native: 3 * 4 raises, 3 * 3 does not).
+# The parser lowers it to an assignment whose `aty` is the range (no
+# conversion node), so this is the fork's live raise, and the pin that tells
+# it from the arms behind the discharge (`conds.len == 0`, the `coRange`
+# gate, the routed type).
+
+proc mulAsgRange(x: range[0 .. 10]) =
+  var v: range[0 .. 10] = 3
+  v *= x
+  symexTarget("t")
+  discard v
+
+suite "K9e range: `*=` on a range local":
+  test "v *= x raises RangeDefect outside 0..10":
+    let r = pinFind(mulAsgRange, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+    check r.raisedTypeId == "RangeDefect"
 
 type R100 = range[1 .. 100]
 type RangeBox = ref object

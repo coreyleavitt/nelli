@@ -10,7 +10,12 @@
 ## suite (INT-56): `pragma_e`'s `twTemplate` relation wrapped the then-local
 ## `type/dynlib` and `type/nosinks` fragments (a type section in the routine)
 ## in a template. Each fragment alone only declined: a type section in a
-## routine is `feUnsupportedStmtKind`, which is unchanged.
+## routine was `feUnsupportedStmtKind`.
+##
+## RFC-0016 S8cp-r (PRC-34, walker 391) walks a type section in a routine
+## body as a no-op (the typed body reads its types through their symbols),
+## so the four shapes below now decide; each is pinned exact against the
+## native run over its whole `int8` domain.
 import std/[unittest, strutils, sequtils]
 import nelli
 import nelli/symex
@@ -78,21 +83,23 @@ proc i70TopSinks(a, b: int8) =
     if acc == 5: symexTarget("hit")
   w()
 
-proc typeSectionDeclines(r: SymexResult) =
+template typeSectionDecides(fn: untyped; a: int) =
+  let r = pinFind(fn, tLabel("hit"))
   checkpoint $r.status & " trusted=" & $r.trusted & " errors " & show(r.errors)
-  check not r.trusted
-  check r.errors.named(feUnsupportedStmtKind)
+  check r.status == sxSat
+  check r.trusted
+  check int(r.witness[0]) == a
   check not r.errors.anyIt(it.kind == weInternalWalkerFault)
 
-suite "INT-70: a type section in a routine's template compiles and declines":
+suite "INT-70: a type section in a routine's template compiles and decides":
   test "an object type, no pragma":
-    typeSectionDeclines(symexFind(i70Plain, tLabel("hit"), pinSettingsConst))
+    typeSectionDecides(i70Plain, 5)
   test "an object type with a custom pragma":
-    typeSectionDeclines(symexFind(i70Pragma, tLabel("hit"), pinSettingsConst))
+    typeSectionDecides(i70Pragma, 5)
   test "a proc type":
-    typeSectionDeclines(symexFind(i70ProcTy, tLabel("hit"), pinSettingsConst))
+    typeSectionDecides(i70ProcTy, 4)
   test "a generic object type":
-    typeSectionDeclines(symexFind(i70Generic, tLabel("hit"), pinSettingsConst))
+    typeSectionDecides(i70Generic, 5)
 
 suite "INT-70: the K8b fragments under a template are exact":
   let all = exhaustive(toSeq(low(int8) .. high(int8)))

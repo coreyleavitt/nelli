@@ -1471,7 +1471,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## `sequtils`' own audited loop-counter step is read through): 481->482.
     ## RFC-0016 int6-w2 (the opaque effect summary skips a type slot and
     ## declines on an untyped expression, so an opaque `toSeq(s.items)`
-    ## builds): 482->483.
+    ## builds; the audited loop-counter step admits `result`, so
+    ## `sequtils.count` is read through): 482->483.
     check symexWalkerVersion == "483"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

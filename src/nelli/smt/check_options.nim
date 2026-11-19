@@ -808,7 +808,8 @@ proc loopIncRegion(s, owner: NimNode): bool =
   ## RFC-0016 int6-t. Is the statement list `s`, in the typed body of the
   ## routine definition `owner`, exactly an audited loop-counter step: `{.push
   ## overflowChecks: off.}` (no other option), `inc` (`system.inc`, by its
-  ## magic) of a local variable by one, `{.pop.}`, whose push is a
+  ## magic) of a local variable or the routine's `result` by one, `{.pop.}`,
+  ## whose push is a
   ## `check_options.loopIncExemptions` template's as its own module expands it
   ## (`loopIncExempt`)? Its counter's loop bounds it (the allowlist's audit),
   ## so it neither overflows nor leaves its range: reading the routine as one
@@ -823,7 +824,10 @@ proc loopIncRegion(s, owner: NimNode): bool =
   let step = s[1]
   if step.kind notin {nnkCall, nnkCommand} or step.len notin 2 .. 3 or
      not magicIs(routineMagic(step[0]), "Inc"): return false
-  if step[1].kind != nnkSym or step[1].symKind != nskVar: return false
+  # RFC-0016 int6-w2: `result` is a local slot of the routine as a `var` is
+  # (`sequtils.count` steps it); a parameter, a global or a path is not.
+  if step[1].kind != nnkSym or step[1].symKind notin {nskVar, nskResult}:
+    return false
   if step.len == 3 and
      (step[2].kind notin {nnkIntLit .. nnkInt64Lit} or step[2].intVal != 1):
     return false

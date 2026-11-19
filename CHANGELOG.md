@@ -159,6 +159,12 @@ where that note does not yet cover it.
   no longer read (they run nothing), and an expression whose type the
   summary would read but which has none makes the call non-inert (the
   caller keeps the opaque call's taint), never a compile failure.
+- **`sequtils.count` under the opaque scan** (int6-w2; walker 483). The
+  audited loop-counter step's shape admitted a local `var` only, and `count`
+  steps `result`, a local slot of the routine as well: `result` starts at 0
+  and is stepped at most once per item, so it stays below `len(s)`. The
+  step is read through, and a callee reaching `count` has its verdict from
+  before int6-t again.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

@@ -1531,8 +1531,11 @@ const renderAsChoicesVersion* = "12"
   ##   body (`toSeq`'s `seq[typeof(iter)]`), which stopped the compile with
   ##   `node has no type`. An expression whose type it reads but which has
   ##   none (`dsl_parser.typeless`) makes the call non-inert; `mayWrite`
-  ##   reads such a stdlib argument as a pointer. Verdicts move (an opaque
-  ##   `toSeq(s.items)` builds). No key bytes change.
+  ##   reads such a stdlib argument as a pointer. The audited loop-counter
+  ##   step's shape admits the routine's `result` as well as a local `var`
+  ##   (`check_options.loopIncRegion`), so `sequtils.count` is read through.
+  ##   Verdicts move (an opaque `toSeq(s.items)` builds; a callee reaching
+  ##   `count` has its pre-int6-t verdict again). No key bytes change.
 
 const symexWalkerVersion* = "483"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

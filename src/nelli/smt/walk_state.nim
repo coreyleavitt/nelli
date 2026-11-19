@@ -201,89 +201,6 @@ var currentMaxSplitParts* {.threadvar.}: int
   ## kind used by the general symbolic split path — rather than emitting
   ## potentially thousands of Z3 store calls (compile-time DoS prevention).
 
-var convFloatToIntBoundConds* {.threadvar.}: seq[ConvBound]
-  ## Phase 15 CR-3/CR-4; RFC-0005 S8g. The in-range DOMAIN of each float ->
-  ## int conversion lowered by `lower(iekConvFloatToInt)` (the operand's
-  ## truncation fits the target type). The lowered value is
-  ## `ite(domain, exact, fresh)`; `drainConvFloatToIntFresh` (a stage of
-  ## `drainScalarRaiseForks`) forks the continuation on it -- clean in range,
-  ## `feConvFloatToIntUndefined`-tainted out of range. Until S8g the walker
-  ## NARROWED the path to the domain here and raised `RangeDefect` outside it
-  ## (ADR-0011 R16-2, reversed: Nim never raises there). Reset at each
-  ## `lower` call-site in the walker (before the call). Reset at
-  ## `runSymexImpl` entry.
-
-var rangeDefectConds* {.threadvar.}: seq[Z3Bool]
-  ## RFC-0005 S8g. Raise-fork sink for `RangeDefect` predicates deposited by
-  ## a lowering: a `range` target's check on a float -> int conversion
-  ## (`Natural(f)`), a negative slice length (`s[a .. b]` with `b < a - 1`),
-  ## and `del`'s `Natural` index. Drained by `drainRangeRaises` (a
-  ## `genRaiseForkDrain`, gated by `acRange`). The name was R16-2's parallel
-  ## float -> int domain sink, retired with that model; this is a plain
-  ## raise-predicate sink like `seqOobConds`. `syncRangeDefectCond` appends
-  ## here when in a walk.
-
-var divByZeroConds* {.threadvar.}: seq[Z3Bool]
-  ## Phase 16 R16-3. Raise-fork sink for div/mod-by-zero predicates.
-  ## `lowerArith` pushes `divisorIsZero(b)` here for every `bDiv`/`bMod`
-  ## op on svInt or BV operands. `drainDivByZeroRaises` (called via
-  ## `drainScalarRaiseForks`) reads and resets this sink, forking each
-  ## predicate as a `DivByZeroDefect` raise path. The surviving non-zero
-  ## continuation carries the negated predicates in its pc.
-  ## `syncDivByZeroCond` appends to `WalkCtx.divByZeroConds` when in a walk.
-  ## Reset alongside `convFloatToIntBoundConds`/`rangeDefectConds`
-  ## at every reset site.
-
-var overflowConds* {.threadvar.}: seq[Z3Bool]
-  ## Phase 16 R16-4. Raise-fork sink for signed integer overflow predicates.
-  ## `lowerArith` pushes overflow conditions here for bAdd/bSub/bMul ops on
-  ## signed BV operands (int, int8..int64). `drainOverflowRaises` (called via
-  ## `drainScalarRaiseForks`) reads and resets this sink, forking each predicate
-  ## as an `OverflowDefect` raise path. The surviving non-overflow continuation
-  ## carries the negated predicates in its pc.
-  ## `syncOverflowCond` appends to `WalkCtx.overflowConds` when in a walk.
-  ## svInt (unbounded Z3Int) is skipped — overflow is meaningless there AND BV
-  ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
-  ## Reset alongside `divByZeroConds` at every reset site.
-
-var strIndexOobConds* {.threadvar.}: seq[Z3Bool]
-  ## RFC-chapulin-hardening SND-4 (ADR-0024). Raise-fork sink for string-index
-  ## (`s[i]`) out-of-bounds predicates. `lowerStrArm`'s `iekStrAt` arm pushes
-  ## `(idx < 0) or (idx >= len(s))` here for every `s[i]` (char read) lowered.
-  ## `drainStrIndexRaises` (called via `drainScalarRaiseForks`) reads and
-  ## resets this sink, forking each predicate as a routed `IndexDefect` raise
-  ## path — parity with the seq/array/Table indexing arms, which already fork
-  ## `IndexDefect` unconditionally (Phase 16 D1a); `s[i]` was the sole
-  ## container-index site with zero bounds modeling (an OOB read silently
-  ## degraded to a fabricated byte value via Z3's `at`/`toCode` spec instead of
-  ## raising). The surviving in-bounds continuation carries the negated
-  ## predicates as `defectSurvivorPc` facts (ADR-0012), exactly like
-  ## `parseIntRaiseConds`/`divByZeroConds`/`overflowConds`.
-  ## `syncStrIndexOobCond` appends to `WalkCtx.strIndexOobConds` when in a walk.
-  ## Reset alongside `overflowConds` at every reset site.
-
-var regexRaiseMsgs* {.threadvar.}: seq[string]
-  ## RFC-0005 S8ay. `RegexError` raises of an expression: one message per
-  ## `re"..."` / `rex"..."` whose pattern PCRE rejects (Nim's exact
-  ## `RegexError.msg`, from `pcre_syntax`). The raise is unconditional --
-  ## `re` compiles the pattern each time the call runs -- so the sink holds
-  ## messages, not predicates. `drainRegexRaises` (the LAST stage of
-  ## `drainScalarRaiseForks`) routes the first as a `RegexError` raise and
-  ## ends the continuation. `syncRegexRaiseMsg` appends to
-  ## `WalkCtx.regexRaiseMsgs` when in a walk. Reset alongside
-  ## `arithTrapConds` at every reset site.
-
-var parseIntRaiseConds* {.threadvar.}: seq[ParseIntRaise]
-  ## Phase 15 S10b. Raise predicates emitted by the `iekStrToInt` (`parseInt`)
-  ## lowering — one `(not isNeg) and (posVal < 0)` clause per `parseInt` lowered
-  ## (the non-digit, non-`-`-prefixed case, where Nim's runtime RAISES
-  ## `ValueError`). `lower` cannot route a raise itself (no WalkCtx/Path), so the
-  ## predicate is surfaced here and DRAINED by the enclosing statement walk arm
-  ## (`drainParseIntRaises`), which forks a routed-`ValueError` raise sub-path and
-  ## a digits continuation. Reset before each lower-and-drain so predicates never
-  ## leak across paths/statements. Closes the S10a `seParseIntPreE` window — that
-  ## hint is no longer emitted.
-
 var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
   ## RFC-0005 S8bj. The definitions `r == rec(s)` of the `replace` values
   ## lowered by a recursive function (`runtime_strings.regexReplaceRec`),
@@ -372,8 +289,10 @@ type LowerSinks* = object
   ## caches. `WalkCtx.sinks` embeds one; `currentLowerSinks` points at it for
   ## the duration of the walk. Before this object these were fields of
   ## `WalkCtx` and `WalkerStatics`, written through a cast of
-  ## `currentWalkCtxPtr`; the threadvar of the same name (above) remains the
-  ## store for probe paths with no walk.
+  ## `currentWalkCtxPtr`. A cache field's threadvar of the same name (above)
+  ## remains the store for probe paths with no walk; the raise-predicate sinks
+  ## have no threadvar (RFC-0016 K9e): a deposit outside a walk is dropped,
+  ## and no drain runs there.
   refSorts*: Table[string, RawZ3Sort]
   nilConsts*: Table[string, Z3AnyAst]
   distinctSorts*: Table[string, DistinctSortEntry]
@@ -385,15 +304,105 @@ type LowerSinks* = object
   extractionErrors*: seq[SymexErrorInfo]
   closureCallErrors*: seq[SymexErrorInfo]
   rangeDefectConds*: seq[Z3Bool]
+    ## RFC-0005 S8g. Raise-fork sink for `RangeDefect` predicates deposited by
+    ## a lowering: a `range` target's check on a float -> int conversion
+    ## (`Natural(f)`), a negative slice length (`s[a .. b]` with `b < a - 1`),
+    ## and `del`'s `Natural` index. Drained by `drainRangeRaises` (a
+    ## `genRaiseForkDrain`, gated by `acRange`). The name was R16-2's parallel
+    ## float -> int domain sink, retired with that model; this is a plain
+    ## raise-predicate sink like `seqOobConds`.
   divByZeroConds*: seq[Z3Bool]
+    ## Phase 16 R16-3. Raise-fork sink for div/mod-by-zero predicates.
+    ## `lowerArith` pushes `divisorIsZero(b)` here for every `bDiv`/`bMod`
+    ## op on svInt or BV operands. `drainDivByZeroRaises` (called via
+    ## `drainScalarRaiseForks`) reads and resets this sink, forking each
+    ## predicate as a `DivByZeroDefect` raise path. The surviving non-zero
+    ## continuation carries the negated predicates in its pc.
   overflowConds*: seq[Z3Bool]
+    ## Phase 16 R16-4. Raise-fork sink for signed integer overflow predicates.
+    ## `lowerArith` pushes overflow conditions here for bAdd/bSub/bMul ops on
+    ## signed BV operands (int, int8..int64). `drainOverflowRaises` (called via
+    ## `drainScalarRaiseForks`) reads and resets this sink, forking each predicate
+    ## as an `OverflowDefect` raise path. The surviving non-overflow continuation
+    ## carries the negated predicates in its pc.
+    ## svInt (unbounded Z3Int) is skipped — overflow is meaningless there AND BV
+    ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
   strIndexOobConds*: seq[Z3Bool]
+    ## RFC-chapulin-hardening SND-4 (ADR-0024). Raise-fork sink for string-index
+    ## (`s[i]`) out-of-bounds predicates. `lowerStrArm`'s `iekStrAt` arm pushes
+    ## `(idx < 0) or (idx >= len(s))` here for every `s[i]` (char read) lowered.
+    ## `drainStrIndexRaises` (called via `drainScalarRaiseForks`) reads and
+    ## resets this sink, forking each predicate as a routed `IndexDefect` raise
+    ## path — parity with the seq/array/Table indexing arms, which already fork
+    ## `IndexDefect` unconditionally (Phase 16 D1a); `s[i]` was the sole
+    ## container-index site with zero bounds modeling (an OOB read silently
+    ## degraded to a fabricated byte value via Z3's `at`/`toCode` spec instead of
+    ## raising). The surviving in-bounds continuation carries the negated
+    ## predicates as `defectSurvivorPc` facts (ADR-0012), exactly like
+    ## `parseIntRaiseConds`/`divByZeroConds`/`overflowConds`.
   seqOobConds*: seq[Z3Bool]
+    ## N14 (RFC-chapulin-hardening bucket-2). Raise-fork sink for seq `del(i)`
+    ## out-of-bounds predicates. `lower`'s `iekSeqDel` arm pushes
+    ## `(idx < 0) or (idx >= len(s))` here — mirrors `strIndexOobConds` exactly
+    ## (same sink -> drain-fork pattern, same reason: `del`'s OOB check needs a
+    ## `forkDefect` call, which only exists at WALK time, but `iekSeqDel` is
+    ## reached from inside the exception-free `lower()` evaluator via a plain
+    ## `isAssign` — `mySeq.del(i)` A-normalises to
+    ## `mkAssign(recvName, mkSeqDel(mkVar(recvName), idx))`, not its own
+    ## dedicated statement kind, unlike `xs[i] = v`'s `isIndexAssign`). `pop()`
+    ## needed a dedicated statement (`isSeqPop`) instead because it ALSO binds
+    ## a fresh return value — `del`'s single-target env rebind fits the
+    ## existing `isAssign` shape exactly, so the lighter sink route applies.
+    ## `drainSeqOobRaises` (via `drainScalarRaiseForks`) reads and resets this
+    ## sink, forking each predicate as a routed `IndexDefect` raise path.
   uninitReadConds*: seq[Z3Bool]
+    ## RFC-0005 S8bv (item 4). The conditions under which an inline `map` /
+    ## `filter` / `fold` read an unwritten `newSeqUninit` element (`hofElemAt`,
+    ## one per element read that may be unwritten). `lower` has no path to
+    ## fork, so they wait here; `drainUninitReads` (a stage of
+    ## `drainScalarRaiseForks`) forks the continuation: clean where no read was
+    ## unwritten, tainted `uninitReadKind` where one was. Before S8bv such a
+    ## read tainted the whole path in-band.
   convFloatToIntBoundConds*: seq[ConvBound]
+    ## Phase 15 CR-3/CR-4; RFC-0005 S8g. The in-range DOMAIN of each float ->
+    ## int conversion lowered by `lower(iekConvFloatToInt)` (the operand's
+    ## truncation fits the target type). The lowered value is
+    ## `ite(domain, exact, fresh)`; `drainConvFloatToIntFresh` (a stage of
+    ## `drainScalarRaiseForks`) forks the continuation on it -- clean in range,
+    ## `feConvFloatToIntUndefined`-tainted out of range. Until S8g the walker
+    ## NARROWED the path to the domain here and raised `RangeDefect` outside it
+    ## (ADR-0011 R16-2, reversed: Nim never raises there). Reset at each
+    ## `lower` call-site in the walker (before the call).
   parseIntRaiseConds*: seq[ParseIntRaise]
+    ## Phase 15 S10b. Raise predicates emitted by the `iekStrToInt` (`parseInt`)
+    ## lowering — one `(not isNeg) and (posVal < 0)` clause per `parseInt` lowered
+    ## (the non-digit, non-`-`-prefixed case, where Nim's runtime RAISES
+    ## `ValueError`). `lower` cannot route a raise itself (no WalkCtx/Path), so the
+    ## predicate is surfaced here and DRAINED by the enclosing statement walk arm
+    ## (`drainParseIntRaises`), which forks a routed-`ValueError` raise sub-path and
+    ## a digits continuation. Reset before each lower-and-drain so predicates never
+    ## leak across paths/statements. Closes the S10a `seParseIntPreE` window — that
+    ## hint is no longer emitted.
   regexRaiseMsgs*: seq[string]
+    ## RFC-0005 S8ay. `RegexError` raises of an expression: one message per
+    ## `re"..."` / `rex"..."` whose pattern PCRE rejects (Nim's exact
+    ## `RegexError.msg`, from `pcre_syntax`). The raise is unconditional --
+    ## `re` compiles the pattern each time the call runs -- so the sink holds
+    ## messages, not predicates. `drainRegexRaises` (the LAST stage of
+    ## `drainScalarRaiseForks`) routes the first as a `RegexError` raise and
+    ## ends the continuation.
   arithTrapConds*: seq[ArithTrap]
+    ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
+    ## generated C rather than raising: signed `mod` of `low(T)` by `-1` at 32
+    ## and 64 bits (and `div` there, which traps when overflow checks are
+    ## off), compiled to a hardware `idiv` that raises SIGFPE -- an uncatchable
+    ## process abort (`except Defect` does not see it; probed on the pinned
+    ## toolchain, c and cpp). `lowerArith` pushes each trap predicate here;
+    ## `drainArithTraps` (via `drainScalarRaiseForks`) adds its negation to the
+    ## continuation's defect-survivor facts and forks NO raise: no execution
+    ## continues past the trap, and there is no exception to route. Before S8i
+    ## the continuation carried `low(T) mod -1 == 0`, a state Nim never
+    ## reaches.
   raiseOrder*: seq[RaiseSinkKind]
     ## RFC-0005 S8bb. The evaluation-order log of the raise sinks above: every
     ## deposit appends the sink it went to, so `drainScalarRaiseForks` forks
@@ -620,8 +629,7 @@ type LowerHooks* = object
     ## under every profile.
     ## A string element access outside its bounds (RFC-0016 PRC-07): the
     ## checked build's `IndexDefect` sink or the undefined-access deposit. It
-    ## reads the build's check options and `arithTrapConds`, which
-    ## `runtime.nim` owns.
+    ## reads the build's check options, which `runtime.nim` owns.
 
 var lowerHooks*: LowerHooks
   ## Written once at `runtime.nim` module init; read-only afterwards.
@@ -642,13 +650,6 @@ proc resetWalkState*(maxSplitParts: int) =
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()
   currentClosureBodies = initTable[
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
-  convFloatToIntBoundConds = @[]
-  rangeDefectConds = @[]
-  divByZeroConds = @[]
-  overflowConds = @[]
-  strIndexOobConds = @[]
-  regexRaiseMsgs = @[]
-  parseIntRaiseConds = @[]
   regexRecDefConds = @[]
   regexRecFactConds = @[]
   regexPointSites = @[]
@@ -669,9 +670,7 @@ import ../thread_state
 proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
   releaseToDefault(currentWalkCtxPtr, currentRefSorts, currentNilConsts,
     currentDistinctSorts, currentClosureSyms, currentClosureBodies,
-    currentMaxSplitParts, convFloatToIntBoundConds, rangeDefectConds,
-    divByZeroConds, overflowConds, strIndexOobConds, regexRaiseMsgs,
-    parseIntRaiseConds, regexRecDefConds, regexRecFactConds, regexPointSites,
+    currentMaxSplitParts, regexRecDefConds, regexRecFactConds, regexPointSites,
     regexLimitSites, stripDecompConds, stripSynthCounter,
     currentInFlightTypeId, currentInFlightMsg, currentExnRefCounter,
     lastGetCurrentExnRef, currentLowerSinks, degradeSymCounter)

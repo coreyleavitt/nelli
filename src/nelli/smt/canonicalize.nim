@@ -1326,15 +1326,31 @@ const renderAsChoicesVersion* = "12"
   ##   read back through the other is ground bit-vector terms, not an array
   ##   alias under `int2bv(bv2int(..))` (a padded object's store-then-read
   ##   was 143-198 s and `sxUnknown`). No key bytes change.
-  ## - RFC-0016 int6 R2-08 (456->458; 457 is reserved on another branch): a
+  ## - RFC-0016 K9e (456->457): a scan closed form's `range` counter write
+  ##   is checked as the loop's own step is (`scanCounterStore`,
+  ##   dsl_parser.nim): `inc i` past the range raises `OverflowDefect` (a
+  ##   signed base under overflow checks), `i = i + 1` raises `RangeDefect`
+  ##   (under range checks), and unchecked the side declines. The `inc`
+  ##   spelling was a trusted `sxRaised` `RangeDefect` Nim never raises,
+  ##   and a false `sxUnsat` for its `OverflowDefect`. And a store into a
+  ##   range target is checked by its RHS conversion alone
+  ##   (`lowerConvIntRange`): `*=` on a range local is the product converted
+  ##   into the range, a `char` converted into a `char` range takes the
+  ##   conversion arm, and the walker's site check (`forkAssignRangeCheck`,
+  ##   `isAssign.aty`) is deleted, so every assignment's key loses `;aty=`.
+  ## - RFC-0016 int6 R2-08 (457->458): a
   ##   heap write through a ref drains the taint its cell and prototype
   ##   allocations queue (a pointee type the allocator declines: a `Table`
   ##   with an unsupported key, an ownership wrapper) onto its own path
   ##   before the RHS is lowered. The INT-37 entry check stopped such a walk
   ##   with `weInternalWalkerFault`; the decline's own kind is now reported
   ##   on its path. No key bytes change.
+  ## - RFC-0016 int6 integration (458->459): the K9e scan-counter and range
+  ##   conversion change (457) and R2-08's heap write taint drain (458) were
+  ##   written on separate branches, each from 456; their merge is one tip
+  ##   above both. No key bytes change.
 
-const symexWalkerVersion* = "458"
+const symexWalkerVersion* = "459"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -7481,15 +7497,10 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Lt:$" & $slot & ":" & canonicalize(s.lty) & "=" &
       canonicalize(s.lvalue, env) & ">"
   of isAssign:
-    # #163 review R27: `aty` (the target's declared range type, resolved by
-    # true symbol identity at parse time, replacing R22's unscoped
-    # name-keyed WalkCtx table) is now part of the statement's semantic
-    # identity -- two programs differing only in whether the walker treats
-    # this assignment as range-checked must not collide on one cache key.
-    # `canonicalize(IRType)` is already nil-safe ("Ty<nil>" for the common
-    # untracked case), mirroring `isCall`'s own `;opaque=`/`;inert=` idiom.
+    # RFC-0016 K9e: no `;aty=` -- a range target's check is the value's own
+    # conversion, rendered with it.
     "St<As:" & lookupLocal(env, s.aname) & "=" &
-      canonicalize(s.avalue, env) & ";aty=" & canonicalize(s.aty) & ">"
+      canonicalize(s.avalue, env) & ">"
   of isWhile:
     "St<W:" & canonicalize(s.wcond, env) & ";body=" &
       canonicalize(s.wbody, env) & ">"

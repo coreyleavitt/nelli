@@ -2078,6 +2078,10 @@ task test, "Run the test suite":
             # RFC-0016 K9e: kill pins for the bounds / wrap / compare / arithmetic-lowering mutants (checks-on half, and the -fwrapv unchecked half).
             "tsymex_0016_k9e_kill_cmp",
             "tsymex_0016_k9e_kill_cmp_fwrapv",
+            # RFC-0016 K9e: pins for the overflow / range / conversion survivors (int8 sub/mul, range conversions, range assignment, unary minus).
+            "tsymex_0016_k9e_kill_ovf",
+            # RFC-0016 K9e: the signed-overflow trap of an overflow-checks-off build.
+            "tsymex_0016_k9e_kill_ovf_checksoff",
             # RFC-0016 INT-72: a free Rune ranges over int32; $r, toUTF8, size and Rune(n) follow std/unicode out of range; decoded runes are the decoder's.
             "tsymex_0016_int72_runedomain",
             # RFC-0016 INT-77: a float range is the closed IEEE interval in its width, NaN excluded.

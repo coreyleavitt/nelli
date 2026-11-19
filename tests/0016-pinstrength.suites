@@ -34,3 +34,7 @@ tsymex_0016_k9e_kill_div
 tsymex_0016_k9e_kill_cmp
 # K9e kill pins, -fwrapv build: signed wrap and 8-bit div wrap of an Int-sorted value
 tsymex_0016_k9e_kill_cmp_fwrapv
+# K9e survivors, overflow / range / conversion cluster: int8 sub/mul, range conversions and assignment, unary minus
+tsymex_0016_k9e_kill_ovf
+# K9e survivors: the signed-overflow trap of a checks-off build
+tsymex_0016_k9e_kill_ovf_checksoff

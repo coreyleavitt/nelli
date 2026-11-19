@@ -1510,33 +1510,6 @@ type
     of isAssign:
       aname*: string
       avalue*: IRExpr
-      aty*: IRType
-        ## #163 review R27 (fixes R22's own regression). `isAssign` used to
-        ## carry no declared type for its target at all -- R22 patched
-        ## around that with a WalkCtx-wide `Table[string, IRType]` keyed by
-        ## the BARE printed name, populated/cleared by `isLet` with no
-        ## scope check. That table collided both ways a shadowed/inlined
-        ## name can collide (see dsl_parser.nim's N28 fix for the identical
-        ## class of bug in a different collector): a sibling branch's
-        ## same-named local silently deleted a live entry, and an inlined
-        ## callee's local left a stale entry for the caller's own unrelated
-        ## variable to inherit after `popFrame` (which restores only
-        ## `w.frame`).
-        ##
-        ## The real fix: `isAssign`'s target identity IS a Nim symbol at
-        ## PARSE TIME (the LHS of `n[0] = n[1]` is an `nnkSym`, not a bare
-        ## name) -- so ask the compiler what THAT symbol's declared type is
-        ## (`classifyType`, which resolves via `getTypeInst` against true
-        ## symbol identity, never a name table) and attach it directly to
-        ## this statement. No table, no scope-tracking, no collision
-        ## surface: nil when the target has no declared range (the common
-        ## case, or a non-`itInt` receiver), else the `itInt` type with its
-        ## `hasRange`/`rangeLo`/`rangeHi` populated. Set at every call site
-        ## that constructs a scalar-target `isAssign` from a real `nnkSym`
-        ## LHS (plain assignment, `inc`/`dec`, and `+=`/`-=`/`*=`); every
-        ## other `mkAssign` call site (seq/table/string receiver rebinds,
-        ## synthesized loop counters, ...) passes the default `nil`, which
-        ## is exactly the "no range check" behavior those sites always had.
     of isWhile:
       wcond*: IRExpr
       wbody*: IRStmt
@@ -2781,9 +2754,8 @@ proc carriesRangeCheck*(e: IRExpr, ty: IRType): bool =
   ## outside those bounds. Nim inserts exactly this conversion on the RHS of
   ## `q = x`, `p.f = x` and `s[i] = x` into a range-typed target, and checks
   ## once (probed: `q = 11` with `q: range[0..10]` raises one `RangeDefect`).
-  ## The assignment sites' own check (`forkAssignRangeCheck`, #163 R22) is
-  ## skipped for it, at parse time for a plain assignment (`isAssign.aty`
-  ## stays nil) and at walk time for a field or seq element write.
+  ## A value-field write takes it as its check (`parseAsgn`), and declines
+  ## a range field's RHS without one.
   e != nil and e.kind == iekConvIntWidth and e.ciwHasRange and
     ty != nil and ty.kind == itInt and ty.hasRange and
     e.ciwLo >= ty.rangeLo and e.ciwHi <= ty.rangeHi
@@ -3116,11 +3088,10 @@ proc mkSetIncl*(recv, elem: IRExpr): IRExpr =
 proc mkSetExcl*(recv, elem: IRExpr): IRExpr =
   IRExpr(kind: iekSetExcl, mutRecv: recv, mutArg: elem)
 
-proc mkAssign*(name: string, value: IRExpr, aty: IRType = nil): IRStmt =
-  ## #163 review R27: `aty` is the target's declared range-relevant type
-  ## when the call site could resolve one by true symbol identity, nil
-  ## otherwise (default) -- see `IRStmt.isAssign.aty`'s own doc comment.
-  IRStmt(kind: isAssign, aname: name, avalue: value, aty: aty)
+proc mkAssign*(name: string, value: IRExpr): IRStmt =
+  ## A range target's check is `value`'s own range conversion (RFC-0016
+  ## K9e: the assignment carries no target type).
+  IRStmt(kind: isAssign, aname: name, avalue: value)
 
 proc mkWhile*(cond: IRExpr, body: IRStmt, hasAssumedBound = false): IRStmt =
   IRStmt(kind: isWhile, wcond: cond, wbody: body,

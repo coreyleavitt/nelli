@@ -659,10 +659,7 @@ proc noCopyMemExpr(t: IRType): NimNode =
   newCall(nnkBracketExpr.newTree(bindSym"symexNoCopyMem", sym))
 
 proc emitIRType*(t: IRType): NimNode =
-  # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
-  # target has no declared range, or isn't `itInt` at all) -- mirror
-  # `emitStmt`'s own `s == nil` guard so a nil `aty` round-trips as `nil`
-  # instead of crashing on `t.kind` here.
+  # A nil type round-trips as `nil`, as `emitStmt`'s `s == nil` guard does.
   if t == nil:
     return newNilLit()
   case t.kind
@@ -965,8 +962,7 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue),
             newLit(s.lIsIntOffsetLocal))
   of isAssign:
-    newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue),
-            emitIRType(s.aty))
+    newCall(bindSym"mkAssign", newLit(s.aname), emitExpr(s.avalue))
   of isWhile:
     newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody),
             newLit(s.wHasAssumedBound))
@@ -7397,6 +7393,24 @@ type OrdStepCheck = enum
   oscBounds       ## the bounds `lo .. hi`
   oscUnknown      ## a type the walk does not read bounds from
 
+proc rangeBaseUnsigned(x: NimNode): bool =
+  ## RFC-0016 K9e. Whether `x` is a `range` over an unsigned base
+  ## (`range[0'u8 .. 3'u8]`). `inc` / `dec` / `+=` / `-=` on such a receiver
+  ## is a plain C `+=` whatever the overflow check: Nim's C code generator
+  ## (`ccgexprs`, the `mInc` / `mDec` arm) skips its check for an underlying
+  ## `tyUInt .. tyUInt64`, and the value leaves the range with no raise. A
+  ## `char` or enum range is checked (its underlying is neither).
+  var tn = x
+  while tn.typeKind == ntyVar:
+    let inst = tn.getTypeInst
+    if inst.kind notin {nnkVarTy, nnkCommand} or inst.len < 1: return false
+    tn = inst[^1]
+  if tn.typeKind != ntyRange: return false
+  let impl = tn.getTypeImpl
+  impl.kind == nnkBracketExpr and impl.len == 2 and
+    impl[1].kind == nnkInfix and impl[1].len == 3 and
+    impl[1][1].typeKind in {ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32, ntyUInt64}
+
 proc ordStepBounds(x: NimNode; ownRange: bool; lo, hi: var int64): OrdStepCheck =
   ## RFC-0005 review R1-02. The bounds Nim checks a step of `x` against,
   ## raising `OverflowDefect` (not `RangeDefect`) outside them, as probed:
@@ -7406,7 +7420,9 @@ proc ordStepBounds(x: NimNode; ownRange: bool; lo, hi: var int64): OrdStepCheck 
   ##     so `succ` of 3 in `range[0..3]` is 4, and a subrange of an enum is
   ##     checked against the whole enum; under `inc` / `dec` (`ownRange`) the
   ##     range itself, so `inc` of 3 in a `range[0..3]` variable raises;
-  ##   * an integer type: none beyond the arithmetic's own overflow check.
+  ##   * an integer type: none beyond the arithmetic's own overflow check;
+  ##   * a `range` over an unsigned base under `inc` / `dec`: none at all
+  ##     (`oscUnknown`, so the caller declines).
   # `var` (and `lent`, which Nim types as `var`) wraps the value's type
   # without changing its ordinal semantics (a `var int` parameter is an
   # `int`): read the kind off the underlying type. `classifyType(x)` already
@@ -7438,6 +7454,10 @@ proc ordStepBounds(x: NimNode; ownRange: bool; lo, hi: var int64): OrdStepCheck 
        impl[1].kind != nnkInfix or impl[1].len != 3:
       return oscUnknown
     if not ownRange: return ordStepBounds(impl[1][1], false, lo, hi)
+    # RFC-0016 K9e: over an unsigned base the step is unchecked (probed:
+    # `inc` of 10 in a `range[0'u8 .. 10'u8]` raises nothing), and the
+    # out-of-range value is not modelled.
+    if rangeBaseUnsigned(x): return oscUnknown
     # The classified range's bounds (a `Natural`'s `high(int)` included).
     let t = classifyType(x).ty
     if t.kind != itInt or not t.hasRange: return oscUnknown
@@ -13697,7 +13717,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
          (n.typeKind in {ntyRange, ntyEnum} or isRuneTyped(n)) and
          operand.typeKind in {ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
                               ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32,
-                              ntyUInt64, ntyRange, ntyEnum} and
+                              ntyUInt64, ntyRange, ntyEnum, ntyChar} and
          classifyType(n).ty.kind == itInt and classifyType(n).range.hasRange and
          classifyType(operand).ty.kind == itInt:
       # RFC-0005 S8i: an integer converted to a `range` or enum target
@@ -17091,6 +17111,49 @@ proc counterAdvancesByOne(stmt, iNode: NimNode): bool =
            rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
   false
 
+proc scanCounterStore(loop, iNode: NimNode; value: IRExpr;
+                      overrun: seq[IRStmt]; ctx: ParseCtx): IRStmt =
+  ## RFC-0016 K9e. A scan closed form's write of its counter `i := value`,
+  ## `value` the loop's last counter value (the delimiter's index, or the
+  ## bound). The loop reaches it one step at a time from a value in `i`'s
+  ## type, so for a `range[lo..hi]` counter it took the step from `hi` iff
+  ## `value > hi`, and that step is checked as the loop's own advance is:
+  ##   * `inc i`: the `Inc` magic, `OverflowDefect` (RFC-0005 review R1-02),
+  ##     checked only for a signed base under overflow checks;
+  ##   * `i = i + 1`: an `int` sum converted into the range, `RangeDefect`,
+  ##     checked only under range checks.
+  ## Unchecked, the counter leaves its range and the loop runs on, which is
+  ## not modelled: that side declines, as `checkedOrdinalStep`'s does.
+  ## `overrun` runs first on the raising side: the state the loop body left
+  ## when the step from `hi` raised (the accumulating idiom's `acc`). The
+  ## surviving write needs no check of its own: the guard holds `value`
+  ## inside the range.
+  let name = iNode.strVal
+  let ty = classifyType(iNode).ty
+  if ty.kind != itInt or not ty.hasRange: return mkAssign(name, value)
+  let body = loop[1]
+  let step = if body.kind == nnkStmtList and body.len > 0: body[^1] else: body
+  let viaInc = step.kind in {nnkCall, nnkCommand}
+  let raised =
+    if viaInc:
+      if ctx.overflowChecked and not rangeBaseUnsigned(iNode):
+        mkRaise("OverflowDefect", nil)
+      else:
+        ctx.declineMarker(feUnsupportedOp,
+          "a scan counter's `inc` past its range's high bound, unchecked " &
+          "(overflow checks off, or an unsigned base): the out-of-range " &
+          "value is not modelled")
+    elif ctx.checkedHere(coRange):
+      mkRaise("RangeDefect", nil)
+    else:
+      ctx.declineMarker(feUnsupportedOp,
+        "a scan counter's `i = i + 1` past its range's high bound with " &
+        "range checks off: the out-of-range value is not modelled")
+  mkBlock(@[
+    mkIf(@[mkBranch(mkBinop(bGt, value, mkIntLit(ty.rangeHi)),
+                    mkBlock(overrun & @[raised]))]),
+    mkAssign(name, value)])
+
 type ScanShapeMatch = tuple[iNode, boundNode, sNode, litNode: NimNode]
 
 proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
@@ -17289,16 +17352,8 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
   let sIR = parseExpr(sNode, preamble, ctx)
   let iIR = parseExpr(iNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
-  # #163 review R28: this closed form calls `mkAssign` directly for `<i>`'s
-  # counter write, bypassing the normal assignment dispatch that resolves
-  # `IRStmt.isAssign.aty` (R27) -- so a `range[lo..hi]`-typed counter's
-  # RangeDefect fork (`forkAssignRangeCheck`) never ran here. Resolve `aty`
-  # the same way R27's three normal-dispatch sites do: `classifyType` on
-  # `iNode`'s true symbol, non-nil only when it is a ranged `itInt`.
-  let scanCounterCls = classifyType(iNode)
-  let scanCounterTy = if scanCounterCls.ty.kind == itInt and scanCounterCls.ty.hasRange:
-                        scanCounterCls.ty
-                      else: nil
+  # #163 review R28 / RFC-0016 K9e: a `range[lo..hi]`-typed counter's write
+  # is checked as the loop's own step is (`scanCounterStore`).
   # B0 (v70): the ENTIRE closed form is guarded by loop entry (`i < bound`).
   # A zero-iteration loop (entry index already at/past the bound) leaves
   # `i` UNTOUCHED in real Nim — the pre-v70 unguarded clamp overwrote it
@@ -17326,8 +17381,9 @@ proc tryRecognizeScanIdiom(n: NimNode, preamble: var seq[IRStmt],
                        mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
                  mkLet(p, tInt(64), findIR),
                  mkIf(
-                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR, scanCounterTy))],
-                   mkAssign(iNode.strVal, mkVar(p), scanCounterTy))]))],
+                   @[mkBranch(noMatchCond,
+                              scanCounterStore(n, iNode, boundIR, @[], ctx))],
+                   scanCounterStore(n, iNode, mkVar(p), @[], ctx))]))],
     nil))
 
 type ScanPairShapeMatch = tuple[iNode, boundNode, sNode, litNode, retNode: NimNode]
@@ -17491,15 +17547,8 @@ proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
   let sIR = parseExpr(sNode, preamble, ctx)
   let iIR = parseExpr(iNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
-  # #163 review R28: same gap as `tryRecognizeScanIdiom` above -- resolve
-  # `aty` by true symbol identity, same as R27's three normal-dispatch
-  # sites, so this closed form's direct `mkAssign` calls carry the
-  # counter's declared range type instead of defaulting to `nil`.
-  let scanPairCounterCls = classifyType(iNode)
-  let scanPairCounterTy = if scanPairCounterCls.ty.kind == itInt and
-                              scanPairCounterCls.ty.hasRange:
-                             scanPairCounterCls.ty
-                           else: nil
+  # #163 review R28 / RFC-0016 K9e: the counter's write is checked as the
+  # loop's own step is (`scanCounterStore`).
   let probeName = freshSynth(ctx, "scanPairEntryRead")
   let litChar = litCharOpt.get
   let litIR = mkStrLit($litChar)
@@ -17509,7 +17558,7 @@ proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
     mkBinop(bEq, mkVar(p), mkIntLit(-1)),
     mkBinop(bGe, mkVar(p), boundIR))
   let foundBody = mkBlock(@[
-    mkAssign(iNode.strVal, mkVar(p), scanPairCounterTy),
+    scanCounterStore(n, iNode, mkVar(p), @[], ctx),
     parseStmt(retNode, ctx)])
   some(mkIf(
     @[mkBranch(mkBinop(bLt, iIR, boundIR),
@@ -17518,7 +17567,8 @@ proc tryRecognizeScanPairIdiom(n: NimNode, preamble: var seq[IRStmt],
                        mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
                  mkLet(p, tInt(64), findIR),
                  mkIf(
-                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR, scanPairCounterTy))],
+                   @[mkBranch(noMatchCond,
+                              scanCounterStore(n, iNode, boundIR, @[], ctx))],
                    foundBody)]))],
     nil))
 
@@ -17720,16 +17770,20 @@ proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
   let iIR = parseExpr(iNode, preamble, ctx)
   let accIR = parseExpr(accNode, preamble, ctx)
   let boundIR = parseExpr(boundNode, preamble, ctx)
-  # #163 review R28: same gap as the other two scan recognizers -- resolve
-  # `aty` by true symbol identity, same as R27's three normal-dispatch
-  # sites. Only the COUNTER (`iNode`) can be ranged here; the accumulator
-  # (`accNode`) is gated `itString` a few lines above, so it never carries
-  # a range type and never needs an `aty`.
-  let accScanCounterCls = classifyType(iNode)
-  let accScanCounterTy = if accScanCounterCls.ty.kind == itInt and
-                             accScanCounterCls.ty.hasRange:
-                            accScanCounterCls.ty
-                          else: nil
+  # #163 review R28 / RFC-0016 K9e: the counter's write is checked as the
+  # loop's own step is (`scanCounterStore`). Only the COUNTER can be ranged;
+  # the accumulator is gated `itString` above. A step past the range raises
+  # after the body appended `s[hi]`: on that side `acc` holds the entry
+  # value and the bytes `i .. hi` (`accEntry`, bound before the found
+  # branch appends to it).
+  let accEntry = freshSynth(ctx, "accScanEntry")
+  let counterTy = classifyType(iNode).ty
+  let overrun =
+    if counterTy.kind == itInt and counterTy.hasRange:
+      @[mkAssign(accNode.strVal, mkStrOp(iekStrConcat, "&",
+          @[mkVar(accEntry), mkStrOp(iekStrSubstr, "[]",
+                                     @[sIR, iIR, mkIntLit(counterTy.rangeHi)])]))]
+    else: @[]
   let probeName = freshSynth(ctx, "accScanEntryRead")
   let litChar = litCharOpt.get
   let litIR = mkStrLit($litChar)
@@ -17743,18 +17797,16 @@ proc tryRecognizeAccumulatingScan(n: NimNode, preamble: var seq[IRStmt],
                       @[sIR, iIR, mkBinop(bSub, mkVar(p), mkIntLit(1))])])
   let foundBody = mkBlock(@[
     mkAssign(accNode.strVal, payloadIR),
-    mkAssign(iNode.strVal, mkVar(p), accScanCounterTy),
+    scanCounterStore(n, iNode, mkVar(p), overrun, ctx),
     parseStmt(retNode, ctx)])
-  some(mkIf(
-    @[mkBranch(mkBinop(bLt, iIR, boundIR),
-               mkBlock(@[
-                 mkLet(probeName, tInt(8),
-                       mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
-                 mkLet(p, tInt(64), findIR),
-                 mkIf(
-                   @[mkBranch(noMatchCond, mkAssign(iNode.strVal, boundIR, accScanCounterTy))],
-                   foundBody)]))],
-    nil))
+  var guarded = @[mkLet(probeName, tInt(8),
+                         mkStrOp(iekStrAt, "[]", @[sIR, iIR])),
+                   mkLet(p, tInt(64), findIR)]
+  if overrun.len > 0: guarded.add mkLet(accEntry, tString(), accIR)
+  guarded.add mkIf(
+    @[mkBranch(noMatchCond, scanCounterStore(n, iNode, boundIR, overrun, ctx))],
+    foundBody)
+  some(mkIf(@[mkBranch(mkBinop(bLt, iIR, boundIR), mkBlock(guarded))], nil))
 
 proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
                          body: IRStmt, ctx: ParseCtx): IRStmt  ## Round-6 B6
@@ -22945,22 +22997,10 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
       let classified = classifyType(lhs)
       if classified.ty.kind in {itRef, itPtr}:
         return mkNewT(nm, classified.ty)
-    let val = asgnRhs()
-    # #163 review R27: resolve the target's declared range type by TRUE
-    # SYMBOL IDENTITY (`classifyType(lhs)`, `lhs` being the real `nnkSym`
-    # this assignment targets — not its printed name) so the walker's
-    # RangeDefect fork (`forkAssignRangeCheck`) can find it without the
-    # unscoped, name-keyed `WalkCtx` table R22 used to route through.
-    # RFC-0005 S8j: nil too when `val` is itself the range-checked
-    # conversion into the target's bounds (S8i: the hidden conversion Nim
-    # puts on `q = x`, or an explicit `q = R(x)`) -- one check, as Nim
-    # makes, not the conversion's and then this site's.
-    let assignCls = classifyType(lhs)
-    let assignTy = if assignCls.ty.kind == itInt and assignCls.ty.hasRange and
-                      not carriesRangeCheck(val, assignCls.ty):
-                     assignCls.ty
-                   else: nil
-    return mkAssign(nm, val, assignTy)
+    # A range target's check is the conversion Nim puts on the RHS (S8i:
+    # the hidden one on `q = x`, or an explicit `q = R(x)`), lowered with
+    # it. An RHS of the target's own type has none and Nim checks nothing.
+    return mkAssign(nm, asgnRhs())
   # Phase 11 cycle 6: `obj.kind = tagLiteral` — discriminator
   # reassignment. Requires (a) the object to be a Sym in env,
   # (b) the field to be the variant's discriminator name, and
@@ -24607,19 +24647,7 @@ proc parseStmtInner(n: NimNode,
       let nm = recv.strVal
       let stepIR = if n.len >= 3: parseExpr(n[2], preamble, ctx) else: mkIntLit(1)
       let bop = if n[0].strVal == "inc": bAdd else: bSub
-      # #163 review R27: `inc`/`dec` on a ranged receiver raises RangeDefect
-      # in real Nim exactly like a plain assignment — resolve by true
-      # symbol identity, same as the plain-assign arm above.
       let incCls = classifyType(recv)
-      # #163 review (rev item 3, R30): match the five sibling `aty` sites'
-      # gate (plain-assign, aug-assign, and the three scan-recognizer sites)
-      # by also checking `.kind == itInt` rather than `hasRange` alone — a
-      # `hasRange` type always classifies `itInt` at THIS site today (the
-      # `inc`/`dec` receiver gate above already requires `itInt`), so this is
-      # a consistency fix, not a behavior change: one way this check is done.
-      let incTy = if incCls.ty.kind == itInt and incCls.ty.hasRange:
-                    incCls.ty
-                  else: nil
       # RFC-0005 review R1-02: an enum, a `char` or a `range` receiver is
       # checked against its own type's bounds, `OverflowDefect` outside them
       # (probed: `inc` of 3 in a `range[0..3]` variable raises
@@ -24627,12 +24655,12 @@ proc parseStmtInner(n: NimNode,
       var lo, hi: int64
       case ordStepBounds(recv, ownRange = true, lo, hi)
       of oscIntFamily:
-        return mkAssign(nm, siteBinop(bop, mkVar(nm), stepIR, n), incTy)
+        return mkAssign(nm, siteBinop(bop, mkVar(nm), stepIR, n))
       of oscBounds:
         let stepTy = if n.len >= 3: classifyType(n[2]).ty else: nil
         let checked = checkedOrdinalStep(mkVar(nm), incCls.ty, stepIR,
           stepTy, bop == bAdd, lo, hi, preamble, ctx)
-        if checked != nil: return mkAssign(nm, checked, incTy)
+        if checked != nil: return mkAssign(nm, checked)
       of oscUnknown: discard
       ctx.declineAtSite(feUnsupportedOp,
         siteMsg(n, "`" & n[0].strVal & "` on `" & recv.repr &
@@ -25191,9 +25219,6 @@ proc parseStmtInner(n: NimNode,
               &"sxUnknown (sound, Invariant 3)")
         let bop      = binopForInfix(baseOpStr)
         let rhsIR    = parseExpr(n[2], preamble, ctx)
-        # #163 review R27: `+=`/`-=`/`*=` on a ranged receiver raises
-        # RangeDefect in real Nim exactly like a plain assignment —
-        # resolve by true symbol identity, same as the plain-assign arm.
         let augCls = classifyType(lhs)
         let augTy = if augCls.ty.kind == itInt and augCls.ty.hasRange:
                       augCls.ty
@@ -25206,13 +25231,32 @@ proc parseStmtInner(n: NimNode,
           if ordStepBounds(lhs, ownRange = true, lo, hi) == oscBounds:
             let checked = checkedOrdinalStep(mkVar(nm), augTy, rhsIR,
               classifyType(n[2]).ty, baseOpStr == "+", lo, hi, preamble, ctx)
-            if checked != nil: return mkAssign(nm, checked, augTy)
+            if checked != nil: return mkAssign(nm, checked)
           return ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`" & augOp.strVal & "` on `" & lhs.repr &
                     "`: the bounds of its type are not modelled -- path " &
                     "degraded to sxUnknown"),
             "`" & augOp.strVal & "` on this receiver is not modelled")
-        return mkAssign(nm, siteBinop(bop, mkVar(nm), rhsIR, n), augTy)
+        let opIR = siteBinop(bop, mkVar(nm), rhsIR, n)
+        if augTy != nil:
+          # RFC-0016 K9e: the other system `op=` on an integer is `*=`, the
+          # routine `x = x * y`: the product is taken in the base type
+          # (`OverflowDefect` there, `siteBinop`) and stored through the
+          # range conversion Nim puts on it, `RangeDefect` outside the range
+          # (probed: `v *= 4` at `v == 3` in a `range[0..10]` raises). That
+          # conversion is compiled in system's routine, so the build's range
+          # check governs it and a caller's `push rangeChecks: off` does not
+          # (probed: it still raises), as `lowerConvIntRange`'s drain is
+          # gated. Any other operator on a range is no system routine.
+          if baseOpStr != "*":
+            return ctx.declineAtSite(feUnsupportedOp,
+              siteMsg(n, "`" & augOp.strVal & "` on `" & lhs.repr &
+                      "`: the operator on a range is not modelled -- path " &
+                      "degraded to sxUnknown"),
+              "`" & augOp.strVal & "` on this receiver is not modelled")
+          return mkAssign(nm, mkConvIntWidth(opIR, augTy.width, augTy.signed,
+            augTy.width, augTy.signed, true, augTy.rangeLo, augTy.rangeHi))
+        return mkAssign(nm, opIR)
       elif lhs.kind == nnkDerefExpr and lhs.len == 1 and
            augOp.strVal != "&=" and
            ((classifyType(lhs).ty.kind == itInt and
@@ -28683,12 +28727,16 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
         dupCut(s, s.alive)
         s.alive = saved
         return
-  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkCast:
+    # The first child is the target type (empty for a hidden conversion),
+    # never a read: only the operand is scanned. An anonymous type there
+    # (`range[0..10](x)`, `cast[range[0..10]](x)`) holds an untyped `..`
+    # call, whose `getTypeInst` in the call arm below was a compile error
+    # ("node has no type") for the whole entry.
     # PRC-51: a conversion of a constructor that initialises a local
     # initialises it too (`injectdestructors.p`'s conversion arm).
-    if isInit and n.len == 2:
-      dupScan(n[0], s, stmt, loop, unsafe, nextStmt)
-      s.initCtor = true
+    if n.len == 2:
+      if isInit and n.kind != nnkCast: s.initCtor = true
       dupScan(n[1], s, stmt, loop, unsafe, nextStmt)
       s.initCtor = false
       return

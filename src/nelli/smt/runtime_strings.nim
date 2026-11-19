@@ -362,7 +362,6 @@ proc regexRejected(msg: string; kind: SVKind): SymVal =
   ## `regexRaiseMsgs` sink -- `drainRegexRaises` routes it and ends the
   ## path -- and the call's value is a placeholder of its sort, never
   ## observed (no continuation survives the raise).
-  regexRaiseMsgs.add msg
   syncRegexRaiseMsg(msg)
   case kind
   of svBool: SymVal(kind: svBool, bo: mkBool(false))
@@ -528,7 +527,6 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
       if sp.entry in ["findBoundsFirst", "findBoundsFirstCap",
                       "findBoundsLast"]: below
       else: below or (start > mkInt(2147483647'i64))
-    rangeDefectConds.add outside
     syncRangeDefectCond(outside)
   regexOutcomeGate(sp, pr)
   # RFC-0005 S8bb: a captures overload's group carries the length of its
@@ -608,7 +606,6 @@ proc lowerRegexDecline(env: Env, e: IRExpr): SymVal =
   requireStr(recv, "regex " & sp.entry)
   let pr = walkerSpec(sp)
   if pr.status == psRejected:
-    regexRaiseMsgs.add pr.errMsg
     syncRegexRaiseMsg(pr.errMsg)
     var unused: seq[Z3Bool]
     return allocateSym(e.strRetTy, freshDegradeName("__regexRejected"), unused, false, @[])
@@ -847,10 +844,8 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
       # extract clamped, so `s[1 .. 7]` of a 3-byte string was "bc".
       let length = (hi - lo) + mkInt(1)
       let idxOob = (length > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenS))
-      strIndexOobConds.add idxOob
       syncStrIndexOobCond(idxOob)
       let negLen = length < mkInt(0)
-      rangeDefectConds.add negLen
       syncRangeDefectCond(negLen)
       SymVal(kind: svString, str: substr(recv.str, lo, length))
   of iekStrContains:
@@ -1318,7 +1313,6 @@ proc lowerStrArm*(env: Env, e: IRExpr): SymVal =
     # RFC-0005 S10 / S8b: split by where the model is Nim's (`ParseIntRaise`).
     let parseIntRaise = ParseIntRaise(exact: parseIntRaiseCond and not laxSyntax,
                                       lax: laxSyntax)
-    parseIntRaiseConds.add parseIntRaise              # threadvar fallback
     syncParseIntRaiseCond(parseIntRaise)              # CR-9 Stage 6 Group-2
     SymVal(kind: svInt, zi: resultInt)
   of iekRadixFmt:

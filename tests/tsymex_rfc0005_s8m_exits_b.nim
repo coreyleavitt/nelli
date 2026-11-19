@@ -28,6 +28,7 @@ import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
 import ./s8cu_helpers
+import audit_scan_utils
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -215,20 +216,52 @@ proc boolCellProg(targetDead: bool): SymexProgram =
     mkDerefWrite(mkVar("p"), mkIntLit(1), tBool()),
     tail]))
 
-proc countUncheckedRaw(src: string): int =
-  ## Raw `Z3_mk_store`/`select`/`ite`/`eq` calls outside the checked
-  ## constructors' own bodies and the deliberate test-hook probe.
-  var inHelpers = false
-  for line in src.splitLines():
+const
+  rawBuilders = ["Z3_mk_store(", "Z3_mk_select(", "Z3_mk_ite(", "Z3_mk_eq("]
+  checkedBegin = "# ---- [s8m-checked-builders-begin]"
+  checkedEnd = "# ---- [s8m-checked-builders-end]"
+  checkedHome = "z3check.nim"
+    ## The one file whose marked region holds the four checked builders.
+
+proc uncheckedRawSites(label, src: string; exempt: bool): seq[string] =
+  ## Raw `Z3_mk_store`/`select`/`ite`/`eq` calls in code (comments and
+  ## strings blanked by `codeOf`), less the line tagged
+  ## `[s8m-unchecked-probe]` (the deliberate test-hook probe) and, when
+  ## `exempt`, the checked builders' own region. That region is bounded by
+  ## two markers, each of which must be present exactly once and in order:
+  ## a missing marker is reported as a site, so a moved or renamed builder
+  ## block fails the audit instead of silently widening (a lost end marker)
+  ## or dropping (a lost start marker) the exempt span. The end marker the
+  ## audit had read until K9e, `var convFloatToIntBoundConds` in
+  ## `runtime.nim`, vanished at 5219dd1d, and the audit then skipped every
+  ## line of `runtime.nim` after its start marker without failing.
+  let srcLines = src.splitLines()
+  let code = codeOf(src).splitLines()
+  doAssert code.len == srcLines.len, label & ": codeOf changed the line count"
+  var lo, hi = -1
+  var begins, ends = 0
+  for i, line in srcLines:
     let t = line.strip()
-    if t.startsWith("# ---- RFC-0005 S8m: sort-checked Z3 term construction"):
-      inHelpers = true
-    elif inHelpers and t.startsWith("var convFloatToIntBoundConds"):
-      inHelpers = false
-    if inHelpers or t.startsWith("#") or "[s8m-unchecked-probe]" in line:
-      continue
-    for f in ["Z3_mk_store(", "Z3_mk_select(", "Z3_mk_ite(", "Z3_mk_eq("]:
-      if f in line and not line.strip().startsWith("##"): inc result
+    if t.startsWith(checkedBegin):
+      inc begins
+      lo = i
+    elif t.startsWith(checkedEnd):
+      inc ends
+      hi = i
+  if exempt:
+    if begins != 1 or ends != 1 or lo > hi:
+      result.add label & ": the checked-builder markers are missing, " &
+        "repeated or out of order (begin " & $begins & ", end " & $ends & ")"
+      return
+  elif begins + ends > 0:
+    result.add label & ": a checked-builder marker outside " & checkedHome
+    return
+  for i, line in code:
+    if exempt and i > lo and i < hi: continue
+    if "[s8m-unchecked-probe]" in srcLines[i]: continue
+    for f in rawBuilders:
+      if f in line:
+        result.add label & ":" & $(i + 1) & ": " & srcLines[i].strip()
 
 suite "S8m (2) a Z3 sort mismatch is a recorded walker fault":
   test "an ill-sorted heap store is weInternalWalkerFault, never a verdict (was a silent sxUnsat on c)":
@@ -260,10 +293,33 @@ suite "S8m (2) a Z3 sort mismatch is a recorded walker fault":
     check code.len > 0
 
   test "audit: every raw store/select/ite/eq goes through a sort check":
-    const here = currentSourcePath.parentDir
-    var n = 0
-    for f in ["runtime.nim", "runtime_heap.nim", "runtime_strings.nim",
-              "runtime_floats.nim", "runtime_exceptions.nim",
-              "runtime_closures.nim"]:
-      n += countUncheckedRaw(readFile(here / ".." / "src" / "nelli" / "smt" / f))
-    check n == 0
+    # Over the whole runtime family (`audit_scan_utils.runtimeFamilyFiles`),
+    # never a hand-picked list: a file cut out of `runtime.nim` stays in
+    # scope. The list read here until K9e named six files and missed
+    # `string_lower_support.nim` when D3c-7 moved code into it.
+    var sites: seq[string]
+    var builders = 0
+    for (label, path) in runtimeFamilySources():
+      let src = readFile(path)
+      let home = path.extractFilename == checkedHome
+      sites.add uncheckedRawSites(label, src, home)
+      if home:
+        for f in rawBuilders: builders += src.count(f)
+    for s in sites: checkpoint s
+    check sites.len == 0
+    # The exempt region is the builders, not a span that grew around them:
+    # each raw builder is named exactly once in its home file.
+    check builders == rawBuilders.len
+
+  test "audit: a lost or stray marker fails, never narrows the audit":
+    const body = "  ctx.checkErr Z3_mk_ite(a, b, c, d)\n"
+    let marked = checkedBegin & "\n" & body & checkedEnd & "\n"
+    check uncheckedRawSites("ok", marked, true).len == 0
+    check uncheckedRawSites("noEnd", checkedBegin & "\n" & body, true).len == 1
+    check uncheckedRawSites("noBegin", body & checkedEnd & "\n", true).len == 1
+    check uncheckedRawSites("none", body, true).len == 1
+    check uncheckedRawSites("swapped", checkedEnd & "\n" & body &
+                            checkedBegin & "\n", true).len == 1
+    check uncheckedRawSites("stray", marked, false).len == 1
+    check uncheckedRawSites("plain", body, false).len == 1
+    check uncheckedRawSites("comment", "# Z3_mk_eq(x)\n", false).len == 0

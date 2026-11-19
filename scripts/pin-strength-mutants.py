@@ -49,7 +49,6 @@ SCOPES = [
     ("lowerArith", r"^proc lowerArith\*?\(", None),
     ("lowerCmp", r"^proc lowerCmp\*?\(", None),
     ("lowerConvIntRange", r"^proc lowerConvIntRange\*?\(", None),
-    ("forkAssignRangeCheck", r"^proc forkAssignRangeCheck\*?\(", None),
     ("lowerExpr.uNeg", r"^    of uNeg:\s*$", r"^    of uNot:\s*$"),
     ("drain.DivByZero", r"^genRaiseForkDrain\(drainDivByZeroRaises,", None),
     ("drain.Overflow", r"^genRaiseForkDrain\(drainOverflowRaises,", None),
@@ -121,7 +120,6 @@ FAMILIES = {
     "lowerArith": ARITH,
     "lowerCmp": BV,
     "lowerConvIntRange": BOUND + CMP,
-    "forkAssignRangeCheck": DEFECT,
     "lowerExpr.uNeg": [],
     "drain.DivByZero": DEFECT,
     "drain.Overflow": DEFECT,
@@ -142,8 +140,9 @@ LINE_FILTER = {
 }
 
 # Statement rules (dropped forks), per scope.
-#  drop:deposit       a raise condition is never deposited: `<sink>.add c`
-#                     and the `sync...(c)` after it both become `discard c`
+#  drop:deposit       a raise condition is never deposited: its
+#                     `sync<Sink>Cond(c)` (the sink's one store, the walk's
+#                     `LowerSinks` field) becomes `discard c`
 #  drop:branch        an `if`/`elif` guard of a raise, a check or a wrap never
 #                     holds (`false and ...`); the guard is read up to its `:`
 #                     and must have no top-level `or`
@@ -155,7 +154,7 @@ DROP_BRANCH = {
     "lowerExpr.uNeg": re.compile(r"[sS]igned"),
     "lowerConvIntRange": re.compile(r"conds\.len > 0"),
 }
-FORCE_RETURN_SCOPES = {"forkAssignRangeCheck", "wrapIntToWidth", "depositSignedOverflow"}
+FORCE_RETURN_SCOPES = {"wrapIntToWidth", "depositSignedOverflow"}
 
 
 def code_part(line):
@@ -236,15 +235,9 @@ def enumerate_mutants(lines):
                         if new != code:
                             add(scope, kind, stripped, occ, k, i, {i: new + tail})
             if scope in DROP_ADD_SCOPES:
-                m = re.fullmatch(r"(\w+Conds)\.add[ (](.+?)\)?", body)
+                m = re.fullmatch(r"sync\w+Cond\((.+)\)", body)
                 if m:
-                    cond = m.group(2)
-                    edits = {i: f"{ind}discard ({cond})" + tail}
-                    j = i + 1
-                    nb = code_part(lines[j]).strip()
-                    if re.fullmatch(r"sync\w+\((.+)\)", nb):
-                        jind = lines[j][: len(lines[j]) - len(lines[j].lstrip())]
-                        edits[j] = f"{jind}discard ({cond})"
+                    edits = {i: f"{ind}discard ({m.group(1)})" + tail}
                     add(scope, "drop:deposit", stripped, occ, 0, i, edits)
             if scope in DROP_BRANCH:
                 m = re.match(r"(if|elif) ", body)

@@ -4,8 +4,9 @@
 ## `runtime.nim` both read: `literalStringBytes`, `splitNeedle`, the
 ## `NotIn` forms and the index-split subsystem (`IndexSplit`, `lowerIndexSplit`,
 ## `indexSplitRoots` and the axioms they build). It is pure Z3 term building
-## over strings and ints: it imports only `z3` and `./types` and names no
-## `runtime.nim` symbol.
+## over strings and ints: it imports only `z3`, `./types` and `./z3check`
+## (the sort-checked `ite` / `=` builders every raw site must use, RFC-0005
+## S8m) and names no `runtime.nim` symbol.
 ##
 ## A threadvar added here that holds a Z3 term of the run's context MUST be
 ## reset in `resetStringSupport`, which `resetSymexRunState` calls: a value
@@ -17,6 +18,7 @@ import std/algorithm
 import std/strutils
 import z3
 import ./types
+import ./z3check   ## RFC-0005 S8m: `checkedIte` / `checkedEq`
 
 proc literalStringBytes*(z: Z3String): tuple[ok: bool, s: string] =
   ## RFC-0005 S8cf. `z`'s bytes when it folds to a literal.
@@ -550,7 +552,7 @@ proc magnitude(ctx: Z3Context; r: IntRender; width: int): Z3AnyAst =
   var m = r.v
   if r.signed:
     let neg = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvneg(ctx.raw, r.v.raw))
-    m = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+    m = wrap[Z3AnyAst](ctx, checkedIte(ctx,
       isNeg(ctx, r).raw, neg.raw, r.v.raw))
   if width > r.width:
     m = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_zero_ext(ctx.raw,
@@ -571,7 +573,7 @@ proc renderPad*(ctx: Z3Context; m: Z3AnyAst; L: int): Z3AnyAst =
   for k in countdown(L - 1, 1):
     let below = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, m.raw,
                                          bvNumOwned(ctx, pow10Text(k), width).raw))
-    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, below.raw,
+    result = wrap[Z3AnyAst](ctx, checkedIte(ctx, below.raw,
       bvNumOwned(ctx, $(L - k), ew).raw, result.raw))
 
 proc renderScale*(ctx: Z3Context; m, pad: Z3AnyAst; L: int): Z3AnyAst =
@@ -584,10 +586,10 @@ proc renderScale*(ctx: Z3Context; m, pad: Z3AnyAst; L: int): Z3AnyAst =
   while (1 shl i) <= L - 1:
     let bit = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw, cuint(i),
                                                               cuint(i), pad.raw))
-    let isSet = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, bit.raw, one.raw))
+    let isSet = rbool(ctx, checkedEq(ctx, bit.raw, one.raw))
     let scaled = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bvmul(ctx.raw,
       result.raw, bvNumOwned(ctx, pow10Text(1 shl i), width).raw))
-    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, isSet.raw,
+    result = wrap[Z3AnyAst](ctx, checkedIte(ctx, isSet.raw,
                                                          scaled.raw, result.raw))
     inc i
 
@@ -631,8 +633,8 @@ proc renderOrder*(ctx: Z3Context; nx: Z3Bool; kx, px: Z3AnyAst; ny: Z3Bool;
   ## prefix, the shorter (the longer pad) first. Equal renderings have one
   ## sign, one key and one pad.
   ## `tsymex_0016_int57_orderproof` proves it per pair of digit counts.
-  let keyEq = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, kx.raw, ky.raw))
-  let padEq = rbool(ctx, ctx.checkErr Z3_mk_eq(ctx.raw, px.raw, py.raw))
+  let keyEq = rbool(ctx, checkedEq(ctx, kx.raw, ky.raw))
+  let padEq = rbool(ctx, checkedEq(ctx, px.raw, py.raw))
   if op == bEq:
     return (nx == ny) and keyEq and padEq
   doAssert op in {bLt, bLe}
@@ -842,7 +844,7 @@ proc digitByte(ctx: Z3Context; m: Z3AnyAst; w, digits, j: int): Z3AnyAst =
     let below = rbool(ctx, ctx.checkErr Z3_mk_bvult(ctx.raw, m.raw,
                                          bvNumOwned(ctx, pow10Text(l), w).raw))
     let lv = val(l)
-    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, below.raw,
+    result = wrap[Z3AnyAst](ctx, checkedIte(ctx, below.raw,
                                                          lv.raw, result.raw))
 
 proc renderByte(ctx: Z3Context; r: IntRender; k: int): Z3AnyAst =
@@ -853,7 +855,7 @@ proc renderByte(ctx: Z3Context; r: IntRender; k: int): Z3AnyAst =
   if not r.signed: return pos
   let negB = if k == 0: bvByte(ctx, 0x2D)
              else: digitByte(ctx, m, r.width, digits, k - 1)
-  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, isNeg(ctx, r).raw,
+  wrap[Z3AnyAst](ctx, checkedIte(ctx, isNeg(ctx, r).raw,
                                              negB.raw, pos.raw))
 
 proc byteAtOpt(t: Z3String; k: int; hit: var bool): Z3AnyAst =
@@ -894,11 +896,11 @@ proc byteAtOpt(t: Z3String; k: int; hit: var bool): Z3AnyAst =
         for j in 0 ..< kk:
           let lenJ = lx == mkInt(ctx, j)
           let rest = fromPart(p + 1, kk - j)
-          result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+          result = wrap[Z3AnyAst](ctx, checkedIte(ctx,
             lenJ.raw, rest.raw, result.raw))
         let longer = lx > mkInt(ctx, kk)
         let own = byteAtOpt(x, kk, h)
-        result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+        result = wrap[Z3AnyAst](ctx, checkedIte(ctx,
           longer.raw, own.raw, result.raw))
       memo[(p, kk)] = result
     result = fromPart(0, k)
@@ -916,7 +918,7 @@ proc byteAtOpt(t: Z3String; k: int; hit: var bool): Z3AnyAst =
     let (_, args) = unpackApp(t)
     let th = byteAtOpt(wrap[Z3String](ctx, args[1].raw), k, hit)
     let el = byteAtOpt(wrap[Z3String](ctx, args[2].raw), k, hit)
-    return wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, args[0].raw,
+    return wrap[Z3AnyAst](ctx, checkedIte(ctx, args[0].raw,
                                                        th.raw, el.raw))
   walkerRead()
 

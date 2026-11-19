@@ -1415,9 +1415,13 @@ suite "Phase 15 CR-2 — version bumps":
     ## INT-80's seq & T element fix): 454->455.
     ## RFC-0016 INT-90d (a view's fact and splice at the program's own
     ## alias; a splice's bit-vector recorded): 455->456.
+    ## RFC-0016 K9e (a scan counter's step past its range raises what the
+    ## step raises: `OverflowDefect` for `inc`; a range store is checked by
+    ## its conversion alone, `;aty=` dropped): 456->457.
     ## RFC-0016 int6 R2-08 (a heap write drains its allocations' taint onto
-    ## its own path; 457 reserved): 456->458.
-    check symexWalkerVersion == "458"
+    ## its own path): 457->458.
+    ## RFC-0016 int6 integration (the two above merged): 458->459.
+    check symexWalkerVersion == "459"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

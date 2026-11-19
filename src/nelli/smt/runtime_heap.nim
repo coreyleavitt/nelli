@@ -4645,22 +4645,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           # float -> int conversion's out-of-range continuation was lost).
           for cpInArm in drainScalarRaiseForks(cpInArmLowered, w):
             var valSV = valSVRaw
-            # #163 review R22 site 2: an ARM-specific field write forks exactly
-            # like the plain field write (site 1, above) and `isAssign`'s own
-            # local-variable case -- see `forkAssignRangeCheck`'s doc comment.
-            # All arms sharing this field NAME carry the SAME field TYPE by
-            # Nim's own case-object rule, so `stmt.dwElemTy` (the type this
-            # write's proto was already built from) is the correct target type
-            # regardless of which arm(s) `armHitsW` matched. Checked BEFORE the
-            # svInt->BV coercion below so the discharge can still see `valSV`'s
-            # `ziIvl`.
-            let cpInArmChecked =
-              if stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange and
-                 not carriesRangeCheck(stmt.dwValue, stmt.dwElemTy):   # RFC-0005 S8j
-                forkAssignRangeCheck(cpInArm, valSV, stmt.dwElemTy, w)
-              else: cpInArm
             valSV = heapStoreValue(valSV, proto, stmt.dwElemTy)   # RFC-0005 S8as
-            var cpInArmRanged = cpInArmChecked
+            var cpInArmRanged = cpInArm   # a range field's check: the RHS conversion
             if exactCondW.isSome:
               var cpX = forkPath(cpInArmRanged, cpInArmRanged.pc & @[exactCondW.get],
                                  cpInArmRanged.env)
@@ -4836,22 +4822,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
         # float -> int conversion's out-of-range continuation was lost).
         for cpLowered in drainScalarRaiseForks(cpLoweredRaw, w):
           var valSV = valSVRaw
-          # #163 review R22 site 1: a FIELD write (`p.field = v`, isField) whose
-          # declared field type is `range[lo..hi]` forks exactly like
-          # `isAssign`'s own local-variable case (`forkAssignRangeCheck`, reused
-          # unchanged) — the out-of-range sub-path is a routed RangeDefect
-          # raise, the survivor's `pc` is hard-narrowed to the in-range domain,
-          # and a provably-in-range RHS (`av.ziIvl`) discharges statically with
-          # no fork at all. Checked BEFORE the svInt→BV coercion below so the
-          # discharge can still see `valSV.ziIvl` (a BV-coerced value carries
-          # none). A bare `p[] = v` (not `isField`) is out of this fix's scope
-          # — see the handoff's site enumeration.
-          # RFC-0005 S8j: not when the RHS is itself the range-checked
-          # conversion into this field's bounds (`carriesRangeCheck`).
-          let cp = if isField and stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange and
-                      not carriesRangeCheck(stmt.dwValue, stmt.dwElemTy):
-                     forkAssignRangeCheck(cpLowered, valSV, stmt.dwElemTy, w)
-                   else: cpLowered
+          # A range field's `RangeDefect` is the RHS conversion's
+          # (`lowerConvIntRange`), drained above.
+          let cp = cpLowered
           # Reconcile svInt↔BV sort mismatch: float→int64 returns svInt (Z3Int)
           # but the heap array value sort is BV64.  Coerce via int2bv here rather
           # than in the heap-read path; equality-only goals are safe (no ordering

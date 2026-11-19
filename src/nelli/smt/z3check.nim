@@ -35,6 +35,12 @@ proc sortOfRaw*(ctx: Z3Context; a: RawZ3Ast): RawZ3Sort =
 proc freshOfSort*(ctx: Z3Context; s: RawZ3Sort): RawZ3Ast =
   ctx.checkErr Z3_mk_fresh_const(ctx.raw, "__sortFault", s)
 
+# ---- [s8m-checked-builders-begin] -----------------------------------------
+# The only raw `Z3_mk_store` / `Z3_mk_select` / `Z3_mk_ite` / `Z3_mk_eq` calls
+# of the walker are the four below, each after its sort check. Every other
+# site calls the `checked*` builder. `tsymex_rfc0005_s8m_exits_b`'s audit
+# exempts exactly this region and fails when either marker is missing.
+
 proc checkedStore*(ctx: Z3Context; arr, idx, val: RawZ3Ast): RawZ3Ast =
   ## RFC-0005 S8m. `Z3_mk_store` with the index and value sorts checked
   ## against the array's domain and range.
@@ -80,6 +86,8 @@ proc checkedEq*(ctx: Z3Context; a, b: RawZ3Ast): RawZ3Ast =
   if sortFault(ctx, "equality", sortOfRaw(ctx, a), sortOfRaw(ctx, b)):
     return freshOfSort(ctx, ctx.checkErr Z3_mk_bool_sort(ctx.raw))
   ctx.checkErr Z3_mk_eq(ctx.raw, a, b)
+
+# ---- [s8m-checked-builders-end] -------------------------------------------
 
 proc allocDegrade*(kind: SymexErrorKind, msg: string) =
   ## N40 (round-6 fix round 6, walker v104) — TOTALITY AT THE ALLOCATOR.

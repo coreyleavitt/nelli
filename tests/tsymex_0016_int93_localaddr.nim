@@ -33,6 +33,17 @@ type
     f: float
     n: int
 
+proc lArrToPointer(a: int8) =
+  var arr: array[3, int]
+  let p = pointer(addr arr)
+  if p != nil and a == 3: symexTarget("hit")
+
+proc lSinkPtr(p: pointer): bool = p != nil
+
+proc lSetToFormal(a: int8) =
+  var s: set[uint8]
+  if lSinkPtr(addr s) and a == 3: symexTarget("hit")
+
 proc lSameType(a: int8) =
   var x = int(a)
   var y = int(a) + 1
@@ -186,6 +197,17 @@ suite "INT-93: a local's address is an object of its own":
     check declinedBy(lElems, feUnsupportedExprKind)
     check declinedBy(lElemsDistinct, feUnsupportedExprKind)
     check declinedBy(lElemZeroIsArray, feUnsupportedExprKind)
+
+  test "the decline names the variable's type, not the pointer's":
+    # `pointer(addr v)` and an `addr v` passed as a `pointer` formal are typed
+    # `pointer`; the decline's "variable of type" once printed that
+    # destination (`uninterp[__pointer]`) instead of the variable's own type.
+    pinDecline(lArrToPointer, cellKey(axTypeClass, "pointer"),
+               feUnsupportedOp,
+               needle = "of a variable of type array[3, i64] is not modelled")
+    pinDecline(lSetToFormal, cellKey(axTypeClass, "pointer"),
+               feUnsupportedOp,
+               needle = "of a variable of type set[u8] is not modelled")
 
   test "an address equals itself":
     check verdict(lSelf) == sxSat

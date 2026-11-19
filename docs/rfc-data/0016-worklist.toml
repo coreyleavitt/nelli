@@ -1009,11 +1009,11 @@ cells = []
 [[row]]
 id = "CRH-06"
 table = "5.3"
-title = "`zeroMem` and `copyMem` on `addr x`: a walker fault (`FieldDefect` reading `ptrPointeeTy` of an `itUninterp`). First make it a named decline, then model it"
+title = "`zeroMem` and `copyMem` on `addr x`: a named decline (`feUnsupportedOp`, S8ax), not modelled. Model it"
 state = "open"
 note = ""
 source = "S8cl remainder; ex-PRC-16"
-evidence = "the only `zeroMem`/`copyMem` pins are the opaque-global form (`tests/tsymex_rfc0005_s8cs_routes2.nim:125,131,363`); the `zeroMem(addr x)` fault has no test. First a named decline, then back to §5.2 as precision. **K2-0 probe (2026-11-08): reproduces.** `zeroMem(addr x, sizeof(x))` and `copyMem(addr y, addr x, sizeof(int))` on a local int both end `sxUnknown` with `weInternalWalkerFault: FieldDefect ... 'ptrPointeeTy' ... kind = itUninterp` (a fault, not a named decline); native reaches the label. Pinned: `tests/tsymex_0016_k20_probes.nim`."
+evidence = "the only `zeroMem`/`copyMem` pins are the opaque-global form (`tests/tsymex_rfc0005_s8cs_routes2.nim:125,131,363`) and the `addr x` decline. **K2-0 probe (2026-11-08): reproduced a walker fault** (`weInternalWalkerFault: FieldDefect ... 'ptrPointeeTy' ... kind = itUninterp` on `zeroMem(addr x, sizeof(x))` and `copyMem(addr y, addr x, sizeof(int))`, both `sxUnknown`; native reaches the label). **Since INT-83 (e8b48a20) it is a named decline:** a `pointer` is held as `ptr` of its own placeholder pointee, so `addr x` passed as one is declined by name (`feUnsupportedOp`, S8ax, on `addr x` and `addr y`; `sxUnknown`, no walker fault). Re-pinned from a fault to `pinDecline` by 1605bab4. Open: model the call, then back to §5.2 as precision. Pinned: `tests/tsymex_0016_k20_probes.nim`."
 cells = []
 pins = ["tsymex_0016_k20_probes"]
 

@@ -429,7 +429,12 @@ jobs:
           $names = @(($env:SHARDS_JSON | ConvertFrom-Json).$($env:SHARD))
           Write-Host "shard $($env:SHARD): $($names.Count) test files"
           if ($names.Count -eq 0) {
-            throw "shard $($env:SHARD) has an empty test list -- refusing to report a false green"
+            # A glob narrower than WALKER_SHARDS (a single-file dispatch) leaves
+            # the trailing shards empty: that is a pass. A glob matching
+            # nothing at all is the real misconfiguration, and the `shards`
+            # job fails it before any shard starts (shard-walker-tests.py).
+            Write-Host "no tests in this shard"
+            exit 0
           }
           $failed = @()
           foreach ($n in $names) {

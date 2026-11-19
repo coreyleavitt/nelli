@@ -1930,6 +1930,8 @@ task test, "Run the test suite":
             "tsymex_0016_int84_holeyenum",
             # RFC-0016 INT-88: one witness allocation per address-space address; a typed position at another sort is a view of it.
             "tsymex_0016_int88_crossptralias",
+            # RFC-0016 INT-90: two exact-layout views of one address agree byte-wise; a store at one sort is read at the other.
+            "tsymex_0016_int90_crosssortheap",
             # RFC-0016 INT-87: a cstring parameter is held by value, whether it is nil and its bytes up to the NUL.
             "tsymex_0016_int87_cstringparam",
             "tsymex_0016_k9cg_unbacked",

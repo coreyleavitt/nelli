@@ -8338,8 +8338,14 @@ proc crossSortCellFidelity(b: SnapshotBuild) =
     for srt in held:
       if heapSortObserved(srt["Ref_".len .. ^1]): observed.add srt
     let ownerSort = b.entries[b.entryOf[cell]].sort
+    # RFC-0016 INT-90: a cell held at view sorts the walk relates byte-wise
+    # (`crossSortLink`), whose owner's bytes cover every view, IS the
+    # model's: each view's value at the address is the owner's bytes read
+    # as the view. A wider view than its owner, or a desynced run, is not.
+    let exactViews = not anyRef and crossSortExactCell(held, ownerSort)
     let why =
       if anyRef: "a `ref` shares it"
+      elif exactViews: ""
       elif observed.len > 1: "the walk constrained " & $observed.len &
                              " of its sorts (" & observed.join(", ") & ")"
       elif observed.len == 1 and observed[0] != ownerSort:
@@ -12374,6 +12380,8 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
     roots.add c
   # RFC-0005 S8as: the entry values' type facts (`globalEntryFacts`).
   for c in pointerFacts:          # RFC-0016 INT-83: the casts' facts
+    roots.add c
+  for c in crossSortFacts:        # RFC-0016 INT-90: two views of one address
     roots.add c
   for c in globalEntryFacts:
     roots.add c

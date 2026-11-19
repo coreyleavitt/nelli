@@ -873,8 +873,19 @@ const renderAsChoicesVersion* = "12"
   ##   checks int32 (`RangeDefect`, it was a false `sxSat`); an int
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
+  ## - RFC-0016 INT-90 (448->451; 449-450 are reserved for in-flight K9d
+  ##   work; provisional): two typed views of one address agree byte-wise.
+  ##   A read or a write of an exact-layout view (a fixed-width integer, a
+  ##   float, a flat padding-free object of those) at an address the run
+  ##   also holds at another such sort of the `pointer` space relates the two
+  ##   sorts' heaps at that address (`crossSortLink`, `crossSortPropagate`,
+  ##   runtime_heap.nim; the design is at `crossSortDesyncKey`,
+  ##   heap_model.nim): `a[] == 5 and b[] > 1.0` over a `ptr int` and a
+  ##   `ptr float` at one address is `sxUnsat` (it was an untrusted, lossy
+  ##   `sxSat`), and a write at one sort is read at the other. No key bytes
+  ##   change.
 
-const symexWalkerVersion* = "448"
+const symexWalkerVersion* = "451"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

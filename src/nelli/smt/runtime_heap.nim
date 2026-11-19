@@ -2055,6 +2055,160 @@ proc ptrReinterpret(ctx: Z3Context; v: SymVal; like: SymVal): SymVal =
     r
   else: v
 
+# ---- RFC-0016 INT-90: two typed views of one address ------------------------
+# The design is with `crossSortDesyncKey`, the view layout with `viewLeaves`
+# (heap_model.nim). Here: the bits of a leaf, the facts of a read, the
+# splice of a write.
+
+proc leafBits(ctx: Z3Context; v: SymVal; size: int): Z3AnyAst =
+  ## RFC-0016 INT-90. The `size`-byte bit-vector a leaf's value spells: the
+  ## IEEE bits of a float, the two's complement of an Int-sorted cell
+  ## (`intHeapCell`), a bit-vector as it is. Every term below is wrapped
+  ## (inc-ref'd) as it is made: an unheld result lives only until Z3's next
+  ## call, and the next call reuses it (the `pre` hazard, heap_model.nim).
+  case v.kind
+  of svFloat32:
+    wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fpa_to_ieee_bv(ctx.raw, v.fp32.raw))
+  of svFloat64:
+    wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fpa_to_ieee_bv(ctx.raw, v.fp64.raw))
+  of svInt:
+    wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int2bv(ctx.raw, cuint(size * 8),
+                                                   v.zi.raw))
+  else: wrap[Z3AnyAst](ctx, rawAnyAstOf(v))
+
+proc bitRange(leafOff, leafSize, lo, hi: int): tuple[b0, b1: int] =
+  ## RFC-0016 INT-90. The bit range `[b0, b1)` of a leaf (at `leafOff`,
+  ## `leafSize` bytes) that holds the view's bytes `[lo, hi)`: on a
+  ## little-endian target byte k of a value is its bits `[8k, 8k + 8)`; on a
+  ## big-endian one byte k is bits `[8(n - 1 - k), 8(n - k))`.
+  when cpuEndian == littleEndian:
+    ((lo - leafOff) * 8, (hi - leafOff) * 8)
+  else:
+    ((leafOff + leafSize - hi) * 8, (leafOff + leafSize - lo) * 8)
+
+proc bitsAt(ctx: Z3Context; bits: Z3AnyAst; leafOff, leafSize, lo, hi: int):
+    Z3AnyAst =
+  ## RFC-0016 INT-90. The view's bytes `[lo, hi)` of a leaf's bits.
+  let (b0, b1) = bitRange(leafOff, leafSize, lo, hi)
+  if b0 == 0 and b1 == leafSize * 8: return bits
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw, cuint(b1 - 1),
+                                                 cuint(b0), bits.raw))
+
+proc spliceBits(ctx: Z3Context; old: Z3AnyAst; leafOff, leafSize, lo, hi: int;
+                piece: Z3AnyAst): Z3AnyAst =
+  ## RFC-0016 INT-90. `old` (a leaf's bits) with the view's bytes `[lo, hi)`
+  ## replaced by `piece`.
+  let (b0, b1) = bitRange(leafOff, leafSize, lo, hi)
+  let n = leafSize * 8
+  result = piece
+  if b0 > 0:
+    let low = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw,
+                                                             cuint(b0 - 1), 0,
+                                                             old.raw))
+    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_concat(ctx.raw, result.raw,
+                                                           low.raw))
+  if b1 < n:
+    let high = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(ctx.raw,
+                                                              cuint(n - 1),
+                                                              cuint(b1), old.raw))
+    result = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_concat(ctx.raw, high.raw,
+                                                           result.raw))
+
+proc bitsAsLeaf(ctx: Z3Context; bits: Z3AnyAst; size: int; ty: IRType): SymVal =
+  ## RFC-0016 INT-90. The value of a leaf of `ty` whose bytes are `bits`, in
+  ## its heap's value sort (`heapStoreValue`).
+  let bv = case size
+    of 1: liftBV(wrap[Z3BitVec[8]](ctx, bits.raw), false)
+    of 2: liftBV(wrap[Z3BitVec[16]](ctx, bits.raw), false)
+    of 4: liftBV(wrap[Z3BitVec[32]](ctx, bits.raw), false)
+    else: liftBV(wrap[Z3BitVec[64]](ctx, bits.raw), false)
+  var scratch: seq[Z3Bool]
+  let proto = allocateSym(ty, "__xsortProto", scratch)
+  heapStoreValue(ptrReinterpret(ctx, bv, proto), proto, ty)
+
+proc crossSortOthers(typeId: string):
+    seq[tuple[tid: string; ty: IRType; leaves: seq[ViewLeaf]]] =
+  ## RFC-0016 INT-90. The other view sorts of the `pointer` space, when the
+  ## sort `typeId` is in it with at least one other.
+  if pointerSortsUsed.len < 2 or typeId notin pointerSortsUsed: return
+  for tid in pointerSortsUsed:
+    if tid == typeId or not pointerSortTypes.hasKey(tid): continue
+    let ty = pointerSortTypes[tid]
+    let lv = viewLeaves(ty, tid)
+    if lv.len > 0: result.add (tid, ty, lv)
+
+proc crossSortDesynced(p: Path): bool =
+  ## RFC-0016 INT-90. `p`'s heaps no longer describe one instant: a store
+  ## went unreflected (`crossSortDesyncKey`) or an opaque call havocked a
+  ## pointee (`heapEpochPrefix`).
+  for k in p.allocCounters.keys:
+    if k == crossSortDesyncKey or k.startsWith(heapEpochPrefix): return true
+  false
+
+proc crossSortLink(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
+                   refAst: Z3AnyAst) =
+  ## RFC-0016 INT-90. At a read of the sort `typeId` at `refAst` on `p`: the
+  ## bytes of its view and of every other view sort's at the same address
+  ## agree, leaf pair by overlapping leaf pair, over the path's current
+  ## heaps (`crossSortFacts`). Nothing when the sort is no view, the path is
+  ## desynced, or no other view sort is in the `pointer` space.
+  let mine = viewLeaves(ty, typeId)
+  if mine.len == 0: return
+  let others = crossSortOthers(typeId)
+  if others.len == 0 or crossSortDesynced(p): return
+  let refSort = allocRefSort(ctx, ty)
+  for o in others:
+    let mapped = pointerMapAddr(ctx, refAst, ty, o.ty)
+    let oSort = allocRefSort(ctx, o.ty)
+    for a in mine:
+      for b in o.leaves:
+        let lo = max(a.off, b.off)
+        let hi = min(a.off + a.size, b.off + b.size)
+        if lo >= hi: continue
+        let va = heapCellSelect(ctx, heapCellArrays(ctx, p, a.key, refSort, a.ty),
+                                refAst, a.ty)
+        let vb = heapCellSelect(ctx, heapCellArrays(ctx, p, b.key, oSort, b.ty),
+                                mapped, b.ty)
+        let ba = bitsAt(ctx, leafBits(ctx, va, a.size), a.off, a.size, lo, hi)
+        let bb = bitsAt(ctx, leafBits(ctx, vb, b.size), b.off, b.size, lo, hi)
+        addCrossSortFact(ctx, wrap[Z3Bool](ctx, checkedEq(ctx, ba.raw, bb.raw)))
+
+proc crossSortPropagate(ctx: Z3Context; p: Path; typeId: string; ty: IRType;
+                        refAst: Z3AnyAst; leafKey: string; valSV: SymVal;
+                        leafTy: IRType) =
+  ## RFC-0016 INT-90. After the store of `valSV` (in its heap's value sort)
+  ## into the leaf `leafKey` of the sort `typeId` at `refAst` on `p`: the
+  ## same bytes into every other view sort's overlapping leaves at the same
+  ## address, spliced into their old values, so the heaps keep describing
+  ## one instant. A store the model cannot splice -- the sort or the leaf is
+  ## no view (a whole-object store, a string cell) -- desyncs the path.
+  let others = crossSortOthers(typeId)
+  if others.len == 0: return
+  var leaf: Option[ViewLeaf]
+  for l in viewLeaves(ty, typeId):
+    if l.key == leafKey: leaf = some(l)
+  if leaf.isNone or not viewExactTy(leafTy) or
+     svScalarSize(valSV) != leaf.get.size:
+    p.allocCounters[crossSortDesyncKey] = 1
+    crossSortAnyDesync = true
+    return
+  let a = leaf.get
+  let newBits = leafBits(ctx, valSV, a.size)
+  for o in others:
+    let mapped = pointerMapAddr(ctx, refAst, ty, o.ty)
+    let oSort = allocRefSort(ctx, o.ty)
+    for b in o.leaves:
+      let lo = max(a.off, b.off)
+      let hi = min(a.off + a.size, b.off + b.size)
+      if lo >= hi: continue
+      let cell = heapCellArrays(ctx, p, b.key, oSort, b.ty)
+      let old = leafBits(ctx, heapCellSelect(ctx, cell, mapped, b.ty), b.size)
+      let spliced = spliceBits(ctx, old, b.off, b.size, lo, hi,
+                               bitsAt(ctx, newBits, a.off, a.size, lo, hi))
+      let nv = bitsAsLeaf(ctx, spliced, b.size, b.ty)
+      for c in heapCellStore(ctx, cell, mapped, nv, b.ty):
+        p.heaps[c.key] = c.arr
+
 proc ptrOverlapsOfHeap(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
     seq[PtrOverlap] =
   ## RFC-0005 S8bz (item 6). `ptrArmOverlaps` for the field family `key` of a
@@ -3747,6 +3901,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
         newEnv = cp.env
         var valSV = heapCellSelect(ctx, cell, refAst, stmt.dElemTy)
         stampHeapSteps(valSV, step)   ## RFC-0005 S8ar
+        # RFC-0016 INT-90: the other sorts' views of this address agree.
+        crossSortLink(ctx, cp, typeId, sortTy, refAst)
         # N46-followup (walker v113): a SECOND drain, immediately after the
         # select — `liftHeapValue` (called from inside `heapSelect`) can now
         # degrade in-band (its own `else` arm, converted this slice) for a
@@ -4712,6 +4868,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
           # RFC-0005 S8ap: every leaf of a compound cell.
           var child = forkPath(cpS, cpS.pc, cpS.env)
           for c in stored: child.heaps[c.key] = c.arr
+          # RFC-0016 INT-90: the same bytes into the other sorts' views.
+          crossSortPropagate(ctx, child, typeId, sortTy, refAst, heapKey, valSV,
+                             stmt.dwElemTy)
           # RFC-0005 S8bh (item 2). A bare `p[] = v` through a `ptr` also
           # stores into each candidate TARGET under its `sel` guard
           # (`ptrTargetWrite`; the own cell's store is the one above). Not

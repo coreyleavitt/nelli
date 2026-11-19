@@ -237,9 +237,13 @@ suite "INT-79":
   test "nested literals":
     exact(eN1, eN1Never)
     exact(eN2, eN2Never)
-    check native(eN3(3)) == "hit"
-    pinDecline(eN3, cell, seNestedSeqUnsupported,
-               excluding = {weInternalWalkerFault})
+    # A literal of seq literals: a named seNestedSeqUnsupported decline until
+    # S8cp-r backed a seq of seqs; re-pinned exact against native on
+    # integration.
+    for k in [-42, -7, 0, 1, 2, 3, 5, 42]:
+      check native(eN3(k)) == "hit"
+      check native(eN3Never(k)) == "ran"
+    exact(eN3, eN3Never)
   test "destructured, and `pairs`":
     exact(eD1, eD1Never)
     exact(eD2, eD2Never)

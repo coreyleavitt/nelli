@@ -872,8 +872,19 @@ const renderAsChoicesVersion* = "12"
   ##   unused `let`, `let _ =`, a discarded tuple or `len`) faults at `-O0`
   ##   and not at `-O2`: a nil on its path declines (`feUnsupportedOp`). A
   ##   read whose value is used or checked still faults. No key bytes change.
+  ## - RFC-0016 INT-89 (447->449, provisional; 448 is reserved for
+  ##   in-flight work): a discarded call returning `var T`/`lent T` computes
+  ##   an address, not a read: its callee (registered `#viewaddr`) runs its
+  ##   own reads and the address's index checks, and a nil pointer the
+  ##   address is only offset from is no dereference (`discard varN(nil)`
+  ##   was a false `sxRaised(NilAccessDefect)`, the label a false
+  ##   refutation); a pointer the address loads declines (`-O0` faults,
+  ##   `-O2` inlines it dead). A discarded or dead array element at a
+  ##   variable index runs its bound check against the static length and
+  ##   reads nothing through a nil `ref` (`discard p.arr[i]` was a false
+  ##   nil-access claim). No key bytes change.
 
-const symexWalkerVersion* = "447"
+const symexWalkerVersion* = "449"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

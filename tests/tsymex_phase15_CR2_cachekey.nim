@@ -1284,7 +1284,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## provisional): 443->444.
     ## RFC-0016 INT-86 (a discarded read the C compiler drops is no
     ## dereference; 445-446 reserved; provisional): 444->447.
-    check symexWalkerVersion == "447"
+    ## RFC-0016 INT-89 (a discarded view computes an address, an index check
+    ## runs without the read; 448 reserved; provisional): 447->449.
+    check symexWalkerVersion == "449"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

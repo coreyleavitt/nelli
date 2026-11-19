@@ -477,6 +477,13 @@ proc assignRangeExplicit(x: int) =
   q = range[0..10](x)
   discard q
 
+proc castRangeAnon(x: int) =
+  ## The anonymous range type is in a `cast`, whose first child the
+  ## parser's copy scan read as code (a compile error, "node has no type").
+  var q: range[0..10] = 0
+  q = cast[range[0..10]](x)
+  discard q
+
 proc assignRangeInc(x: range[0..10]) =
   var q: range[0..10] = x
   q += 1
@@ -527,6 +534,11 @@ suite "S8j (4) a plain assignment to a range variable checks once":
     let canon = canonicalize(progOf(assignRangeExplicit))
     checkpoint(canon)
     check rangeChecks(canon) == 1
+
+  test "an anonymous range type in a conversion or a cast is not scanned as code":
+    # `range[0..10](x)` above and this `cast` failed to compile: the copy
+    # scan (`dupScan`) read the type child's `..` as a call.
+    check canonicalize(progOf(castRangeAnon)).len > 0
 
   test "q += 1 keeps its assignment check":
     let canon = canonicalize(progOf(assignRangeInc))

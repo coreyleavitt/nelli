@@ -28659,12 +28659,16 @@ proc dupScan(n: NimNode; s: var DupScan; stmt: int; loop, unsafe: bool;
         dupCut(s, s.alive)
         s.alive = saved
         return
-  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkCast:
+    # The first child is the target type (empty for a hidden conversion),
+    # never a read: only the operand is scanned. An anonymous type there
+    # (`range[0..10](x)`, `cast[range[0..10]](x)`) holds an untyped `..`
+    # call, whose `getTypeInst` in the call arm below was a compile error
+    # ("node has no type") for the whole entry.
     # PRC-51: a conversion of a constructor that initialises a local
     # initialises it too (`injectdestructors.p`'s conversion arm).
-    if isInit and n.len == 2:
-      dupScan(n[0], s, stmt, loop, unsafe, nextStmt)
-      s.initCtor = true
+    if n.len == 2:
+      if isInit and n.kind != nnkCast: s.initCtor = true
       dupScan(n[1], s, stmt, loop, unsafe, nextStmt)
       s.initCtor = false
       return

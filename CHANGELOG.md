@@ -106,7 +106,11 @@ where that note does not yet cover it.
   `feCheckOption`. An unbalanced pair, a pop closing a push inside a `when`
   branch, a `defer` in a region, a push in an inline iterator's expansion, a
   routine declared inside a pushing body and a stdlib routine's in-body push
-  still decline, naming the reason.
+  still decline, naming the reason. An opaque callee whose body pushes check
+  options is read as unreadable by the opaque defect scan (any Defect, "may
+  be undefined"): it read the body as one scope, so in a `--boundChecks:off`
+  build a handler for the `IndexDefect` of a `boundChecks: on` region was a
+  trusted false `sxUnsat`.
 - **Scanner text guard** (migration 1, int6-w, walker 468). The region reads
   place a routine in its module's text, read from disk during the compile. A
   routine whose text on disk ends before its position, or defines its name but

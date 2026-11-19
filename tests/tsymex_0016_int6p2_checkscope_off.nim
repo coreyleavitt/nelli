@@ -57,6 +57,22 @@ proc innerBoundOn(v: int) =
   {.pop.}
   if x == 30: symexTarget("hit")
 
+proc opBoundOn(v: int) {.symexOpaque.} =
+  ## RFC-0016 int6-a5: an opaque callee whose body checks one region. The
+  ## opaque defect scan read the body under its declaration's options (the
+  ## build's, unchecked): `s[v]` was undefined out of the seq, never an
+  ## `IndexDefect`, so a handler around the call was unreachable.
+  let s = @[10, 20, 30]
+  {.push boundChecks: on.}
+  discard s[v]
+  {.pop.}
+
+proc sutOpaqueBoundOn(v: int) =
+  try:
+    opBoundOn(v)
+  except IndexDefect:
+    symexTarget("hit")
+
 template keeps(fn: untyped) =
   let r = pinFind(fn, tLabel("hit"))
   checkpoint show(r.errors)
@@ -95,6 +111,13 @@ suite "int6 check scopes: a pushed-on region in an unchecked build":
     let r = pinFind(innerBoundOn, tLabel("hit"))
     checkpoint show(r.errors)
     check r.status == sxSat
+
+  test "an opaque callee's in-body push is not read as one scope (int6-a5)":
+    check native(sutOpaqueBoundOn(5)) == "hit"
+    check native(sutOpaqueBoundOn(2)) == "ran"
+    let r = symexFind(sutOpaqueBoundOn, tLabel("hit"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status != sxUnsat
 
 suite "int6 check scopes (off build): walker version":
   test "walker version floor >= 465":

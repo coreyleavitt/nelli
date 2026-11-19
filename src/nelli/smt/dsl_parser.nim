@@ -2073,15 +2073,41 @@ proc uncheckedTypedIndex(checkedRange: bool; idx: NimNode): bool =
   if idx.kind in {nnkHiddenStdConv, nnkHiddenSubConv}: return false
   idx.typeKind in {ntyRange, ntyEnum}
 
+proc strayPopError(n: NimNode): string =
+  ## RFC-0016 int6-a5. "" when no `{.pop.}` among the statements of the typed
+  ## body `n` closes a push its own statement list did not make; else where.
+  ## Such a pop is the cause of the shape, so it is named before the push it
+  ## closes, which `regionShapeError` would otherwise report as left open.
+  if n.kind in RoutineNodes: return
+  if n.kind in {nnkStmtList, nnkStmtListExpr}:
+    var open = 0
+    for c in n:
+      if isPushPragma(c): inc open
+      elif isPopPragma(c):
+        if open == 0:
+          return "the `{.pop.}` at line " & $c.lineInfoObj.line &
+            " closes a push made in another statement list (a `when` " &
+            "branch): the region spans the boundary unevenly"
+        dec open
+      else:
+        let e = strayPopError(c)
+        if e.len > 0: return e
+    return
+  for c in n:
+    let e = strayPopError(c)
+    if e.len > 0: return e
+
 proc regionShapeError(n: NimNode): string =
   ## RFC-0016 int6-a5. "" when every check push among the statements of the
   ## typed body `n` is popped in its own statement list, with no `defer`
   ## between them; else why not. A routine declared in the body is its own.
   ## Natively (the pinned toolchain) the code generator applies a push in
-  ## textual order whatever the statement list: one in an `if` branch with
-  ## no pop there holds for the rest of the routine, whether the branch runs
-  ## or not; one inside a `when` branch is popped after it; a `defer`'s body
-  ## runs at the end of its list, past the pop. Each is declined.
+  ## textual order whatever the statement list: one in an `if` branch or a
+  ## `block` with no pop there holds for the rest of the routine, whether the
+  ## branch runs or not (it is never read as branch-scoped); one inside a
+  ## `when` branch is popped after it (`strayPopError`, checked first); a
+  ## `defer`'s body runs at the end of its list, past the pop. Each is
+  ## declined.
   if n.kind in RoutineNodes: return
   if n.kind in {nnkStmtList, nnkStmtListExpr}:
     var open: seq[NimNode]
@@ -2227,8 +2253,9 @@ proc bodyRegionDecline(ctx: ParseCtx; impl: NimNode; body: var IRStmt): string =
   ## or put where no sequence reaches) declines.
   if ctx.regionFacts.len == 0 or body == nil: return
   if countMarkers(body) == 0: return
-  let shape = if impl != nil and impl.len > 6: regionShapeError(impl[6])
-              else: "its body is not at hand"
+  let shape = if impl == nil or impl.len <= 6: "its body is not at hand"
+              elif (let e = strayPopError(impl[6]); e.len > 0): e
+              else: regionShapeError(impl[6])
   if shape.len > 0: return shape
   var seen: seq[int]
   var err = ""
@@ -6042,6 +6069,10 @@ proc scanOpaqueDefects(n: NimNode; scan: var OpaqueScan;
         # A converter's or iterator's body is scanned like a proc's.
         if fDef.len > 6 and fDef[6].kind != nnkEmpty:
           if depth >= maxDefectScanDepth: addUnreadable()
+          elif routineChecks(fDef).bodyPragmas:
+            # RFC-0016 int6-a5: its body pushes check options, so it is not
+            # one scope; this scan reads a body under its owner's options.
+            addUnreadable()
           else: scanOpaqueDefects(fDef[6], scan, seen, depth + 1, ctx,
                                   fDef, memo)
         else:
@@ -6117,6 +6148,15 @@ proc opaqueDefectScan(calleeSym: NimNode; ctx: ParseCtx): OpaqueScan =
   var memo: FloatCheckMemo
   let impl = resolveRoutineOrLambdaImpl(calleeSym)   # RFC-0016 W3-z R8
   if impl == nil or impl.len <= 6 or impl[6].kind == nnkEmpty:
+    result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
+    return
+  if routineChecks(impl).bodyPragmas:
+    # RFC-0016 int6-a5: a body that pushes check options is not one scope,
+    # and the scan reads each node under its owner's options (`ownerChecked`):
+    # a region checked against the build's reading lost its Defect (a handler
+    # around the call was a false sxUnsat), one unchecked lost its undefined
+    # behaviour. Unreadable, as a closure or a method is.
+    result.noteDefect anyDefect
     result.noteUndefined admitDefined(aoCall, ocOpaqueBody, dsOpaque), anyProfile
     return
   scanOpaqueDefects(impl[6], result, seen, 0, ctx, impl, memo)

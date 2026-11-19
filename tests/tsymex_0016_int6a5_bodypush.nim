@@ -13,13 +13,18 @@
 ##   * after the pop the routine's own options are back (`R(300)` raises);
 ##   * a callee called from inside the region keeps its own options (its
 ##     declaration's): `convChecked(300)` raises;
-##   * one push may turn off both range and overflow checks: `R(300)` keeps 300
-##     and `v + 1` runs the plain C addition there (undefined at `high(int)`);
-##     after the pop `v + 1` raises `OverflowDefect` again.
+##   * one push may turn off both range and overflow checks: `R(383)` keeps 383,
+##     `int8(383)` truncates to 127 and `127'i8 + 1` wraps to -128 (computed in
+##     C's `int` and narrowed, a defined wrap), where the checks on would raise
+##     `RangeDefect` and `OverflowDefect`; a wide `v + 1` there is the plain C
+##     addition, undefined at `high(int)`, so its side halts and no query on
+##     the routine can be a trusted sxUnsat; after the pop `v + 1` raises
+##     `OverflowDefect` again.
 ## Fail closed (`feCheckOption`), with the native behaviour each would need:
-##   * a push in an `if` branch with no pop in that branch: the generator keeps
-##     it for the rest of the routine, whether the branch runs or not
-##     (`ifLeak(-3)` converts `R(-3)` after the `if` unchecked);
+##   * a push in an `if` branch or a `block` with no pop there: the generator
+##     keeps it for the rest of the routine, whether the branch runs or not
+##     (`ifLeak(-3)` converts `R(-3)` after the `if` unchecked, and
+##     `blockLeak(-3)` after the `block`); it is never read as branch-scoped;
 ##   * a push that runs to the routine's end (no pop);
 ##   * a push inside a `when` branch of several statements, popped after it;
 ##   * a `defer` inside a region (its body runs at the routine's end);
@@ -31,6 +36,7 @@ import std/[unittest, strutils]
 import nelli/smt/arith_regime
 import nelli
 import nelli/symex
+import nelli/smt/errorkind
 import ./s8cu_helpers
 
 type R = range[0 .. 10]
@@ -75,16 +81,15 @@ proc callsFromRegion(v: int) =
 proc bothOff(v: int) =
   {.push rangeChecks: off, overflowChecks: off.}
   let q = R(v)
-  let s = v + 1
+  let s = int8(v) + 1'i8
   {.pop.}
-  if int(q) == 300 and s == 301: symexTarget("hit")
+  if int(q) == 383 and s == -128: symexTarget("hit")
 
 proc ovfRegion(v: int) =
-  var r: int
   {.push rangeChecks: off, overflowChecks: off.}
-  r = v + 1
+  if v + 1 > v: discard
+  else: symexTarget("hit")
   {.pop.}
-  if r + v == -1: symexTarget("hit")
 
 proc ovfAfterPop(v: int) =
   {.push overflowChecks: off.}
@@ -97,6 +102,13 @@ proc ifLeak(v: int) =
   if v > 0:
     {.push rangeChecks: off.}
     discard R(v)
+  let a = R(v)
+  if int(a) == -3: symexTarget("hit")
+
+proc blockLeak(v: int) =
+  block:
+    {.push rangeChecks: off.}
+    discard id(v)
   let a = R(v)
   if int(a) == -3: symexTarget("hit")
 
@@ -133,6 +145,17 @@ proc outerPushes(v: int) =
   proc inner(w: int): int = int(R(w))
   {.pop.}
   if inner(v) == 300: symexTarget("hit")
+
+proc opOvfRegion(v: int) {.symexOpaque.} =
+  ## An opaque callee whose body turns overflow checks off for one region:
+  ## natively `v + 1` there is the plain C addition, undefined at `high(int)`.
+  {.push overflowChecks: off.}
+  discard id(v) + 1
+  {.pop.}
+
+proc sutOpaqueOvf(v: int) =
+  if v == 5: symexTarget("hit")
+  opOvfRegion(v)
 
 proc nativeOvf(f: proc (v: int) {.nimcall.}; v: int): string =
   try:
@@ -178,14 +201,23 @@ suite "int6-a5: a push inside a routine body is a region of its own":
     raises(callsFromRegion, "RangeDefect")
 
   test "one push turns off range and overflow checks":
-    check native(bothOff(300)) == "hit"
+    check native(bothOff(383)) == "hit"
+    check native(bothOff(5)) == "ran"
     keeps(bothOff)
-    let x = symexFind(bothOff, tRaisedExn("OverflowDefect"))
+    let x = pinFind(bothOff, tRaisedExn("OverflowDefect"))
     checkpoint show(x.errors)
-    check x.status != sxRaised
+    check x.status == sxUnsat
 
   test "the region's signed overflow is undefined, as in an off build":
-    check nativeOvf(ovfRegion, id(high(int))) == ""
+    # Only the overflow reaches "hit", and it is undefined: gcc folds
+    # `v + 1 > v` to true and never reaches it, MSVC wraps and does. The
+    # walker halts that side under either; the absence of a raise is pinned.
+    let n = nativeRun(ovfRegion(high(int)))
+    when defined(vcc):
+      check "hit" in n.hits
+    else:
+      check "hit" notin n.hits
+    check n.raised == ""
     pinDecline(ovfRegion, cellKey(axDefinedness, "add/signed/pushOff/bodyRegion"),
                ubSignedOverflow, excluding = {feOverflowCheckOption,
                                               feCheckOption})
@@ -198,10 +230,29 @@ suite "int6-a5: a push inside a routine body is a region of its own":
     check r.status == sxSat
 
 suite "int6-a5: shapes that fail closed":
+  test "an opaque callee's in-body region is not read as one scope":
+    # The opaque defect scan read the callee's body under its declaration's
+    # options (checked): `+` was an `OverflowDefect`, never undefined, so the
+    # whole-run gate found nothing undefined in the tail past "hit" and the
+    # label was trusted. Its off-build twin
+    # (`tsymex_0016_int6p2_checkscope_off`) was a trusted false sxUnsat. A
+    # body that pushes is unreadable now: "may be undefined", as a foreign
+    # body is (`tsymex_0016_k10b_round` (c)).
+    check nativeOvf(sutOpaqueOvf, high(int)) == ""
+    let r = pinFind(sutOpaqueOvf, tLabel("hit"), pinSettingsConst)
+    checkpoint $r.status & " " & show(r.errors) & " " & $r.soundness
+    check r.status == sxSat
+    check not r.trusted
+    check UbKind(ubTailUnverified) in r.soundness.undefinedKinds
+
   test "a push in a branch, unpopped there, leaks past it natively":
     check native(ifLeak(-3)) == "hit"
     check native(ifLeak(300)) == "ran"
     pinDecline(ifLeak, sk, feCheckOption, needle = "not popped in its own")
+
+  test "a push in a block, unpopped there, leaks past it natively":
+    check native(blockLeak(-3)) == "hit"
+    pinDecline(blockLeak, sk, feCheckOption, needle = "not popped in its own")
 
   test "a push that runs to the routine's end":
     check native(unpopped(300)) == "hit"

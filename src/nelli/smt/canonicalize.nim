@@ -1456,6 +1456,12 @@ const renderAsChoicesVersion* = "12"
   ##   expands again, where the position was read both ways and declined
   ##   `feCheckOption` (float checks included). Key bytes change: such a
   ##   body's scope, stamp and digest.
+  ##   RFC-0016 int6-a5 (also 474): a check push and pop inside a routine
+  ##   body is modelled as a region of its own, its statements walked under
+  ##   its check scope and arithmetic, where the routine declined
+  ##   `feCheckOption`; unbalanced shapes still decline, and the opaque
+  ##   defect scan reads such a body as unreadable. Key bytes change: such a
+  ##   body's region blocks, their scope and stamp.
 
 const symexWalkerVersion* = "474"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

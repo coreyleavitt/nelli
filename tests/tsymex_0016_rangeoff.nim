@@ -128,6 +128,21 @@ proc sutUncheckedPart(v: int) =
   {.pop.}
   if int(r) == 300: symexTarget("hit")
 
+proc opPushOn(v: int) {.symexOpaque.} =
+  ## An opaque callee whose body checks one region: natively `R(300)` raises
+  ## `RangeDefect` out of it. The opaque scan lists a conversion's
+  ## `RangeDefect` whatever the owner's options, so this held before int6-a5;
+  ## it is the direction-of-build control for the int6-a5 suite's overflow row.
+  {.push rangeChecks: on.}
+  discard R(v)
+  {.pop.}
+
+proc sutOpaquePushOn(v: int) =
+  try:
+    opPushOn(v)
+  except RangeDefect:
+    symexTarget("hit")
+
 when defined(rangeoffPushed):
   {.push rangeChecks: on.}
 proc sutAmbiguous(v: int) =
@@ -152,6 +167,12 @@ suite "PRC-07: range checks that differ within a routine (never the build's)":
     checkpoint show(x.errors)
     check x.status == sxRaised
     check not x.errors.named(feCheckOption)
+  test "an opaque callee's in-body push is not read as one scope (int6-a5)":
+    check native(sutOpaquePushOn(300)) == "hit"
+    check native(sutOpaquePushOn(5)) == "ran"
+    let x = symexFind(sutOpaquePushOn, tLabel("hit"))
+    checkpoint $x.status & " " & show(x.errors)
+    check x.status != sxUnsat
   test "a push under a defined() condition is walked as compiled (int6-a2)":
     check native(sutAmbiguous(300)) == "RangeDefect"
     check native(sutAmbiguous(5)) == "ran"

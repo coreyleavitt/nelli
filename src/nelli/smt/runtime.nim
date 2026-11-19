@@ -1114,53 +1114,10 @@ var obligationLog* {.threadvar.}: ObligationLog
   ## Appending it to the per-lower reset list would silently truncate it to
   ## whatever the last expression happened to raise.
 
-var seqOobConds* {.threadvar.}: seq[Z3Bool]
-  ## N14 (RFC-chapulin-hardening bucket-2). Raise-fork sink for seq `del(i)`
-  ## out-of-bounds predicates. `lower`'s `iekSeqDel` arm pushes
-  ## `(idx < 0) or (idx >= len(s))` here — mirrors `strIndexOobConds` exactly
-  ## (same sink -> drain-fork pattern, same reason: `del`'s OOB check needs a
-  ## `forkDefect` call, which only exists at WALK time, but `iekSeqDel` is
-  ## reached from inside the exception-free `lower()` evaluator via a plain
-  ## `isAssign` — `mySeq.del(i)` A-normalises to
-  ## `mkAssign(recvName, mkSeqDel(mkVar(recvName), idx))`, not its own
-  ## dedicated statement kind, unlike `xs[i] = v`'s `isIndexAssign`). `pop()`
-  ## needed a dedicated statement (`isSeqPop`) instead because it ALSO binds
-  ## a fresh return value — `del`'s single-target env rebind fits the
-  ## existing `isAssign` shape exactly, so the lighter sink route applies.
-  ## `drainSeqOobRaises` (via `drainScalarRaiseForks`) reads and resets this
-  ## sink, forking each predicate as a routed `IndexDefect` raise path.
-  ## `syncSeqOobCond` appends to `WalkCtx.seqOobConds` when in a walk.
-  ## Reset alongside `strIndexOobConds` at every reset site.
-
-var uninitReadConds* {.threadvar.}: seq[Z3Bool]
-  ## RFC-0005 S8bv (item 4). The conditions under which an inline `map` /
-  ## `filter` / `fold` read an unwritten `newSeqUninit` element (`hofElemAt`,
-  ## one per element read that may be unwritten). `lower` has no path to
-  ## fork, so they wait here; `drainUninitReads` (a stage of
-  ## `drainScalarRaiseForks`) forks the continuation: clean where no read was
-  ## unwritten, tainted `uninitReadKind` where one was. Before S8bv such a
-  ## read tainted the whole path in-band. `syncUninitReadCond` appends to
-  ## `WalkCtx.uninitReadConds` when in a walk. Reset alongside
-  ## `arithTrapConds` at every reset site.
-
 proc opSite(construct, site: string): string =
   ## K10a-float. The trap's site text: the construct, at its source position
   ## when the lowering op carries one.
   if site.len > 0: construct & " at " & site else: construct
-
-var arithTrapConds* {.threadvar.}: seq[ArithTrap]
-  ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
-  ## generated C rather than raising: signed `mod` of `low(T)` by `-1` at 32
-  ## and 64 bits (and `div` there, which traps when overflow checks are
-  ## off), compiled to a hardware `idiv` that raises SIGFPE -- an uncatchable
-  ## process abort (`except Defect` does not see it; probed on the pinned
-  ## toolchain, c and cpp). `lowerArith` pushes each trap predicate here;
-  ## `drainArithTraps` (via `drainScalarRaiseForks`) adds its negation to the
-  ## continuation's defect-survivor facts and forks NO raise: no execution
-  ## continues past the trap, and there is no exception to route. Before S8i
-  ## the continuation carried `low(T) mod -1 == 0`, a state Nim never
-  ## reaches. `syncArithTrapCond` appends to `WalkCtx.arithTrapConds` when in
-  ## a walk. Reset alongside `seqOobConds` at every reset site.
 
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
@@ -1231,10 +1188,8 @@ proc depositStrIndexOob(oob: Z3Bool) =
   if boundsUnchecked():
     let tr = ArithTrap(cond: oob, ub: some(uncheckedIndexUb()),
                        site: uncheckedIndexSite(""))
-    arithTrapConds.add tr
     syncArithTrapCond(tr)
   else:
-    strIndexOobConds.add oob
     syncStrIndexOobCond(oob)
 
 proc depositUndefinedOob(oob: Z3Bool) =
@@ -1242,7 +1197,6 @@ proc depositUndefinedOob(oob: Z3Bool) =
   ## past the buffer, undefined whatever the build's checks.
   let tr = ArithTrap(cond: oob, ub: some(uncheckedIndexUb()),
                      site: uncheckedIndexSite(""))
-  arithTrapConds.add tr
   syncArithTrapCond(tr)
 
 proc seedCallerHeapInWalkCtx*(p: Path)
@@ -3228,7 +3182,6 @@ proc lowerConvIntRange(sv: SymVal, e: IRExpr): SymVal =
       injectShapeFault("conds")  # RFC-0005 S8ce: a local seq[Z3Bool] held
     var inRange = conds[0]
     for i in 1 ..< conds.len: inRange = inRange and conds[i]
-    rangeDefectConds.add(not inRange)              # threadvar fallback
     syncRangeDefectCond(not inRange)
   let tw = e.ciwTgtWidth
   if sv.kind == svInt:
@@ -5073,10 +5026,8 @@ proc depositSignedOverflow(oc: Z3Bool; width: int; op: IRBinop; site: string) =
   of dkUndefined:
     let tr = ArithTrap(cond: oc, ub: some(ans.ub),
                        site: opSite("signed `+`, `-` or `*` overflow", site))
-    arithTrapConds.add tr
     syncArithTrapCond(tr)
   of dkDefect:
-    overflowConds.add oc
     syncOverflowCond(oc)
 
 proc depositFloatChecks(r: SymVal; on: set[CheckOption]) =
@@ -5098,7 +5049,6 @@ proc depositFloatChecks(r: SymVal; on: set[CheckOption]) =
        "FPU operations caused an underflow")]:
     if co in on:
       let t = ArithTrap(cond: cond, site: msg, raiseName: name)
-      arithTrapConds.add t
       syncArithTrapCond(t)
 
 proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
@@ -5193,7 +5143,6 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
       # aborts the process on replay) and, with `acDivByZero` off too, the
       # continuation carried Z3's `x div 0` value, a state Nim never
       # reaches.
-      arithTrapConds.add divTrap
       syncArithTrapCond(divTrap)
     elif unsignedDiv:
       # RFC-0016 W1-d1b: Nim's zero-divisor check covers the signed types
@@ -5201,10 +5150,8 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
       # traps (SIGFPE, probed c and cpp, default build), so it is no
       # `DivByZeroDefect` and no `except` arm runs. The C division is
       # undefined there, so the zero side halts (section 9.1 item 1).
-      arithTrapConds.add divTrap
       syncArithTrapCond(divTrap)
     else:
-      divByZeroConds.add c
       syncDivByZeroCond(c)
   if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and
      a.signed and not bvOverflowDischarged(a, b, op):   # RFC-0005 S8bv
@@ -5250,7 +5197,6 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
         (if width in {32, 64}: ocLowByMinusOneWide
          else: ocLowByMinusOneNarrow), defProfile())
       if lowAns.kind == dkDefect:
-        overflowConds.add tc
         syncOverflowCond(tc)
       if width in {32, 64}:
         # RFC-0016 W1-d1a: `mod` has no Nim check, and `div` has none with
@@ -5264,7 +5210,6 @@ proc lowerArith(a, b: SymVal, op: IRBinop, site = "";
                                    else: "`low(T) div -1`", site))
           else:
             ArithTrap(cond: tc)
-        arithTrapConds.add tr
         syncArithTrapCond(tr)
   if a.kind == svInt:
     # RFC-0005 S8w: a width-stamped result wraps where the machine's does:
@@ -6366,10 +6311,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       else: (sliceLen > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenZ))
     let negLen = sliceLen < mkInt(0)
     when not defined(symexSliceNoOobFork):
-      strIndexOobConds.add idxOob
       syncStrIndexOobCond(idxOob)
       if not e.ssView:
-        rangeDefectConds.add negLen
         syncRangeDefectCond(negLen)
     inc sliceViewCounter
     let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
@@ -6804,10 +6747,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     # `IndexDefect` (probe: `@[1,2,3].del(-1)` -> RangeDefect, `.del(3)` ->
     # IndexDefect). Both were `IndexDefect`.
     let oob = idxZi >= lenZi
-    seqOobConds.add oob
     syncSeqOobCond(oob)
     let negIdx = idxZi < mkInt(0)
-    rangeDefectConds.add negIdx
     syncRangeDefectCond(negIdx)
     # Swap-with-last: data' = store(data, idx, data[len-1]); len' = len-1.
     # `idxZi` may equal `lenZi - 1` (deleting the last element) — the store
@@ -6887,7 +6828,6 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     let lenZi = recv.seqLen # [placeholder-audited]
     if e.insGrow:
       let negIdx = idxZi < mkInt(0)
-      rangeDefectConds.add negIdx
       syncRangeDefectCond(negIdx)
       if not defaultZeroTotal(recv.seqElemTy):
         # A backed element type whose all-zero memory is not a value of
@@ -6919,7 +6859,6 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     # The grow phase made `lenZi` the new length, so `x[i]` is out of
     # bounds exactly when `i >= lenZi` (`i > ` the length at the call).
     let oob = idxZi >= lenZi
-    seqOobConds.add oob
     syncSeqOobCond(oob)
     # data'[j] = (j <= i ? store(data, i, item)[j] : data[j - 1]).
     let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
@@ -14819,8 +14758,8 @@ type
 
 proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   ## RFC-0005 S7. See `PendingLowerEffects`. The WalkCtx fields are the LIVE
-  ## store during a walk (the threadvars mirror them), so they are what is
-  ## saved; both stores are cleared. The caller-heap seed is saved, not
+  ## store during a walk (the raise sinks' only store; the closure threadvars
+  ## mirror their own), so they are what is saved; every store is cleared. The caller-heap seed is saved, not
   ## cleared -- the descent reads it.
   result = PendingLowerEffects(
     pendingTaint: loweringPendingTaint, pendingUb: loweringPendingUb,
@@ -14841,16 +14780,16 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   loweringReadNames = @[]
   loweringPendingTaint = {}
   loweringPendingUb = {}
-  w.sinks.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
-  w.sinks.divByZeroConds = @[]; divByZeroConds = @[]
-  w.sinks.overflowConds = @[]; overflowConds = @[]
-  w.sinks.strIndexOobConds = @[]; strIndexOobConds = @[]
-  w.sinks.seqOobConds = @[]; seqOobConds = @[]
-  w.sinks.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
-  w.sinks.rangeDefectConds = @[]; rangeDefectConds = @[]
-  w.sinks.arithTrapConds = @[]; arithTrapConds = @[]
-  w.sinks.uninitReadConds = @[]; uninitReadConds = @[]   # RFC-0005 S8bv
-  w.sinks.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
+  w.sinks.parseIntRaiseConds = @[]
+  w.sinks.divByZeroConds = @[]
+  w.sinks.overflowConds = @[]
+  w.sinks.strIndexOobConds = @[]
+  w.sinks.seqOobConds = @[]
+  w.sinks.convFloatToIntBoundConds = @[]
+  w.sinks.rangeDefectConds = @[]
+  w.sinks.arithTrapConds = @[]
+  w.sinks.uninitReadConds = @[]   # RFC-0005 S8bv
+  w.sinks.regexRaiseMsgs = @[]
   w.sinks.raiseOrder = @[]
   w.closureRaises = @[]
   w.closureVarOuts = @[]        ## RFC-0005 S8bh
@@ -14859,21 +14798,20 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
 
 proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   ## RFC-0005 S7. Inverse of `takePendingLowerEffects`: reinstates the calling
-  ## expression's pending effects in BOTH stores, discarding whatever the
+  ## expression's pending effects in every store, discarding whatever the
   ## descent's own statement arms left behind (they drained their own).
   loweringPendingTaint = s.pendingTaint
   loweringPendingUb = s.pendingUb
-  w.sinks.parseIntRaiseConds = s.parseInt; parseIntRaiseConds = s.parseInt
-  w.sinks.divByZeroConds = s.divByZero; divByZeroConds = s.divByZero
-  w.sinks.overflowConds = s.overflow; overflowConds = s.overflow
-  w.sinks.strIndexOobConds = s.strIndexOob; strIndexOobConds = s.strIndexOob
-  w.sinks.seqOobConds = s.seqOob; seqOobConds = s.seqOob
-  w.sinks.convFloatToIntBoundConds = s.convBound; convFloatToIntBoundConds = s.convBound
+  w.sinks.parseIntRaiseConds = s.parseInt
+  w.sinks.divByZeroConds = s.divByZero
+  w.sinks.overflowConds = s.overflow
+  w.sinks.strIndexOobConds = s.strIndexOob
+  w.sinks.seqOobConds = s.seqOob
+  w.sinks.convFloatToIntBoundConds = s.convBound
   w.sinks.rangeDefectConds = s.rangeDefect
-  rangeDefectConds = s.rangeDefect
-  w.sinks.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
-  w.sinks.uninitReadConds = s.uninitRead; uninitReadConds = s.uninitRead
-  w.sinks.regexRaiseMsgs = s.regexRaise; regexRaiseMsgs = s.regexRaise
+  w.sinks.arithTrapConds = s.arithTrap
+  w.sinks.uninitReadConds = s.uninitRead
+  w.sinks.regexRaiseMsgs = s.regexRaise
   w.sinks.raiseOrder = s.raiseOrder
   w.closureRaises = s.closureRaises
   w.closureVarOuts = s.closureVarOuts   ## RFC-0005 S8bh
@@ -16693,17 +16631,8 @@ proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
   ## Before K10a-float the other side continued on a path tainted
   ## `feConvFloatToIntUndefined` with a fresh value; under the time-travel
   ## rule that was not sound for a trusted `sxUnsat` either.
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].sinks.convFloatToIntBoundConds
-      wp[].sinks.convFloatToIntBoundConds = @[]
-      convFloatToIntBoundConds = @[]   # keep threadvar reset in sync
-      c
-    else:
-      let c = convFloatToIntBoundConds
-      convFloatToIntBoundConds = @[]
-      c
+  let conds = w.sinks.convFloatToIntBoundConds
+  w.sinks.convFloatToIntBoundConds = @[]
   if conds.len == 0:
     return @[p]
   var inDomain = conds[0].cond
@@ -16736,11 +16665,10 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
   ## `drainStrIndexRaises` (was 4 near-identical bodies differing only in the
   ## sink field, an optional settings-gate, the routed defect-type string, and
   ## the message). Each generated proc:
-  ##  - reads and resets `field` (the raise-predicate sink accumulated by the
-  ##    just-completed `lower`/`lowerBool` call) — from `WalkCtx.field` (the
-  ##    LIVE store) when a walk is active, else the module threadvar `field`
-  ##    (probe-path `lower()` calls, where no drain runs). Both stores are
-  ##    reset so a subsequent lower() starts clean (idempotent).
+  ##  - reads and resets `w.sinks.field` (the raise-predicate sink accumulated
+  ##    by the just-completed `lower`/`lowerBool` call; its only store, which
+  ##    the `sync*` deposits fill through `currentLowerSinks`), so a
+  ##    subsequent lower() starts clean (idempotent).
   ##  - `gate` is `none(ArithCheck)` for an unconditional drain (parseInt/
   ##    str-index — no opt-out) or `some(acFoo)` for a build-gated drain
   ##    (div-by-zero/overflow). When `gate` is `some` and the build does NOT
@@ -16758,17 +16686,8 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
   ##
   ## This drain always forks from the POST-lower path `p` directly.
   proc procName(p: Path, w: var WalkCtx): seq[Path] =
-    let conds = block:
-      if currentWalkCtxPtr != nil:
-        let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-        let c = wp[].sinks.field
-        wp[].sinks.field = @[]
-        field = @[]         # keep threadvar reset in sync
-        c
-      else:
-        let c = field
-        field = @[]
-        c
+    let conds = w.sinks.field
+    w.sinks.field = @[]
     # `gate` is a compile-time `static[Option[ArithCheck]]`. `none(ArithCheck)`
     # means "unconditional drain" (parseInt/str-index) — never early-returns on
     # the gate. `some(acFoo)` (div-by-zero/overflow) is build-gated: skip
@@ -16821,17 +16740,8 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## The clean survivor carries `not exact` and `not lax`; the tainted lax
   ## survivor carries every `not exact` plus the disjunction of the live
   ## `lax` halves -- together every input on which Nim does not raise.
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].sinks.parseIntRaiseConds
-      wp[].sinks.parseIntRaiseConds = @[]
-      parseIntRaiseConds = @[]         # keep threadvar reset in sync
-      c
-    else:
-      let c = parseIntRaiseConds
-      parseIntRaiseConds = @[]
-      c
+  let conds = w.sinks.parseIntRaiseConds
+  w.sinks.parseIntRaiseConds = @[]
   if conds.len == 0:
     return @[p]
   const msg = "invalid integer: parseInt"
@@ -16974,17 +16884,8 @@ proc drainUninitReads(p: Path, w: var WalkCtx): seq[Path] =
   ## disjunction, tainted `uninitReadKind` (the read value is a superset of
   ## what the allocation held). As `drainConvFloatToIntFresh`'s split, the
   ## facts select between two models of one execution, not a program branch.
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].sinks.uninitReadConds
-      wp[].sinks.uninitReadConds = @[]
-      uninitReadConds = @[]   # keep threadvar reset in sync
-      c
-    else:
-      let c = uninitReadConds
-      uninitReadConds = @[]
-      c
+  let conds = w.sinks.uninitReadConds
+  w.sinks.uninitReadConds = @[]
   if conds.len == 0:
     return @[p]
   var anyRead = conds[0]
@@ -17016,17 +16917,8 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   ## deposits (`div` with the checks on, where the `OverflowDefect` fork
   ## already took the side) still confine the survivor through
   ## `defectSurvivorPc`.
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].sinks.arithTrapConds
-      wp[].sinks.arithTrapConds = @[]
-      arithTrapConds = @[]   # keep threadvar reset in sync
-      c
-    else:
-      let c = arithTrapConds
-      arithTrapConds = @[]
-      c
+  let conds = w.sinks.arithTrapConds
+  w.sinks.arithTrapConds = @[]
   if conds.len == 0:
     return @[p]
   var cur = forkPath(p, p.pc, p.env)
@@ -17054,17 +16946,8 @@ proc drainRegexRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## (`drainScalarRaiseForks`), so a raise the expression evaluates later
   ## is never forked; the parser lowers only the arguments BEFORE a
   ## rejected pattern (`regexCall`).
-  let msgs = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let m = wp[].sinks.regexRaiseMsgs
-      wp[].sinks.regexRaiseMsgs = @[]
-      regexRaiseMsgs = @[]   # keep threadvar reset in sync
-      m
-    else:
-      let m = regexRaiseMsgs
-      regexRaiseMsgs = @[]
-      m
+  let msgs = w.sinks.regexRaiseMsgs
+  w.sinks.regexRaiseMsgs = @[]
   if msgs.len == 0:
     return @[p]
   let rp = forkPath(p, p.pc, p.env)
@@ -17197,16 +17080,16 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   # Every sink starts empty: a run reinstates only its own slice, and a
   # run the regex stage cuts off must not leave its deposits behind.
   w.closureRaises = @[]
-  w.sinks.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
-  w.sinks.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
-  w.sinks.divByZeroConds = @[]; divByZeroConds = @[]
-  w.sinks.overflowConds = @[]; overflowConds = @[]
-  w.sinks.strIndexOobConds = @[]; strIndexOobConds = @[]
-  w.sinks.seqOobConds = @[]; seqOobConds = @[]
-  w.sinks.rangeDefectConds = @[]; rangeDefectConds = @[]
-  w.sinks.arithTrapConds = @[]; arithTrapConds = @[]
-  w.sinks.uninitReadConds = @[]; uninitReadConds = @[]   # RFC-0005 S8bv
-  w.sinks.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
+  w.sinks.convFloatToIntBoundConds = @[]
+  w.sinks.parseIntRaiseConds = @[]
+  w.sinks.divByZeroConds = @[]
+  w.sinks.overflowConds = @[]
+  w.sinks.strIndexOobConds = @[]
+  w.sinks.seqOobConds = @[]
+  w.sinks.rangeDefectConds = @[]
+  w.sinks.arithTrapConds = @[]
+  w.sinks.uninitReadConds = @[]   # RFC-0005 S8bv
+  w.sinks.regexRaiseMsgs = @[]
   var total: array[RaiseSinkKind, int]
   total[rskClosure] = closureSnap.len
   total[rskConvBound] = convSnap.len
@@ -17231,11 +17114,10 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
     inc used[k]
   for k in RaiseSinkKind:
     if used[k] < total[k]: runs.add (k, used[k], total[k])
-  template stage(inp: seq[Path]; sinkW, sinkT, snap, lo, hi, drain: untyped): seq[Path] =
+  template stage(inp: seq[Path]; sink, snap, lo, hi, drain: untyped): seq[Path] =
     var outp: seq[Path]
     for s in inp:
-      w.sinks.sinkW = snap[lo ..< hi]
-      sinkT = snap[lo ..< hi]
+      w.sinks.sink = snap[lo ..< hi]
       outp.add drain(s, w)
     outp
   var cur = @[start]
@@ -17259,37 +17141,37 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
         outp.add q
       cur = outp
     of rskConvBound:
-      cur = stage(cur, convFloatToIntBoundConds, convFloatToIntBoundConds,
-                  convSnap, lo, hi, drainConvFloatToIntFresh)
+      cur = stage(cur, convFloatToIntBoundConds, convSnap, lo, hi,
+                  drainConvFloatToIntFresh)
     of rskParseInt:
-      cur = stage(cur, parseIntRaiseConds, parseIntRaiseConds, parseSnap,
+      cur = stage(cur, parseIntRaiseConds, parseSnap,
                   lo, hi, drainParseIntRaises)
     of rskDivByZero:
-      cur = stage(cur, divByZeroConds, divByZeroConds, divSnap, lo, hi,
+      cur = stage(cur, divByZeroConds, divSnap, lo, hi,
                   drainDivByZeroRaises)
     of rskOverflow:
-      cur = stage(cur, overflowConds, overflowConds, ovfSnap, lo, hi,
+      cur = stage(cur, overflowConds, ovfSnap, lo, hi,
                   drainOverflowRaises)
     of rskArithTrap:
       # RFC-0005 S8i: `lowerArith` deposits a trap after its overflow
       # raise, so a `low(T) div -1` raises `OverflowDefect` (Nim's check
       # runs first) and only its survivor is confined off the trap.
-      cur = stage(cur, arithTrapConds, arithTrapConds, trapSnap, lo, hi,
+      cur = stage(cur, arithTrapConds, trapSnap, lo, hi,
                   drainArithTraps)
     of rskStrIndex:
-      cur = stage(cur, strIndexOobConds, strIndexOobConds, strSnap, lo, hi,
+      cur = stage(cur, strIndexOobConds, strSnap, lo, hi,
                   drainStrIndexRaises)
     of rskSeqOob:
-      cur = stage(cur, seqOobConds, seqOobConds, seqSnap, lo, hi,
+      cur = stage(cur, seqOobConds, seqSnap, lo, hi,
                   drainSeqOobRaises)
     of rskRange:
-      cur = stage(cur, rangeDefectConds, rangeDefectConds, rangeSnap, lo, hi,
+      cur = stage(cur, rangeDefectConds, rangeSnap, lo, hi,
                   drainRangeRaises)
     of rskRegex:
-      cur = stage(cur, regexRaiseMsgs, regexRaiseMsgs, regexSnap, lo, hi,
+      cur = stage(cur, regexRaiseMsgs, regexSnap, lo, hi,
                   drainRegexRaises)
     of rskUninitRead:
-      cur = stage(cur, uninitReadConds, uninitReadConds, uninitSnap, lo, hi,
+      cur = stage(cur, uninitReadConds, uninitSnap, lo, hi,
                   drainUninitReads)
   cur
 
@@ -17541,30 +17423,20 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   ## NOT called here — arms that need the parseInt raise-fork call it on the
   ## returned path p2 after this wrapper returns.
   ##
-  ## CR-9 Stage 6: resets WalkCtx fields (via w param) in addition to the
-  ## threadvar resets so the WalkCtx LIVE store starts clean for each lower() call.
+  ## CR-9 Stage 6: resets the WalkCtx sinks (via w param), the raise sinks'
+  ## only store, so each starts clean for each lower() call.
   ## `seedCallerHeapThreadvars` (called below) also calls `seedCallerHeapInWalkCtx`
   ## to reset the exit-heap WalkCtx fields; the remaining sink resets happen here.
   claimStrayPendingTaint()               ## RFC-0005 review R1-04
-  parseIntRaiseConds = @[]
   w.sinks.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
-  convFloatToIntBoundConds = @[]
   w.sinks.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
-  rangeDefectConds = @[]
   w.sinks.rangeDefectConds = @[]     # RFC-0005 S8g: reset RangeDefect raise sink
-  divByZeroConds = @[]
   w.sinks.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
-  overflowConds = @[]
   w.sinks.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
-  strIndexOobConds = @[]
   w.sinks.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
-  seqOobConds = @[]
   w.sinks.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
-  arithTrapConds = @[]
-  uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
   w.sinks.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
   w.sinks.uninitReadConds = @[]                ## RFC-0005 S8bv
-  regexRaiseMsgs = @[]
   w.sinks.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
   w.sinks.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
@@ -17583,28 +17455,18 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   ##   let b = lowerBool(p.env, e)       # may deposit float bounds + closure writes
   ##   let p2 = drainPendingLowerEffects(p)  # drain + reset both sinks
   ##
-  ## CR-9 Stage 6: resets WalkCtx fields (via w param) in addition to the
-  ## threadvar resets so the WalkCtx LIVE store starts clean for each lowerBool() call.
+  ## CR-9 Stage 6: resets the WalkCtx sinks (via w param), the raise sinks'
+  ## only store, so each starts clean for each lowerBool() call.
   claimStrayPendingTaint()               ## RFC-0005 review R1-04
-  parseIntRaiseConds = @[]
   w.sinks.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
-  convFloatToIntBoundConds = @[]
   w.sinks.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
-  rangeDefectConds = @[]
   w.sinks.rangeDefectConds = @[]     # RFC-0005 S8g: reset RangeDefect raise sink
-  divByZeroConds = @[]
   w.sinks.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
-  overflowConds = @[]
   w.sinks.overflowConds = @[]                 # R16-4: reset signed-integer overflow raise sink
-  strIndexOobConds = @[]
   w.sinks.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
-  seqOobConds = @[]
   w.sinks.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
-  arithTrapConds = @[]
-  uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
   w.sinks.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
   w.sinks.uninitReadConds = @[]                ## RFC-0005 S8bv
-  regexRaiseMsgs = @[]
   w.sinks.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
   w.sinks.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
@@ -21636,25 +21498,15 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       for p in paths:
         if w.shouldStop: return exact(@[])
         seedCallerHeapThreadvars(p)
-        convFloatToIntBoundConds = @[]
         w.sinks.convFloatToIntBoundConds = @[]
-        rangeDefectConds = @[]
         w.sinks.rangeDefectConds = @[]
-        parseIntRaiseConds = @[]
         w.sinks.parseIntRaiseConds = @[]
-        divByZeroConds = @[]
         w.sinks.divByZeroConds = @[]
-        overflowConds = @[]
         w.sinks.overflowConds = @[]
-        strIndexOobConds = @[]
         w.sinks.strIndexOobConds = @[]
-        seqOobConds = @[]
         w.sinks.seqOobConds = @[]
-        arithTrapConds = @[]
-        uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
         w.sinks.arithTrapConds = @[]
         w.sinks.uninitReadConds = @[]                ## RFC-0005 S8bv
-        regexRaiseMsgs = @[]
         w.sinks.regexRaiseMsgs = @[]
         w.sinks.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
         claimStrayPendingTaint()        ## RFC-0005 review R1-04
@@ -21850,25 +21702,15 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
       # Lower actuals in the caller env once; reused for cache key
       # and for callee env construction.
       var argVals: seq[SymVal]
-      convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
       w.sinks.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
-      rangeDefectConds = @[]   ## RFC-0005 S8g: RangeDefect raise sink reset
       w.sinks.rangeDefectConds = @[] ## R16-2: WalkCtx field
-      parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
       w.sinks.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
-      divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
       w.sinks.divByZeroConds = @[]            ## R16-3: WalkCtx field
-      overflowConds = @[]               ## R16-4: signed-integer overflow raise sink reset
       w.sinks.overflowConds = @[]             ## R16-4: WalkCtx field
-      strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
       w.sinks.strIndexOobConds = @[]          ## SND-4: WalkCtx field
-      seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
       w.sinks.seqOobConds = @[]                ## N14: WalkCtx field
-      arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
-      uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
       w.sinks.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
       w.sinks.uninitReadConds = @[]                ## RFC-0005 S8bv
-      regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
       w.sinks.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
       w.sinks.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
       claimStrayPendingTaint()          ## RFC-0005 review R1-04
@@ -26995,7 +26837,6 @@ proc hofElemAt(seqSV: SymVal; i: int): SymVal =
   ## tainted. S8bq tainted the whole path in-band.
   let u = uninitReadCond(seqSV, mkInt(i))
   if u.isSome:
-    uninitReadConds.add u.get
     syncUninitReadCond(u.get)
   seqElemAt(seqSV, mkInt(i))
 
@@ -27895,9 +27736,6 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   sliceViewCounter = 0                   ## v67: reset slice-view bound-var counter
   variantLitFreshCounter = 0             ## Round-6 A1: reset variant-lit fresh-field counter
   variantConstructSymFreshCounter = 0    ## Round-6 A3: reset per-fork fresh-field counter
-  seqOobConds = @[]                      ## N14: reset seq del-OOB raise-fork sink
-  arithTrapConds = @[]                   ## RFC-0005 S8i: reset arithmetic-trap sink
-  uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
   currentClosureCallAxioms = @[]         ## Phase 15 C2b: reset ground-axiom sink
   globalEntryVals = initTable[string, SymVal]()  ## RFC-0005 S8as
   glUnwritten = initTable[int, string]()   ## RFC-0005 batch 6: their
@@ -30958,8 +30796,8 @@ proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
   releaseToDefault(cstringWitnessBufs,   # RFC-0016 INT-87
     freshnessCapHints, heapDepthErrors, newFieldZeroErrors,
     ptrFamilyHints, closureEnvWrites, loweringReadNames, z3ApiErrorCount,
-    z3ApiFirstError, arithFrames, checkScopes, obligationLog, seqOobConds,
-    uninitReadConds, arithTrapConds, currentVariantHeaps,
+    z3ApiFirstError, arithFrames, checkScopes, obligationLog,
+    currentVariantHeaps,
     currentWinningGlobals, heapWitnessNominalRegistry, currentCallerHeaps,
     currentCallerHeapDepth, currentCallerAllocCounters,
     currentCallerLiveRefs, currentClosureExitHeaps,

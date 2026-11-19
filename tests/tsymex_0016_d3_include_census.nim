@@ -595,9 +595,7 @@ const
     "currentMaxSplitParts", "currentInFlightTypeId", "currentInFlightMsg",
     "currentExnRefCounter", "lastGetCurrentExnRef", "currentClosureSyms",
     "currentClosureBodies", "currentDistinctSorts",
-    "convFloatToIntBoundConds", "rangeDefectConds", "divByZeroConds",
-    "overflowConds", "strIndexOobConds", "regexRaiseMsgs",
-    "parseIntRaiseConds", "regexRecDefConds", "regexRecFactConds",
+    "regexRecDefConds", "regexRecFactConds",
     "regexPointSites", "regexLimitSites", "stripDecompConds",
     "stripSynthCounter", "DistinctSortEntry", "ConvBound", "ArithTrap",
     "ParseIntRaise", "ClosureSymKey", "ClosureBody", "RegexPointSite",
@@ -647,10 +645,30 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
     for l in ws.splitLines:
       if l.startsWith("var ") and "{.threadvar.}" in l:
         tvs.add leadIdent(l[4 .. ^1])
-    check tvs.len == 26
+    check tvs.len == 19   # RFC-0016 K9e: the raise sinks live in LowerSinks only
     for n in tvs:
       checkpoint n
       check resetBody.contains("\n  " & n & " = ")
+
+  test "a raise sink has one store: its LowerSinks field, no threadvar (K9e)":
+    # Every drain takes the walk's own `WalkCtx` and reads `w.sinks`; a
+    # threadvar of the same name was a mirror no reader could reach.
+    let ws = readSmt("walk_state.nim")
+    let at = ws.find("type LowerSinks* = object")
+    check at >= 0
+    var fields: seq[string]
+    for l in ws[at .. ^1].splitLines()[1 .. ^1]:
+      if l.len > 0 and not l.startsWith(" "): break
+      if l.startsWith("  ") and not l.startsWith("   ") and
+         ("Conds*: seq[" in l or "Msgs*: seq[" in l):
+        fields.add leadIdent(l.strip())
+    checkpoint $fields
+    check fields.len == 10
+    for p in walkFiles(smt / "*.nim"):
+      for l in codeOf(readFile(p)).splitLines():
+        if l.startsWith("var ") and "{.threadvar.}" in l:
+          checkpoint extractFilename(p) & ": " & l
+          check leadIdent(l[4 .. ^1]) notin fields
 
   test "resetSymexRunState calls resetWalkState":
     let rt = readSmt("runtime.nim")

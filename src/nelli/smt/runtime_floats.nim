@@ -304,7 +304,6 @@ proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
     let fresh = bvVar(tInt(w, signed), freshDegradeName("__convFloatToIntFresh"))
     let value = iteSV(domainCond, exactV, fresh)
     let bound = convBoundOf(domainCond, e.convSite, lowering.cls)
-    convFloatToIntBoundConds.add bound               # threadvar fallback
     syncConvFloatToIntBoundCond(bound)               # CR-9 Stage 6 Group-1
     if e.convHasRange:
       var inRange = mkTrue()
@@ -314,7 +313,6 @@ proc lowerFloatArm*(env: Env, e: IRExpr): SymVal =
       # asserted on the path, so `rangeCondsIfNeeded` does not apply.]
       for bc in bvRangeConds(value, e.convLo, e.convHi, signed):  # [range-invariant: range-defect-check]
         inRange = inRange and bc
-      rangeDefectConds.add(not inRange)              # threadvar fallback
       syncRangeDefectCond(not inRange)
     value
   of iekMathCall:

@@ -247,7 +247,9 @@ suite "K4b: the reachable magic cells, through symexFind":
   exactCell(sEqProc, "EqProc")
   declineCell(sCStrToStr, "CStrToStr", feUnsupportedOp)
   exactCell(sEqCString, "EqCString")
-  declineCell(sGCref, "GCref", feUnsupportedExprKind)
+  # RFC-0016 INT-83: arc.nim's `cast[pointer]` keeps the address, so GC_ref
+  # declines at `nimIncRef`'s `cast[Cell]` write (as s8cl_lifetime_b pins).
+  declineCell(sGCref, "GCref", feUnsupportedStmtKind)
   declineCell(sGCunref, "GCunref", feUnsupportedOp)
   declineCell(sGetTypeInfo, "GetTypeInfo", feUnsupportedOp)
   declineCell(sTrace, "Trace", feUnsupportedOp)

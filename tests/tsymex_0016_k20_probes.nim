@@ -226,16 +226,22 @@ proc small(k: int) =
 proc res(fn: auto; tgt = tLabel("hit")): auto = symexFind(fn, tgt, pinSettingsConst)
 
 suite "RFC-0016 K2-0: crashes and faults (CRH-06, INT-11, W-19b)":
-  test "CRH-06: zeroMem and copyMem on addr x are a walker fault":
+  test "CRH-06: zeroMem and copyMem on addr x decline by name":
+    # RFC-0016 INT-83 (e8b48a20) holds a `pointer` as `ptr` of its own
+    # placeholder pointee, so `addr x` passed as one no longer faults in
+    # `ptrPointeeTy` (the FieldDefect K2-0 reproduced): the address cell of a
+    # variable viewed through an untyped `pointer` is declined by name
+    # (feUnsupportedOp, S8ax), and no walker fault is recorded.
     check "hit" in nativeRun(zm(5)).hits
     check "hit" in nativeRun(cm(5)).hits
-    let a = symexFind(zm, tLabel("hit"), pinSettingsConst)
     let b = symexFind(cm, tLabel("hit"), pinSettingsConst)
-    checkpoint show(a.errors) & show(b.errors)
-    check a.faulted("ptrPointeeTy")
-    check b.faulted("ptrPointeeTy")
-    skipCell(cellKey(axMagic, "zeroMem/copyMem(addr x)"),
-             "K2-0 CRH-06 reproduces: weInternalWalkerFault (FieldDefect, ptrPointeeTy of an itUninterp), sxUnknown; a fault, not a named decline")
+    checkpoint show(b.errors)
+    check b.status == sxUnknown
+    check not b.faulted("")
+    check b.errors.anyIt(it.kind == feUnsupportedOp and "`addr x`" in it.msg)
+    check b.errors.anyIt(it.kind == feUnsupportedOp and "`addr y`" in it.msg)
+    pinDecline(zm, cellKey(axMagic, "zeroMem/copyMem(addr x)"), feUnsupportedOp,
+               needle = "`addr x`")
 
   test "INT-11: the =trace hook only the cycle collector runs declines":
     check "hit" in nativeRun(trace1(3)).hits

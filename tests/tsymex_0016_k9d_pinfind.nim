@@ -204,6 +204,13 @@ proc sutCstr(s: cstring) =
 # stores a `long double`, so a seq of one overruns its heap block. The walker
 # declines it (STY-06); pinFind returns the decline without building a domain
 # (it once filled one and died in `dealloc`, a SIGSEGV no test could catch).
+#
+# Why the guard exists: Nim maps `clongdouble` to a float64-sized type, while
+# x86-64 Linux C stores `long double` as an 80-bit extended value in 16 bytes.
+# Measured in the dev container (Nim 2.2.10): `sizeof(clongdouble) == 8`,
+# C `sizeof(long double) == 16`. A domain's seq is allocated with Nim's 8-byte
+# stride, so filling it with native 16-byte elements overruns the block. The
+# walker declines the type for the same reason (INT-76, `declineLongDouble`).
 type
   K9dLdObj = object
     a: int

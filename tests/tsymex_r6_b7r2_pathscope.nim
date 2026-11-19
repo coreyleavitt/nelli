@@ -386,6 +386,10 @@ suite "symex round-6 B7r2 -- regression: a genuinely-unmodeled whole-proc shape 
     let r = pinFind(sut, tIndexError())
     check r.status == sxUnknown
     check r.errors.named(feUnsupportedOpHavoc)
-    check r.errors.named(feUnsupportedStmtKind)
+    # RFC-0016 PRC-34 (817b56b3, walker 391): a `type` section in a routine
+    # body runs nothing where it stands and is no longer a decline. The
+    # local `type DT` was this run's `feUnsupportedStmtKind`; the table's
+    # value type is the decline that remains.
+    check not r.errors.named(feUnsupportedStmtKind)
     check r.errors.named(seUnsupportedTableValType)
     check r.errors.len > 0

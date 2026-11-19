@@ -70,7 +70,8 @@ type
 
   RoutineDefs = Table[string, seq[int]]
     ## RFC-0016 int6-w. Per routine name (`defKey`), the lines its definitions
-    ## start on in one text, at any depth.
+    ## start on in one text, at any depth; `expandedAt` for one a template or
+    ## macro body spells.
 
   ScanVisit = object
     ## One reading of one file. A file included twice has two.
@@ -311,20 +312,32 @@ proc defName(n: NimNode): string =
   of nnkPragmaExpr: (if n.len > 0: defName(n[0]) else: "")
   else: ""  # k2: n/a: a name this cannot spell records no definition; textDisagrees says nothing of it and the position is read as before
 
-proc collectDefs(n: NimNode; acc: var RoutineDefs) =
+const expandedAt = 0
+  ## RFC-0016 int6 l1. The line `collectDefs` records for a routine a template
+  ## or macro body spells: the compiler places such a routine where the body
+  ## is expanded (its call site, `{.dirty.}` or not: a template's routines are
+  ## injected), not on the line its name is written, so no line of the text
+  ## tells it apart. Not a line any routine starts on (lines count from 1).
+
+proc collectDefs(n: NimNode; acc: var RoutineDefs; inBody = false) =
   ## RFC-0016 int6-w. Every routine definition in a parsed text, nested ones
-  ## and those inside templates included, by name and starting line.
+  ## and those inside templates included, by name and starting line; one
+  ## inside a template or macro body (`inBody`) at `expandedAt`.
   if n.kind in RoutineNodes and n.kind != nnkLambda and n.len > 0:
     let nm = defName(n[0])
     if nm.len > 0:
       # The definition's line and its name's: a position is either.
       let k = defKey(nm)
       var lines = acc.getOrDefault(k)
-      lines.add n.lineInfoObj.line
-      if n[0].lineInfoObj.line != n.lineInfoObj.line:
-        lines.add n[0].lineInfoObj.line
+      if inBody:
+        if expandedAt notin lines: lines.add expandedAt
+      else:
+        lines.add n.lineInfoObj.line
+        if n[0].lineInfoObj.line != n.lineInfoObj.line:
+          lines.add n[0].lineInfoObj.line
       acc[k] = lines
-  for c in n: collectDefs(c, acc)
+  let body = inBody or n.kind in {nnkTemplateDef, nnkMacroDef}
+  for c in n: collectDefs(c, acc, body)
 
 proc movesState(n: NimNode): bool =
   ## Does this `when` branch hold a pragma that moves the stack or a check?
@@ -772,7 +785,8 @@ proc textDisagrees*(m: ModuleScan; file, name: string; line: int): string =
   ## raises). The text disagrees when it ends before `line`, or defines a
   ## routine `name` but not starting there. A routine a macro made, with a
   ## position its name is not written at, defines no `name` and is not told
-  ## apart. A file the scan did not read says nothing.
+  ## apart; nor is one a template or macro body spells (`expandedAt`), placed
+  ## where the body is expanded. A file the scan did not read says nothing.
   let file = normalPath(file)
   let key = defKey(name)
   for v in m.visits:
@@ -789,6 +803,7 @@ proc textDisagrees*(m: ModuleScan; file, name: string; line: int): string =
       return "`" & baseName(file) & "` on disk has " & $lines &
         " lines, and the compiler placed `" & name & "` at line " & $line
     if key in parsedShapes[v.parse].defs and
+       expandedAt notin parsedShapes[v.parse].defs[key] and
        line notin parsedShapes[v.parse].defs[key]:
       return "`" & baseName(file) & "` on disk defines `" & name &
         "` at line " & parsedShapes[v.parse].defs[key].join(", ") &

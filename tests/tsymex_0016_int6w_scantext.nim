@@ -69,10 +69,23 @@ const
           textDisagrees(memScan, "mem/y.nim", "foo", 3),    # 5 a file the scan did not read
           textDisagrees(memScan, "mem/x.nim", "foo", 3),    # 6 moved
           textDisagrees(memScan, "mem/x.nim", "made", 9)]   # 7 past the text's end
+  # A routine a template or macro body spells is placed where the body is
+  # expanded (the call site), not where it is written (l1_boundary's
+  # `{.dirty.}` SUT): its position is not told apart, as a macro-made name.
+  expScan = scanModuleText("mem/t.nim",
+    "template t() =\n  proc foo() = discard\nt()\n" &
+    "macro m(): untyped =\n  quote do:\n    proc bar() = discard\nm()\n", memEnv)
+  expanded = [textDisagrees(expScan, "mem/t.nim", "foo", 3),   # 0 a template's, at its call
+              textDisagrees(expScan, "mem/t.nim", "bar", 7),   # 1 a macro's, at its call
+              textDisagrees(expScan, "mem/t.nim", "foo", 9),   # 2 past the text's end
+              textDisagrees(expScan, "mem/t.nim", "t", 3)]     # 3 the template itself, moved
 
 suite "int6-w: the scan reads the text the compiler parsed":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 468
+
+  test "version floor: a template's routine placed where expanded (int6 l1)":
+    check parseInt(symexWalkerVersion) >= 475
 
   test "pure: a routine is placed against the text the scan read":
     for i in 0 .. 5:
@@ -80,6 +93,13 @@ suite "int6-w: the scan reads the text the compiler parsed":
       check pure[i] == ""
     check "defines `foo` at line 1, not at line 3" in pure[6]
     check "has 4 lines" in pure[7]
+
+  test "pure: a routine a template or macro body spells is placed where expanded":
+    for i in 0 .. 1:
+      checkpoint $i & ": " & expanded[i]
+      check expanded[i] == ""
+    check "has 7 lines" in expanded[2]
+    check "defines `t` at line 1, not at line 3" in expanded[3]
 
   test "native: checked raises, pushed off does not":
     check raisesOverflow(chkSteady, high(int))

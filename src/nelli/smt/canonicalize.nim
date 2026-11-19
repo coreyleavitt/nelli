@@ -1442,8 +1442,17 @@ const renderAsChoicesVersion* = "12"
   ##   re-measured at 20,000. A walk the budget cut before spends less and
   ##   may now decide (the k9cg FilterIt shape's unroll 4: 141.4M units to
   ##   86.0M), so verdicts move. No key bytes change.
+  ## - RFC-0016 int6 l1 (472->475; 473-474 are reserved by wip/int6-a): a
+  ##   routine a template or macro body spells is placed by the compiler
+  ##   where the body is expanded, not on the line its name is written, so
+  ##   int6-w's text guard read every such routine (a `{.dirty.}` template's,
+  ##   or any template's that writes the name itself) as moved and declined
+  ##   it `feCheckOption`. `textDisagrees` no longer tells such a name's
+  ##   position apart (`expandedAt`), as it already did not for a name a
+  ##   macro made; a text that ends before the position still disagrees.
+  ##   Verdicts move (`feCheckOption` to a walk). No key bytes change.
 
-const symexWalkerVersion* = "472"
+const symexWalkerVersion* = "475"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

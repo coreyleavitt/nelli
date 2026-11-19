@@ -30,6 +30,14 @@ template defViaDirty() {.dirty.} =
     if x == 9: symexTarget("dhit")
 defViaDirty()
 
+# (d) hygienic template spelling the routine's name itself: a routine in a
+# template body is injected all the same, and placed at the call site, not
+# the line its name is written on (int6-w's text guard declined it).
+template defViaLiteral() =
+  proc literalSut(x: int) =
+    if x == 5: symexTarget("lhit")
+defViaLiteral()
+
 suite "symex Phase 15 — L1 template/macro boundary audit":
 
   test "template-defined SUT reaches parser as expanded proc and symexes":
@@ -42,4 +50,8 @@ suite "symex Phase 15 — L1 template/macro boundary audit":
 
   test "{.dirty.} template-defined SUT also symexes soundly":
     let r = pinFind(dirtySut, tLabel("dhit"))
+    check r.status == sxSat
+
+  test "template spelling the routine's own name also symexes soundly":
+    let r = pinFind(literalSut, tLabel("lhit"))
     check r.status == sxSat

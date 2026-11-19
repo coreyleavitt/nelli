@@ -196,12 +196,16 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     # RFC-0005 S8ax item 5: the opaque call is summarised, not declined --
     # every cell its argument reaches holds fresh contents afterwards, and
     # a hit reached through one is replayed. Not inert: the havoc is named.
-    # The verdict stays sxUnknown for another reason: the `nil` literal
-    # argument is itself unsupported (CR-2a, `feUnsupportedExprKind`).
-    check r.status == sxUnknown
+    # RFC-0016 INT-87 holds a `cstring` by value (nil or its bytes), so its
+    # `nil` literal is modelled (it was CR-2a's `feUnsupportedExprKind`):
+    # the raise after the call is decided -- `sxRaised`, judged against the
+    # native run by `pinFind`, as the oracle test shows Nim raising on
+    # `Magic`.
+    check r.status == sxRaised
+    check r.trusted   # so `pinFind` judged it against the native run
     check not classified
     check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchCString" in it.msg)
-    check r.errors.anyIt(it.kind == feUnsupportedExprKind and "nil" in it.msg)
+    check not r.errors.anyIt(it.kind == feUnsupportedExprKind and "nil" in it.msg)
 
 # =============================================================================
 # R14c -- the wrap-scan whole-program ban.

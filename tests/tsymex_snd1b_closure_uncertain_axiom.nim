@@ -58,12 +58,40 @@ import nelli/smt/canonicalize
 # t==5.0 as the input, a false sxSat with a silently-wrong witness (real Nim
 # needs `t == 10.0` for `t / 2.0 == 5.0`). Post-fix: both uncertain sub-paths
 # are dropped from axiomatization and `ceClosureBodyUncertain` forces the
-# whole run to `sxUnknown`.
+# whole run to `sxUnknown`. (The `/=` vehicle became a nested seq element's
+# `*=` when PRC-07 modelled float `/=`, and that one is modelled too since
+# RFC-0016 S8cp-r: the mechanism's exhibit is `closureDiscMutate` below.)
 proc closureDivMutate(t: var float) =
   let f = proc(s: float): int =
     var r = @[@[s]]
-    r[0][0] *= 2.0  # a nested seq element LHS: a bare `mkUnsupported`
+    r[0][0] *= 2.0  # a nested seq element LHS: modelled since RFC-0016 S8cp-r
     if r[0][0] == 10.0:
+      return 1
+    return 0
+  if f(t) == 1:
+    symexTarget("closure_div_nested")
+
+# RFC-0016 S8cp-r (walker 400) stores through the inner seq, so the nested
+# element `*=` above decides (a positive pin below) and the dropped-mutation
+# vehicle inside the closure body is the shared Class-B exhibit
+# (`tsymex_rfc0005_s8_scope.nim`): a discriminator written through a ref
+# under `{.cast(uncheckedAssign).}` (`parseAsgn`'s marker; PRC-37 owns
+# modelling it). Natively the read of `a` after the write raises
+# `FieldDefect`, so `f` never returns 1; ground axioms asserted from the
+# STALE discriminator would read `a == s` and falsely accept t == 10.0.
+type
+  Snd1bDisc = object
+    case k: bool
+    of true: a: float
+    of false: b: float
+  Snd1bDiscRef = ref Snd1bDisc
+
+proc closureDiscMutate(t: float) =
+  let f = proc(s: float): int =
+    let r = Snd1bDiscRef(k: true, a: s)
+    {.cast(uncheckedAssign).}:
+      r.k = false
+    if r.a == 10.0:
       return 1
     return 0
   if f(t) == 1:
@@ -117,8 +145,14 @@ suite "symex SND-1b — closure ground-axiom path drops uncertain sub-paths (wal
     check r.status == sxSat
     check r.witness[0] / 2.0 == 5.0
 
-  test "SND-1b: a nested-seq element `*=` dropped INSIDE a closure body degrades to sxUnknown (no false sxSat)":
-    let r = pinFind(closureDivMutate, tLabel("closure_concat"))
+  test "S8cp-r: a nested-seq element `*=` INSIDE a closure body is modelled: exact sxSat, witness 5.0":
+    let r = pinFind(closureDivMutate, tLabel("closure_div_nested"))
+    check r.status == sxSat
+    check r.trusted   # so `pinFind` judged it against the native run
+    check r.witness[0] * 2.0 == 10.0
+
+  test "SND-1b: an unchecked ref discriminator write dropped INSIDE a closure body degrades to sxUnknown (no false sxSat)":
+    let r = pinFind(closureDiscMutate, tLabel("closure_concat"))
     check r.status == sxUnknown
     var sawBodyUncertain = false
     for e in r.errors:

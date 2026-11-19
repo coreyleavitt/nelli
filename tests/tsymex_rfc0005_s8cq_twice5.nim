@@ -220,8 +220,11 @@ for x in [-3, 0, 3, 5, 7, 49, 51]:
 suite "tsymex_rfc0005_s8cq_twice5":
   test "verdicts against Nim":
     # c28: getTR()[].del('a')
-    pin(c28, "c28_ok", true, sxUnknown)
-    pin(c28, "c28_bad", false, sxUnknown)
+    # RFC-0016 INT-75 walks `toTable`'s `for key, val in items(pairs)` (it
+    # declined the run): `del` takes its table once, as a `var` actual, so
+    # it decides as native.
+    pin(c28, "c28_ok", true, sxSat)
+    pin(c28, "c28_bad", false, sxUnsat)
     # c29: getSetR()[].incl('b')
     pin(c29, "c29_ok", true, sxUnknown)
     pin(c29, "c29_bad", false, sxUnknown)

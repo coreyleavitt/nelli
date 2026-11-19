@@ -241,8 +241,11 @@ suite "tsymex_rfc0005_s8cq_twice4":
     pin(c25, "c25_ok", true, sxUnknown)
     pin(c25, "c25_bad", false, sxUnknown)
     # c26: getTR()[]['a'] = 3
-    pin(c26, "c26_ok", true, sxUnknown)
-    pin(c26, "c26_bad", false, sxUnknown)
+    # RFC-0016 INT-75 walks `toTable`'s `for key, val in items(pairs)` (it
+    # declined the run): `[]=` takes its table once, as a `var` actual, so
+    # the store decides as native.
+    pin(c26, "c26_ok", true, sxSat)
+    pin(c26, "c26_bad", false, sxUnsat)
     # c27: inc(getTR()[]['a'])
     pin(c27, "c27_ok", true, sxUnknown)
     pin(c27, "c27_bad", false, sxUnknown)

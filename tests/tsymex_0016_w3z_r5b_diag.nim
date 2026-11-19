@@ -28,15 +28,20 @@ proc undefThenRaise(x, m: int) =
   doAssert m != 5
   if x == 7: symexTarget("hit")
 
+var gSink: int
+
 proc crashThenLabel(p: Node, m: int) =
-  if m == 5: discard p.v
+  ## The nil read's value is stored, so it is loaded. (`discard p.v` was this
+  ## read until RFC-0016 INT-86: a discarded read the C compiler does not
+  ## load is no dereference, and raises nothing natively.)
+  if m == 5: gSink = p.v
   if m == 3: symexTarget("hit")
 
 suite "W3-z R5b: the soundness a diagnostic carries":
   test "a non-winning clean raise is host-runnable":
     let r = pinFind(cleanThenRaise, tLabel("hit"))
     check r.status == sxSat
-    check r.diagnostics.len == 1
+    require r.diagnostics.len == 1
     check r.diagnostics[0].witnessUndefined == {}
     check not r.diagnostics[0].witnessUnsafe
     check hostRunnable(allRaiseFindings(r)[0])
@@ -45,7 +50,7 @@ suite "W3-z R5b: the soundness a diagnostic carries":
     let r = pinFind(crashThenLabel, tLabel("hit"))
     checkpoint $r.status & " " & $r.diagnostics.len
     check r.status == sxSat
-    check r.diagnostics.len == 1
+    require r.diagnostics.len == 1
     check r.diagnostics[0].witnessUnsafe
     check r.diagnostics[0].witnessUndefined == {}
     check not hostRunnable(allRaiseFindings(r)[0])

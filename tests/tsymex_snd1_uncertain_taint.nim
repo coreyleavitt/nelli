@@ -66,9 +66,31 @@ proc concatMutate(t: var string) =
 # mechanism for an op M4 did not model.
 proc divMutate(acc: var float) =
   var q = @[@[acc]]
-  q[0][0] *= 2.0  # a nested seq element LHS: still a bare `mkUnsupported`
+  q[0][0] *= 2.0  # a nested seq element LHS: modelled since RFC-0016 S8cp-r
   if q[0][0] == 10.0:
     symexTarget("div")
+
+# RFC-0016 S8cp-r (walker 400) stores through the inner seq, so the nested
+# element `*=` above decides (a positive pin below) and the dropped-mutation
+# vehicle is the shared Class-B exhibit (`tsymex_rfc0005_s8_scope.nim`): a
+# discriminator written through a ref under `{.cast(uncheckedAssign).}`
+# (`parseAsgn`'s marker; PRC-37 owns modelling it). Natively the read of `a`
+# after the write raises `FieldDefect` (`a` is not the active branch), so the
+# target is never reached; a walk continued with the STALE discriminator
+# would read `a == acc` and falsely accept acc == 10.0.
+type
+  Snd1Disc = object
+    case k: bool
+    of true: a: float
+    of false: b: float
+  Snd1DiscRef = ref Snd1Disc
+
+proc discMutate(acc: float) =
+  let q = Snd1DiscRef(k: true, a: acc)
+  {.cast(uncheckedAssign).}:
+    q.k = false
+  if q.a == 10.0:
+    symexTarget("disc")
 
 # RFC-0016 PRC-07 models float `/=` (`x = x / y`), so the original vehicle
 # `acc /= 2.0` now decides exactly; kept as the positive pin.
@@ -116,11 +138,17 @@ suite "symex SND-1 — isUnsupported taints Path.uncertain (walker v38)":
     check r.witness[0] == "a"
     check r.witness[0] & "x" == "ax"  ## round-trips against real Nim `&`
 
-  test "SND-1: a nested-seq element `*=` drop then a compare degrades to sxUnknown (no false sxSat)":
-    let r = pinFind(divMutate, tLabel("div"))
+  test "SND-1: an unchecked ref discriminator write dropped then a read degrades to sxUnknown (no false sxSat)":
+    let r = pinFind(discMutate, tLabel("disc"))
     check r.status == sxUnknown
+    check not r.trusted
     check r.errors.named(feUnsupportedStmtKind)
-    check r.errors.named(seNestedSeqUnsupported)
+
+  test "S8cp-r: a nested-seq element `*=` then a compare is modelled: exact sxSat, witness 5.0":
+    let r = pinFind(divMutate, tLabel("div"))
+    check r.status == sxSat
+    check r.trusted   # so `pinFind` judged it against the native run
+    check r.witness[0] * 2.0 == 10.0
 
   test "PRC-07: `acc /= 2.0; if acc == 5.0` is modelled: exact sxSat, witness 10.0":
     let r = pinFind(divModelled, tLabel("div_modelled"))

@@ -20,7 +20,9 @@
 ##       fabricable sound zero (see the proc's own doc comment,
 ##       `dsl_parser.nim`, for the per-prefix argument). The decline is
 ##       pinned here for all three, reached through an uninitialized local
-##       var -- the one call site this `nil` visibly degrades.
+##       var -- the one call site this `nil` visibly degrades. RFC-0016
+##       INT-65 gives a proc-typed local Nim's nil proc value instead, so
+##       the `__closure` case below is a decided pin now.
 ##
 ## RFC-0005 S8ap (S8ao's remainder) moved several of these pins forward:
 ## `del`/`insert`/`incl`/`excl`/`[]=` and `add` on a dotted STRING field take
@@ -207,8 +209,13 @@ proc zUnsupportedGenericVar(x: int) =
 
 suite "S8ao (2): itUninterp has no zero":
 
-  test "a closure-typed local (__closure) declines, never crashes":
-    pinDecline(zClosureVar, declKey, ceUnsupportedHof, tLabel("closurevar"))
+  test "a closure-typed local (__closure) is Nim's nil proc value (RFC-0016 INT-65)":
+    # RFC-0016 INT-65 gives an uninitialised proc variable its zero, the nil
+    # proc value (`nilClosure`), so this local no longer reaches the
+    # placeholder decline: the target decides, judged against the native run.
+    let r = pinFind(zClosureVar, tLabel("closurevar"))
+    check r.status == sxSat
+    check r.witness[0] == 1
 
   test "an Atomic-typed local (__ownership:Atomic) declines, never crashes":
     pinDecline(zAtomicVar, declKey, heUnsupportedOwnership, tLabel("atomicvar"))

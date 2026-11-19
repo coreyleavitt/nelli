@@ -164,6 +164,8 @@ proc s8cFieldEq(l1, l2: S8cLine) =
   ## field with the USER `==`, so equal lines with different `a.y` exist.
   if l1 == l2 and l1.a.y != l2.a.y:
     symexTarget("s8c_field_eq")
+  if l1 == l2 and l1.a.x != l2.a.x:
+    symexTarget("s8c_field_eq_dead")
 
 proc s8cSetKey(s: HashSet[S8cKey], k: int) =
   ## `sets.contains[S8cKey]` is stdlib, but its instantiated body hashes and
@@ -185,6 +187,8 @@ proc s8cTupEq(k: int) =
   let b = (S8cKey(3), 1)
   if k == 13 and a == b:
     symexTarget("s8c_tupeq")
+  if k == 14 and a == b:
+    symexTarget("s8c_tupeq_dead")
 
 proc s8cBuiltinPlus(a, b: int) =
   ## Control: the builtin `+` stays the builtin model.
@@ -335,18 +339,34 @@ suite "RFC-0005 S8c -- a stdlib generic over a user routine: closed by the eleme
   ## already declined, RECORDED, by the fragment. These pins hold that line:
   ## widening a fragment (say, `HashSet[distinct int]`) without resolving the
   ## element ops turns one of them into a false verdict.
+  ##
+  ## RFC-0016 S8cp-r (PRC-34, walker 394) walks the compiler's instance of
+  ## system's `==` on a record with a non-atom field: its `fields` loop is
+  ## unrolled with each field's `==` the one Nim resolved through `mixin`,
+  ## a user's included. The object and tuple rows decide; each is pinned
+  ## both ways against the native run (a target only the user `==` reaches,
+  ## and one it refutes).
 
-  test "system.== over an object with a user-`==` field: sxUnknown, recorded":
+  test "system.== over an object with a user-`==` field: the user `==` decides":
     let r = pinFind(s8cFieldEq, tLabel("s8c_field_eq"))
     dump(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOp)
+    check r.status == sxSat
+    check r.trusted
+    let d = pinFind(s8cFieldEq, tLabel("s8c_field_eq_dead"))
+    dump(d.errors)
+    check d.status == sxUnsat
+    check d.trusted
 
-  test "system.== over a tuple with a user-`==` element: sxUnknown, recorded":
+  test "system.== over a tuple with a user-`==` element: the user `==` decides":
     let r = pinFind(s8cTupEq, tLabel("s8c_tupeq"))
     dump(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOp)
+    check r.status == sxSat
+    check r.trusted
+    check r.witness[0] == 13
+    let d = pinFind(s8cTupEq, tLabel("s8c_tupeq_dead"))
+    dump(d.errors)
+    check d.status == sxUnsat
+    check d.trusted
 
   test "system.== over a seq of a user-`==` element: sxUnknown, recorded":
     ## RFC-0005 S8ba: a `seq` of a distinct type is modelled now, so the

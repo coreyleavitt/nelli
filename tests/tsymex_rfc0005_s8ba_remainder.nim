@@ -26,7 +26,7 @@
 ## so that each part compiles and runs in under 60 s on the Windows legs (the
 ## whole file took 76 s).
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, tables]
 import nelli/symex
 import ./s8cu_helpers
 import nelli/smt/types
@@ -56,10 +56,23 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind,
 # ---- (1) a compiler temporary is not a global ---------------------------------
 
 type Pair = (int, string)
+type Unbacked = Table[int, int]
+  ## RFC-0016 S8cp-r: the shared unbacked seq element (`seq[Table[int,
+  ## int]]`); a seq of `Pair` was this suite's unbacked carrier until the
+  ## tuple element was backed.
+
+proc tabSeqIdx(x: int) =
+  ## `seq[Table[int, int]]` is not backed (a scoped decline); the element
+  ## read binds the temporary `__sym_idx_N` the comparison then reads.
+  var s = newSeq[Unbacked](1)
+  if s[0].len == x: symexTarget("ti")
+
+proc tabSeqPop(x: int) =
+  var s = newSeq[Unbacked](1)
+  let v = s.pop()
+  if v.len == x: symexTarget("tp")
 
 proc tupSeqIdx(x: int) =
-  ## `seq[(int, string)]` is not backed (a scoped decline); the element
-  ## read binds the temporary `__sym_idx_N` the comparison then reads.
   var s: seq[Pair] = @[(1, "a")]
   if s[0][0] == x: symexTarget("ti")
 
@@ -91,6 +104,16 @@ suite "S8ba (1): a compiler temporary is never read as a global":
       check not r.errors.hasKind(feGlobalReadUnmodelled)
       check not r.errors.hasKind(weInternalWalkerFault)
       check "__sym_" notin show(r.errors)
+    one(tabSeqIdx, "ti")
+    one(tabSeqPop, "tp")
+
+  test "a seq of `(int, string)` is backed: its element read decides":
+    template one(fn: typed, lbl: string) =
+      let r = pinFind(fn, tLabel(lbl))
+      checkpoint lbl & " " & $r.status & " " & show(r.errors)
+      check r.status == sxSat
+      check r.trusted   # so `pinFind` judged it against the native run
+      check r.witness[0] == 1
     one(tupSeqIdx, "ti")
     one(tupSeqPop, "tp")
 

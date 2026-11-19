@@ -36,7 +36,7 @@ import nelli
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
-from ./s8cu_helpers import pinDecline, cellKey, faGeneric
+from ./s8cu_helpers import pinDecline, cellKey, faGeneric, pinFind
 
 # The placeholder's own kind declines, never the generic unsupported-statement
 # fallback, hence `excluding`.
@@ -185,9 +185,13 @@ proc uUnsupportedVar(x: int) =
 
 suite "S8ap (4): an itUninterp var declines with its placeholder's own kind":
 
-  test "__closure -> ceUnsupportedHof":
-    pinDecline(uClosureVar, declKey, ceUnsupportedHof, tLabel("u_closure"),
-               excluding = {feUnsupportedStmtKind})
+  test "__closure is the nil proc value, decided (RFC-0016 INT-65)":
+    # RFC-0016 INT-65: an uninitialised proc variable is Nim's nil proc value
+    # (`nilClosure`), no longer the `__closure` placeholder decline; a call
+    # through it still declines `ceUnsupportedHof`.
+    let r = pinFind(uClosureVar, tLabel("u_closure"))
+    check r.status == sxSat
+    check r.witness[0] == 1
 
   test "__ownership:Atomic -> heUnsupportedOwnership":
     pinDecline(uAtomicVar, declKey, heUnsupportedOwnership, tLabel("u_atomic"),

@@ -17515,7 +17515,7 @@ proc claimStrayPendingTaint() =
   ## its own path, so a stray here is a walker fault. The fallback put one
   ## path's decline on its siblings too (an over-taint, never an unsound
   ## verdict), so a debug build stops on it and a release build keeps it.
-  when not defined(release):
+  when not buildSemantics.release:
     doAssert loweringPendingTaint == {},
       "claimStrayPendingTaint: a lowering left pending taint " &
       $loweringPendingTaint & " with no drain of its own (RFC-0016 R2-08)"

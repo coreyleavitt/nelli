@@ -27916,7 +27916,7 @@ proc dupSysLoop(n: NimNode): tuple[kind: DupSysLoop; v, root: NimNode] =
   if root.isNil: return
   if tk == ntySequence:
     # The `assert` is in the body only under `--assertions:on`.
-    if not compileOption("assertions"): return
+    if coAssert notin buildSemantics.checks: return
     return (dslBorrowLive, v, root)
   result = (dslBorrow, v, root)
 

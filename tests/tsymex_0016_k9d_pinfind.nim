@@ -1068,8 +1068,20 @@ suite "K9d: pinFind":
 
   test "boundaryOf a float range, a distinct float, cfloat and cdouble":
     let r = boundaryOf(UnitF)
-    check r.values.allIt(float(it) >= 0.0 and float(it) <= 1.0)
-    check not r.values.anyIt(float(it).isNaN)
+    # Nim's float range check rejects `x < lo or x > hi` (raiseRangeErrorF),
+    # so NaN passes it and is a value of the type (RFC-0016 int6-p, 08039ffb):
+    # the domain keeps NaN beside the values inside the bounds. Native here:
+    var nanIn, aboveIn = true
+    let nanV = NaN
+    let aboveV = 1.5
+    try: discard UnitF(nanV)
+    except RangeDefect: nanIn = false
+    try: discard UnitF(aboveV)
+    except RangeDefect: aboveIn = false
+    check nanIn and not aboveIn
+    check r.values.allIt(float(it).isNaN or
+                         (float(it) >= 0.0 and float(it) <= 1.0))
+    check r.values.anyIt(float(it).isNaN)
     check r.values.anyIt(float(it) == 1.0) and r.values.anyIt(float(it) == 5e-324)
     check r.values.anyIt(bitsOf(float(it)) == bitsOf(fNextDown(1.0)))
     let m = boundaryOf(Meters)

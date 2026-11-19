@@ -2090,6 +2090,10 @@ task test, "Run the test suite":
             "tsymex_0016_int6p_floatrange_store",
             # RFC-0016 int6: the same stores under --rangeChecks:off keep their value.
             "tsymex_0016_int6p_floatrange_checksoff",
+            # RFC-0016 int6: a check option belongs to the region it was compiled under (push off in a checked build, system *= keeps the build's).
+            "tsymex_0016_int6p2_checkscope",
+            # RFC-0016 int6: the same scopes under --rangeChecks:off --boundChecks:off (push on raises).
+            "tsymex_0016_int6p2_checkscope_off",
             # RFC-0016 K2: a c_longdouble value from an element, slot, dereference or cast declines, never faults.
             "tsymex_0016_k2_longdouble_sentinel",
             # RFC-0016 INT-82: an allocation is distinct from every object of the walk's entry state (parameters, what they reach, globals).

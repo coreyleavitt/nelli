@@ -1550,8 +1550,17 @@ const renderAsChoicesVersion* = "12"
   ##   `{.all.}` step of its own variable stays unreadable. Verdicts move (a
   ##   callee using `findIt` or `keepItIf` has its pre-int6-t verdict again).
   ##   No key bytes change.
+  ## - RFC-0016 int6-f2 (484->485): `findIt`'s counter step is read through
+  ##   only where the typed loop around it calls a `system/iterators.nim`
+  ##   `items` whose yields stay below `high(int)`, read from the resolved
+  ##   iterator symbol (`check_options.boundedItemsLoop`): an openArray,
+  ##   array, seq, string, set or cstring, or an ordinal slice or enum type
+  ##   of at most 4 bytes. A user's or a `{.closure.}` `items`, sequtils'
+  ##   over a closure iterator, and an `int` slice leave the callee
+  ##   unreadable (an opaque `findIt` over an `int` slice was a trusted
+  ##   sxSat). No key bytes change.
 
-const symexWalkerVersion* = "484"
+const symexWalkerVersion* = "485"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

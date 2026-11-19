@@ -709,10 +709,14 @@ const loopIncExemptions* = [
   ## routine, stepping that template's own counter (`loopIncCounters`).
 
 const loopIncCounters* = [
-  (file: "pure/collections/sequtils.nim", tpl: "findIt", counter: "i"),
-  (file: "pure/collections/sequtils.nim", tpl: "keepItIf", counter: "pos"),
-  (file: "pure/collections/sequtils.nim", tpl: "toSeq2", counter: "i"),
-  (file: "pure/collections/sequtils.nim", tpl: "toSeq", counter: "i")]
+  (file: "pure/collections/sequtils.nim", tpl: "findIt", counter: "i",
+   byItems: true),
+  (file: "pure/collections/sequtils.nim", tpl: "keepItIf", counter: "pos",
+   byItems: false),
+  (file: "pure/collections/sequtils.nim", tpl: "toSeq2", counter: "i",
+   byItems: false),
+  (file: "pure/collections/sequtils.nim", tpl: "toSeq", counter: "i",
+   byItems: false)]
   ## RFC-0016 int6-x2. The audited use sites of a `loopIncExemptions`
   ## template inside a template of the same file, which expands the step into
   ## its caller's routine: the template `tpl` declares the stepped `counter`
@@ -722,6 +726,10 @@ const loopIncCounters* = [
   ## toolchain's file (`loopIncCounterSites`), never by the counter's name. The
   ## positions and each counter's bound are listed in
   ## `tests/0016-allowlist/pushexempt.txt` under the template's entry.
+  ## RFC-0016 int6-f2: `byItems`, the counter is stepped once per item the
+  ## caller's `items(s)` yields and nothing else bounds it, so the step is
+  ## admitted only where the typed loop around it calls a stdlib `items`
+  ## whose yields are bounded below `high(int)` (`boundedItemsLoop`).
 
 proc isLoopIncTemplate(t: NimNode; name: string): bool =
   ## The parsed `template <name>(x) = {.push overflowChecks: off.}; inc(x);
@@ -783,24 +791,95 @@ proc loopIncCounterSites*(file: string; path = ""):
     let li = decls[0].lineInfoObj
     result.add (e.tpl, li.line, li.column)
 
-proc auditedCounter(counter: NimNode; rel: string): bool =
-  ## RFC-0016 int6-x2. Is the variable `counter` (a symbol of a typed body)
-  ## declared at one of `rel`'s `loopIncCounterSites`? Read from the symbol's
-  ## own declaration (`getImpl`, its `IdentDefs`), whose position is the
-  ## template text's when a template generated it: user code declares its
-  ## variables in its own file.
+proc auditedCounter(counter: NimNode; rel: string): string =
+  ## RFC-0016 int6-x2. The template of `rel`'s `loopIncCounterSites` at whose
+  ## counter declaration the variable `counter` (a symbol of a typed body) is
+  ## declared, or "". Read from the symbol's own declaration (`getImpl`, its
+  ## `IdentDefs`), whose position is the template text's when a template
+  ## generated it: user code declares its variables in its own file.
   if counter == nil or counter.kind != nnkSym or counter.symKind != nskVar:
-    return false
+    return ""
   let decl =
     try: counter.getImpl
-    except CatchableError: return false
-  if decl == nil or decl.kind != nnkIdentDefs: return false
+    except CatchableError: return ""
+  if decl == nil or decl.kind != nnkIdentDefs: return ""
   let li = decl.lineInfoObj
-  if libRelPath(li.filename, configuredLibDir) != rel: return false
+  if libRelPath(li.filename, configuredLibDir) != rel: return ""
   for s in loopIncCounterSites(rel, li.filename):
-    if s.line == li.line and s.col == li.column: return true
+    if s.line == li.line and s.col == li.column: return s.tpl
 
-proc loopIncExempt*(owner, push: NimNode; counter: NimNode = nil): bool =
+const boundedItemsFile* = "system/iterators.nim"
+  ## RFC-0016 int6-f2. The toolchain file whose `items` iterators a
+  ## `byItems` counter's loop may call (`boundedItemsLoop`). `system`
+  ## includes it; its iterators' owner is the module symbol `iterators`.
+
+type ItemsBound* = enum
+  ibNone     ## not one of the audited families: unbounded for the scan
+  ibLength   ## openArray, array, seq, string, set, cstring
+  ibOrdinal  ## an ordinal `Slice[T]` or an enum `typedesc[T]`
+
+proc itemsBoundAt*(path: string; line: int): ItemsBound =
+  ## RFC-0016 int6-f2. The family of the `items` iterator defined at `line`
+  ## of the toolchain file `path` (`boundedItemsFile`), by its first
+  ## parameter's type in the parsed text: a length (or a set's element range,
+  ## or one object's bytes) bounds the yields of an openArray, array, seq,
+  ## string, set or cstring; a `Slice` or a `typedesc` yields every value of
+  ## its ordinal range, which only the element's width bounds. Anything else
+  ## (the toolchain changed) is `ibNone`.
+  let ast = bodyAstOf(path)
+  if ast == nil: return ibNone
+  let def = findRoutineDef(ast, "items", line)
+  if def == nil or def.kind != nnkIteratorDef or def.len < 7: return ibNone
+  let ps = def[3]
+  if ps.kind != nnkFormalParams or ps.len != 2 or
+     ps[1].kind != nnkIdentDefs or ps[1].len != 3: return ibNone
+  let t = ps[1][1]
+  if t.kind == nnkIdent and t.strVal in ["string", "cstring"]: return ibLength
+  if t.kind != nnkBracketExpr or t.len < 2: return ibNone
+  let head = nameOf(t[0])
+  if head in ["openArray", "array", "seq", "set"]: ibLength
+  elif head in ["Slice", "typedesc"]: ibOrdinal
+  else: ibNone
+
+proc boundedItemsLoop*(loop: NimNode): bool =
+  ## RFC-0016 int6-f2. Is the typed `for` statement `loop` a call of a
+  ## `boundedItemsFile` `items` iterator whose yields stay below `high(int)`?
+  ## Read from the resolved iterator symbol: its name, its owner module
+  ## (`iterators`), and its declaration's position in the toolchain's file,
+  ## classified by `itemsBoundAt`. A length family is bounded by a length
+  ## (at most `high(int)`); an ordinal family only when its element is at
+  ## most 4 bytes (at most 2^32 values: an `int` slice yields up to 2^64).
+  ## A user's `items`, a `{.closure.}` one, or `sequtils`' over a closure
+  ## iterator is not: nothing bounds how often it yields.
+  if loop == nil or loop.kind != nnkForStmt or loop.len < 3: return false
+  let call = loop[^2]
+  if call.kind notin {nnkCall, nnkCommand} or call.len != 2 or
+     call[0].kind != nnkSym: return false
+  let it = call[0]
+  if it.symKind != nskIterator or it.strVal != "items": return false
+  let o = it.owner
+  if o == nil or o.kind != nnkSym or o.symKind != nskModule or
+     o.strVal != boundedItemsFile.splitFile.name: return false
+  let decl =
+    try: it.getImpl
+    except CatchableError: return false
+  if decl == nil or decl.kind != nnkIteratorDef: return false
+  let li = decl.lineInfoObj
+  if libRelPath(li.filename, configuredLibDir) != boundedItemsFile:
+    return false
+  case itemsBoundAt(li.filename, li.line)
+  of ibLength: true
+  of ibOrdinal:
+    let v = loop[0]
+    if v.kind != nnkSym: return false
+    let size =
+      try: getSize(v)
+      except CatchableError: -1
+    size in 1 .. 4
+  of ibNone: false
+
+proc loopIncExempt*(owner, push: NimNode; counter: NimNode = nil;
+                    loop: NimNode = nil): bool =
   ## RFC-0016 int6-t. Is the pragma statement `push`, in the typed body of the
   ## routine definition `owner`, the push of a `loopIncExemptions` template as
   ## that template's own module expands it? Identified by position, never by a
@@ -813,13 +892,22 @@ proc loopIncExempt*(owner, push: NimNode; counter: NimNode = nil): bool =
   ## audited counter site of that file (`auditedCounter`): the template is
   ## unexported, but `import std/sequtils {.all.}` reaches it, so a routine
   ## outside the file is admitted only by the counter, never by the push.
+  ## RFC-0016 int6-f2: a `byItems` counter only inside `loop`, the innermost
+  ## typed `for` around the step, when that loop is one of the template's
+  ## own (in `rel`) calling a bounded stdlib `items` (`boundedItemsLoop`).
   if owner == nil or owner.kind notin RoutineNodes or push == nil: return false
   let pli = push.lineInfoObj
   let rel = libRelPath(pli.filename, configuredLibDir)
   if rel.len == 0: return false
-  if libRelPath(owner.lineInfoObj.filename, configuredLibDir) != rel and
-     not auditedCounter(counter, rel):
-    return false
+  if libRelPath(owner.lineInfoObj.filename, configuredLibDir) != rel:
+    let tpl = auditedCounter(counter, rel)
+    if tpl.len == 0: return false
+    for e in loopIncCounters:
+      if e.file == rel and e.tpl == tpl and e.byItems:
+        if loop == nil or
+           libRelPath(loop.lineInfoObj.filename, configuredLibDir) != rel or
+           not boundedItemsLoop(loop):
+          return false
   for e in loopIncExemptions:
     if e.file != rel: continue
     let ast = bodyAstOf(pli.filename)
@@ -879,7 +967,7 @@ proc routineMagic*(sym: NimNode): string =
     except CatchableError: return ""
   implMagic(impl)
 
-proc loopIncRegion(s, owner: NimNode): bool =
+proc loopIncRegion(s, owner: NimNode; loop: NimNode = nil): bool =
   ## RFC-0016 int6-t. Is the statement list `s`, in the typed body of the
   ## routine definition `owner`, exactly an audited loop-counter step: `{.push
   ## overflowChecks: off.}` (no other option), `inc` (`system.inc`, by its
@@ -888,7 +976,8 @@ proc loopIncRegion(s, owner: NimNode): bool =
   ## `check_options.loopIncExemptions` template's as its own module expands it
   ## (`loopIncExempt`)? Its counter's loop bounds it (the allowlist's audit),
   ## so it neither overflows nor leaves its range: reading the routine as one
-  ## scope loses nothing there.
+  ## scope loses nothing there. `loop`: the innermost typed `for` around `s`
+  ## (RFC-0016 int6-f2).
   if s.kind != nnkStmtList or s.len != 3: return false
   let push = s[0]
   if not isPushPragma(push) or push.len != 2: return false
@@ -906,23 +995,25 @@ proc loopIncRegion(s, owner: NimNode): bool =
   if step.len == 3 and
      (step[2].kind notin {nnkIntLit .. nnkInt64Lit} or step[2].intVal != 1):
     return false
-  isPopPragma(s[2]) and loopIncExempt(owner, push, step[1])
+  isPopPragma(s[2]) and loopIncExempt(owner, push, step[1], loop)
 
-proc bodyCheckPragma*(n, owner: NimNode): NimNode =
+proc bodyCheckPragma*(n, owner: NimNode; loop: NimNode = nil): NimNode =
   ## RFC-0016 int6-t. The first pragma statement naming a check option in the
   ## typed body `n` of the routine definition `owner` (a routine declared in
   ## it aside: it is not run here), or nil. The typed body keeps every push
   ## and pop as a pragma statement, whether the definition's text wrote it, a
   ## template expanded it or a macro emitted it; int6-a5 and int6-m6 read the
   ## text, which holds the first only. An audited loop-counter step
-  ## (`loopIncRegion`) is not one.
+  ## (`loopIncRegion`) is not one. `loop`: the innermost `for` statement
+  ## whose body `n` is in (RFC-0016 int6-f2), passed down into a body only.
   if n == nil or n.kind in RoutineNodes: return nil
-  if loopIncRegion(n, owner): return nil
+  if loopIncRegion(n, owner, loop): return nil
   if n.kind == nnkPragma:
     for it in n:
       if namesCheck(it): return n
-  for c in n:
-    result = bodyCheckPragma(c, owner)
+  for i in 0 ..< n.len:
+    let inner = if n.kind == nnkForStmt and i == n.len - 1: n else: loop
+    result = bodyCheckPragma(n[i], owner, inner)
     if result != nil: return
 
 const typedHostKinds = {nskProc, nskFunc, nskMethod, nskIterator, nskConverter}

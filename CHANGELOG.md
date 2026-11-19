@@ -190,6 +190,18 @@ where that note does not yet cover it.
   `keepItIf` has its verdict from before int6-t again. A user's step of its
   own variable through `import std/sequtils {.all.}` stays unreadable, even
   one declared at a counter's line and column.
+- **`findIt` over an unbounded `items`** (int6-f2; walker 485). int6-x2
+  read through `findIt`'s counter step whatever `items(s)` the caller's
+  argument resolved to; the counter is stepped once per yielded item, so a
+  user `items` that yields forever steps it past `high(int)` (undefined
+  behaviour, its overflow check off), and admitting it rested on time
+  alone. The step is now read through only when the typed loop calls a
+  `system/iterators.nim` `items` bounded below `high(int)`, read from the
+  resolved iterator symbol: over an openArray, array, seq, string, set or
+  cstring, or an ordinal slice or enum type of at most 4 bytes. A user's or
+  a `{.closure.}` `items`, and an `int` slice (up to 2^64 values), leave an
+  opaque callee using `findIt` unreadable. `keepItIf`, `toSeq` and `toSeq2`
+  are unchanged: a checked index bounds each of their counters.
 - **A push leaked through an import** (migration 5b, int6-a6; walker 477). The
   scan replays Nim's compile order (`system` first, then the import graph
   depth first from the project file, each module at the first import that

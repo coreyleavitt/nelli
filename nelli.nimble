@@ -2113,6 +2113,8 @@ task test, "Run the test suite":
             "tsymex_0016_int6w2_seqtpl",
             # RFC-0016 int6-x2: sequtils' templates' own counter step is read through (findIt/keepItIf pre-int6-t verdicts); a user's {.all.} step stays unreadable.
             "tsymex_0016_int6x2_seqctr",
+            # RFC-0016 int6-f2: findIt's counter step is read through only over a stdlib items its length bounds; a user's or closure items, or an int slice, stays unreadable.
+            "tsymex_0016_int6f2_finditems",
             # RFC-0016 int6-w2: a stdlib routine declared inside a pushing stdlib body is placed under the push.
             "tsymex_0016_int6w2_stdnest",
             # RFC-0016 int6-w2: a template defined inside a module-level pragma block keeps the module-level call's coarse reading.

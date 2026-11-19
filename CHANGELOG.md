@@ -64,8 +64,7 @@ where that note does not yet cover it.
   checked and a routine under `{.push rangeChecks: off.}` in a checked build is
   walked as that build is, instead of declining `feCheckOption`. The same
   holds for `boundChecks`, `fieldChecks` and `objChecks` (5b), and a push
-  position that is both on and off, or a push inside a routine body, still
-  declines `feCheckOption`. Walker 465.
+  position that is both on and off still declines `feCheckOption`. Walker 465.
 - **Per-region overflow checks** (migration 1, `arithChecks`; walker 467). A
   routine under `{.push overflowChecks: off.}` or `{.push checks: off.}` in a
   checked build is walked as a `--overflowChecks:off` build is (`ubSignedOverflow`
@@ -99,6 +98,15 @@ where that note does not yet cover it.
   the name is undefined). A `when` on a `const`,
   `declared(...)` or any other name still declines, as does an entry whose
   `fn` is a lambda rather than a named routine.
+- **In-body push regions** (migration 5b, int6-a5; walker 474). A `{.push
+  ...checks: ....}` / `{.pop.}` pair among a user routine's own statements is
+  walked as a region of that routine, under the scope and arithmetic the push
+  gives it (nested pushes nest; a callee keeps its own declaration's; an
+  `overflowChecks: off` region is `asPushedOff`), where the routine declined
+  `feCheckOption`. An unbalanced pair, a pop closing a push inside a `when`
+  branch, a `defer` in a region, a push in an inline iterator's expansion, a
+  routine declared inside a pushing body and a stdlib routine's in-body push
+  still decline, naming the reason.
 - **Scanner text guard** (migration 1, int6-w, walker 468). The region reads
   place a routine in its module's text, read from disk during the compile. A
   routine whose text on disk ends before its position, or defines its name but

@@ -19,6 +19,7 @@
 import std/[unittest, strutils, os, tables]
 import nelli
 import nelli/symex
+import ./s8cu_helpers
 import ./s0016_int6w_scantext_ctl
 import ./s0016_int6w_scantext_sut
 import nelli/smt/check_scan
@@ -37,10 +38,6 @@ static:
   let base = unshifted(now)
   writeFile(sutPath, (if base != now: base
                       else: shiftMark & "\n" & shiftMark & "\n" & base))
-
-func named(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
-  for e in errs:
-    if e.kind == k: return true
 
 proc raisesOverflow(f: proc (v: int) {.nimcall.}; v: int): bool =
   try:
@@ -94,10 +91,14 @@ suite "int6-w: the scan reads the text the compiler parsed":
     let c = symexFind(chkSteady, tLabel("hit"), defaultSymexSettings())
     checkpoint show("chkSteady", c)
     check c.status == sxRaised and c.trusted
+    # native: `chkSteady(high(int))` raises OverflowDefect (test above)
+    discard pinFind(chkSteady, tLabel("hit"), pinSettingsConst)
     let o = symexFind(offSteady, tLabel("hit"), defaultSymexSettings())
     checkpoint show("offSteady", o)
     check not o.trusted
     check o.errors.named(ubSignedOverflow)
+    pinDecline(offSteady, cellKey(axDefinedness, "add/signed/scantext/steady"),
+               ubSignedOverflow)
 
   test "rewritten: the pushed-off routine is never a trusted raise":
     let c = symexFind(chkShifted, tLabel("hit"), defaultSymexSettings())
@@ -112,12 +113,16 @@ suite "int6-w: the scan reads the text the compiler parsed":
       if e.kind == feCheckOption and "not the text the compiler parsed" in e.msg:
         said = true
     check said
+    pinDecline(offShifted, cellKey(axDefinedness, "add/signed/scantext/shifted"),
+               feCheckOption, needle = "not the text the compiler parsed")
 
   test "rewritten: the checked routine declines, it is not read either":
     let c = symexFind(chkShifted, tLabel("hit"), defaultSymexSettings())
     checkpoint show("chkShifted", c)
     check not c.trusted
     check c.errors.named(feCheckOption)
+    pinDecline(chkShifted, cellKey(axDefinedness, "chk/signed/scantext/shifted"),
+               feCheckOption)
 
 static:
   writeFile(sutPath, unshifted(staticRead(sutPath)))

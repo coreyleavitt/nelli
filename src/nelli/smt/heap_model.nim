@@ -4028,8 +4028,17 @@ proc seqElemAt*(seqSV: SymVal, idx: Z3Int): SymVal =
     var leaves: seq[Z3AnyAst]
     for a in arrs:
       leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, a.raw, idx.raw))
-    return svWithLeaves(ctx, seqElemProto(seqSV.seqElemTy), leaves,
-                        seqSV.seqElemTy)
+    result = svWithLeaves(ctx, seqElemProto(seqSV.seqElemTy), leaves,
+                          seqSV.seqElemTy)
+    if result.kind == svSeq:
+      # RFC-0016 PRC-23. An inner seq's length is a select of the outer
+      # seq's length array, which nothing bounds for a free outer seq (no
+      # universal over the array: the G4 hang lesson). Every stored length
+      # is at least 0, so reading a negative one as 0 changes no stored
+      # value and leaves a free one a legal length.
+      let l = result.seqLen # [placeholder-audited]
+      result.seqLen = ite(l < mkInt(0), mkInt(0), l) # [placeholder-audited]
+    return
   case seqSV.seqElemTy.kind
   of itInt:
     case seqSV.seqElemTy.width

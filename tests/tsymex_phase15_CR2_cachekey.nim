@@ -1281,6 +1281,17 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 CRH-07 (a `count` value is defined in `regexRecDefConds`;
     ## `checkExact` owns its substituted terms): 369->372 (370 and 371 are
     ## the integration head's).
+    ## RFC-0016 W4 S8cp-r (PRC-34: record `==` over atom fields, a type
+    ## section in a routine body; 382-390 reserved): 381->391.
+    ## RFC-0016 W4 S8cp-r (PRC-34: whole-seq `==` over an atom element):
+    ## 391->392.
+    ## RFC-0016 W4 S8cp-r (PRC-34: quantifier-free whole-seq `==`; a record
+    ## with a non-atom field walks system's `==` instance; 393 reserved):
+    ## 392->394.
+    ## RFC-0016 W4 S8cp-r (PRC-34: whole-seq `==` with no length bound over
+    ## masked data arrays; 395-398 reserved): 394->399.
+    ## RFC-0016 W4 S8cp-r (PRC-34 / PRC-23: a store through a seq of
+    ## seqs; a seq of seqs parameter's witness reader): 399->400.
     check symexWalkerVersion == "412"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

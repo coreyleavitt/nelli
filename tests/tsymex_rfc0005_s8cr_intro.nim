@@ -60,7 +60,7 @@ template pinFree(sut: untyped; label: string; kind: SymexErrorKind) =
 type
   IntroDist = object
     x: int
-    ys: seq[seq[int]]    # no construction-time zero (`zeroIRExprForType`)
+    ys: seq[Table[int, int]]    # no construction-time zero (`zeroIRExprForType`)
   IntroBox = ref object
     items: IntroDist
     v: int

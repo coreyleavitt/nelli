@@ -139,15 +139,25 @@ proc castDeadS8(x: int) =
     if y == 1:
       symexTarget("s8_cast_dead")
 
+type
+  S8ClassBObj = object
+    case k: bool
+    of true: a: int
+    of false: b: int
+  S8ClassBRef = ref S8ClassBObj
+
 proc classBS8(x: int) =
-  ## Class B: an augmented assignment outside the modelled set -- a marker
-  ## with no parse record (its reach record is its only record).
-  ## (A NESTED seq element's LHS: `unwrapHidden(lhs[0])` is itself a
-  ## bracket expression, so no augmented-assign arm takes it. Float `/=` was
-  ## this exhibit until RFC-0016 PRC-07 modelled it.)
-  var qq = @[@[x, x]]
-  qq[0][x and 1] += 2
-  if qq[0][0] > 1:
+  ## Class B: a statement outside the modelled set -- a marker with no
+  ## parse record (its reach record is its only record): a discriminator
+  ## written through a ref under `{.cast(uncheckedAssign).}` (`parseAsgn`'s
+  ## marker; PRC-37 owns modelling it). A nested seq element's `+=`
+  ## (`qq[0][x and 1] += 2` on `@[@[x, x]]`) was this exhibit until
+  ## RFC-0016 S8cp-r (walker 400) stored through the inner seq, and float
+  ## `/=` before that, until RFC-0016 PRC-07 modelled it.
+  let p = S8ClassBRef(k: true, a: x)
+  {.cast(uncheckedAssign).}:
+    p.k = false
+  if x > 1:
     symexTarget("s8_classb")
 
 proc floatDivAssignS8(x: int) =

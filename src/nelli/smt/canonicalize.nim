@@ -853,6 +853,33 @@ const renderAsChoicesVersion* = "12"
   ##   roots built over the freed term read stale nodes (a false `sxUnsat` on
   ##   a satisfiable `count`) and were later released into them (SIGSEGV).
   ##   The query a count reaches changes shape; no key bytes change.
+  ## - RFC-0016 W4 S8cp-r (381->391; 382-390 are reserved for other W4
+  ##   work), PRC-34: system's `==` on two tuples or plain objects of atom
+  ##   fields lowers to the conjunction of the fields' `==` (was `eqBV` on a
+  ##   tuple, declined); a `type` section in a routine body is a no-op (was
+  ##   `feUnsupportedStmtKind`). Verdicts that declined now decide.
+  ## - RFC-0016 W4 S8cp-r (391->392), PRC-34: system's `==` on two seqs of
+  ##   an atom element is equal lengths and element-wise `==` (ground when a
+  ##   length is known, quantified otherwise; was `eqBV`, declined); a seq
+  ##   whose element `==` may be a user's declines in the parser.
+  ## - RFC-0016 W4 S8cp-r (392->394; 393 is reserved), PRC-34: whole-seq
+  ##   `==` is quantifier free (the G4 hang lesson): a ground unroll over a
+  ##   sound length bound of at most 64 read off the length term (a numeral,
+  ##   or an `ite` of bounded arms), each element conjunct guarded by its
+  ##   index being below the length; with no such bound it declines (was one
+  ##   `forall` over the index). `==` on a record with a non-atom field walks
+  ##   the compiler's instance of system's `==`, so each field compares with
+  ##   the `==` Nim resolved for it, a user's included (was `eqBV`, declined).
+  ## - RFC-0016 W4 S8cp-r (394->399; 395-398 are reserved), PRC-34: whole-seq
+  ##   `==` with no length bound in the term over a non-float element is
+  ##   equal lengths and equal masked data arrays (`lambda i. ite(0 <= i <
+  ##   len, data[i], default)`, an array term, no quantifier); it declined.
+  ##   A float element still declines there (IEEE `==` is not term equality).
+  ## - RFC-0016 W4 S8cp-r (399->400), PRC-34 / PRC-23: a seq of seqs is held
+  ##   leaf-split (a length array and a data array) and `s[i][j] = v` stores
+  ##   through its inner seq, the outer index checked first; a seq of seqs
+  ##   parameter, or a field of one, has a witness reader (`swrTree`), so its
+  ##   verdicts decide (was `feUnsupportedWitnessType`, declined).
 
 const symexWalkerVersion* = "412"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

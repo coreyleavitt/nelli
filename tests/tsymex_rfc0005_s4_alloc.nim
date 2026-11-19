@@ -39,7 +39,7 @@
 ## Flip audit (§4.3): the flipped pins are rewritten through
 ## `checkUnsatOverTaintOnly` (exported from `types.nim` by this slice) in the
 ## slice that flipped them -- S0's pin 1 and S3's family-2b F1.
-import std/[unittest, strutils, os]
+import std/[unittest, strutils, os, tables]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/runtime
@@ -66,9 +66,11 @@ type
     ## heap cell holds (a seq of tuples is backed nowhere, a stated
     ## decline). The by-value case object this was (S8ar) is a cell
     ## value since S8at. RFC-0005 S8bc: a seq of tuples is backed now, so
-    ## the part is a `seq[seq[int]]`.
+    ## the part was a `seq[seq[int]]`. RFC-0016 S8cp-r: walker 400 backs a
+    ## seq of seqs, so the part is a `seq[Table[int, int]]` (the shared
+    ## unbacked carrier).
     x: string
-    ys: seq[seq[int]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+    ys: seq[Table[int, int]]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   S4Node = ref object
     ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models
     ## (a string field read is the heap select itself). A `distinct string`
@@ -291,8 +293,10 @@ suite "RFC-0005 S4 (c) -- introduction invariant: the fresh symbol carries no co
     # havocs (its stand-in cell, `heapStandInTy`): no Z3 array backs a
     # tuple element.
     # RFC-0005 S8bc: a seq of tuples is backed (leaf-split) now; a seq of
-    # seqs is the stand-in.
-    let partTy = tSeq(tSeq(tInt()))
+    # seqs is the stand-in. RFC-0016 S8cp-r: walker 400 backs a seq of
+    # seqs too; a seq of tables (the shared unbacked carrier) is the
+    # stand-in.
+    let partTy = tSeq(tTable(tInt(), tInt()))
     let dTy = tTuple(@[tInt(), partTy], @["n", "c"], objectName = "S4IrBox")
     let pRef = tRef(dTy)
     let params = @[IRParam(name: "p", ty: pRef)]

@@ -100,9 +100,12 @@ proc sutSeqObject(ws: seq[Widget], y: int) =
   if y == 42:
     symexTarget("seq_object_target")
 
-# SUT 2: seq[seq[int]] — a nested seq is also not in the scalar/ref element
-# set (elemTy.kind == itSeq is not itInt/itFloat32/itFloat64/itRef).
-proc sutSeqSeqInt(ws: seq[seq[int]], y: int) =
+# SUT 2: seq[Table[int, int]] — a container element is not in the backed
+# element set either. RFC-0016 S8cp-r (walker 400): this was `seq[seq[int]]`,
+# which has a witness reader now (`swrTree`, pinned in
+# `tsymex_0016_s8cpr_shapes`); a seq of tables is the shared unbacked
+# carrier of the suites that pinned a seq of seqs as unbacked.
+proc sutSeqSeqInt(ws: seq[Table[int, int]], y: int) =
   if y == 42:
     symexTarget("seq_seq_int_target")
 
@@ -211,7 +214,7 @@ suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
         sawKind = true
     check sawKind
 
-  test "CR-2c-2: seq[seq[int]] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
+  test "CR-2c-2: seq[Table[int, int]] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
     let r = symexFind(sutSeqSeqInt, tLabel("seq_seq_int_target"))
     check r.status == sxUnknown
     check r.status != sxSat

@@ -2,7 +2,6 @@
 # Line: id<TAB>slice<TAB>reason. The slice is the section 11 slice expected to fill it. An entry is
 # removed in the commit whose row gains `cells` or `pins` (tsymex_0016_universe fails a stale entry).
 # An alias (F-0001 for W-01) resolves to its row.
-SND-07	W1-p	no cell or pin names it yet; section 11 names the id in this slice only
 SND-12	W1-p	no cell or pin names it yet; section 11 names the id in this slice only
 PRC-03	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-04	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
@@ -19,14 +18,12 @@ PRC-18	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precisi
 PRC-19	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-20	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-21	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-PRC-23	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-26	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-28	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-36	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-37	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-32	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-33	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-PRC-34	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-35	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-39	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 PRC-38	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
@@ -39,7 +36,6 @@ INT-05	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precisi
 INT-06	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-07	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-18	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
-INT-21	W1-p	no cell or pin names it yet; section 11 names the id in this slice only
 INT-23	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-25	W4-z	no cell or pin names it yet; no slice owns it, so the Wave 4 precision rows and W4-z (allowlists emptied) do
 INT-27	W1-c2	no cell or pin names it yet; section 11 names the id in this slice only

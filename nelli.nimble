@@ -1922,6 +1922,7 @@ task test, "Run the test suite":
             "tsymex_0016_s8ckr_threadstate",
             "tsymex_0016_s8ckr_threadstate_audit",
             "tsymex_0016_s8ckr_firstwrite_audit",
+            "tsymex_0016_s8cpr_shapes",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

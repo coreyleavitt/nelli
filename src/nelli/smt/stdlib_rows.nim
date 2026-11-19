@@ -145,6 +145,14 @@ const explicitRows: seq[StdlibRow] = @[
   unsignedOp("system.<=%",
     "`<=%` (system/arithmetics.nim): a `system` routine over `cast[uint]`; " &
     "less-or-equal on the operands as unsigned (S8cb, `parseUnsignedOp`)"),
+  # PRC-34 (S8cp-r step 5). System's generic `==` on two tuples or objects:
+  # the record arm walks its instance for a record with a non-atom field
+  # (`isSystemRecordEq`), so each field compares with the `==` the compiler
+  # resolved through `mixin`, a user's included.
+  walked("system.==",
+    "system.nim:1957: `for a, b in fields(x, y): if a != b: return false`, " &
+    "unrolled per field in the instance; each field's `==` is its own call " &
+    "with its own row, and the body itself does no arithmetic", {}),
 
   # W-47 (B-11, HRV-62). The stdlib generic objects the type bridge declines,
   # by row instead of by the bare catch-all. Open precision (`iModel`).

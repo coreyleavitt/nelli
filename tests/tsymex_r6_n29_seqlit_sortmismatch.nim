@@ -27,7 +27,7 @@
 ## for a BACKED `elemTy`, falling back to the inert placeholder only for a
 ## genuinely unbacked one).
 from ./s8cu_helpers import named
-import std/[unittest, strutils]
+import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -114,8 +114,8 @@ suite "symex N29 -- three sequential .add calls off an empty literal":
 # =============================================================================
 
 proc sutUnbackedLitAdd(a: string, b: string) =
-  var pairs: seq[seq[string]] = @[]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
-  pairs.add @[a, b]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  var pairs: seq[Table[int, int]] = @[]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
+  pairs.add initTable[int, int]()  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   if pairs.len > 0:
     symexTarget("unbacked_add")
 

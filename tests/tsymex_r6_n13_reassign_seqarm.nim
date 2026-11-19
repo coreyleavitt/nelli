@@ -37,7 +37,7 @@
 ## that encoded the zero-init ("count != 0 after reassignment is
 ## unreachable") are restated to what Nim does, each with a run of the real
 ## code as its oracle; the no-crash and decline pins keep their purpose.
-import std/[unittest, strutils]
+import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -55,7 +55,7 @@ type
     of rkA: a: int
     of rkB:
       count: int
-      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
+      opts: seq[Table[int, int]]   ## unbacked elem (a table; RFC-0016 S8cp-r: a seq of seqs is backed since walker 400) -> placeholder
 
 proc reassignToB(v: var Rec) =
   v.kind = rkB

@@ -39,7 +39,7 @@
 ## `sxUnknown` verdicts for procs allocating — but not reading — a poisoned
 ## field now honestly TIGHTEN to their real `sxSat`/`sxUnsat`).
 from ./s8cu_helpers import named
-import std/[unittest, strutils]
+import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -53,7 +53,7 @@ type
   Packet = object
     tag: int                            ## plain field, shared across arms
     case kind: PKind
-    of pkRrq: options: seq[seq[string]]   ## the poisoned field (a seq of seqs: a seq of tuples is backed since RFC-0005 S8bc)
+    of pkRrq: options: seq[Table[int, int]]   ## the poisoned field (RFC-0016 S8cp-r: a seq of seqs is backed since walker 400; a seq of tables is the shared unbacked carrier)
     of pkData: blockNum: int
     of pkAck: ackNum: int
 
@@ -118,7 +118,7 @@ type
     tag: int                       ## the ONLY field kind Nim itself accepts
                                     ## alongside a non-constant discriminant
     case kind: SymOp
-    of symRrq: options: seq[seq[string]]   ## the poisoned field (a seq of seqs: a seq of tuples is backed since RFC-0005 S8bc)
+    of symRrq: options: seq[Table[int, int]]   ## the poisoned field (RFC-0016 S8cp-r: a seq of seqs is backed since walker 400; a seq of tables is the shared unbacked carrier)
     of symData: blockNum: int
 
 proc sutSymConstructUntouchedTag(b: byte, n: int) =
@@ -147,14 +147,14 @@ proc sutSymConstructTouchedArmDegrades(b: byte, n: int) =
 # is untouched by this slice's classify-time change and exercises the
 # PRE-EXISTING `allocateSeqDataRaw` degrade path). ------------------------
 proc sutLocalEmptySeqNoCrash(n: int) =
-  var pairs: seq[seq[string]] = @[]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  var pairs: seq[Table[int, int]] = @[]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
   discard pairs
   if n == 5:
     symexTarget("local_empty_seq_no_crash")
 
 proc sutLocalSeqTouchDegrades(n: int) =
-  var pairs: seq[seq[string]] = @[]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
-  pairs.add(@["a", "b"])  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  var pairs: seq[Table[int, int]] = @[]  # RFC-0016 S8cp-r: a seq of tables, the shared unbacked carrier (a seq of seqs is backed since walker 400)
+  pairs.add(initTable[int, int]())
   if n == 5:
     symexTarget("local_seq_touch_degrades")
 

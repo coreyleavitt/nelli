@@ -3451,8 +3451,15 @@ func isTreeSeqElemTy*(elemTy: IRType): bool =
   ## and a `distinct` over a tree is its base's leaves; either way a read
   ## at the distinct static type re-boxes. Two representations of one
   ## `seq[Meters]` would otherwise meet in one merge or store.
+  ##
+  ## RFC-0016 PRC-23 / PRC-34: a backed seq element (`seq[seq[T]]`) is held
+  ## leaf-split too, as a seq part of a tree element already was: one
+  ## `Int -> data` array and one `Int -> len` array (`heapLeafSuffixes`),
+  ## so a nested seq is a value (a store into the outer seq copies the inner
+  ## arrays, and a copy of the outer seq does not see a later store).
   let cell = seqCellTy(elemTy)
-  heapTreeTy(cell) and heapCompoundTy(cell)
+  (heapTreeTy(cell) and heapCompoundTy(cell)) or
+    (cell != nil and cell.kind == itSeq and seqBackedTy(cell))
 
 func isBackedSeqElemTy*(elemTy: IRType): bool =
   ## Mirrors EXACTLY the element kinds `allocateSeqDataRaw` (`runtime.nim`)
@@ -3547,6 +3554,10 @@ proc seqWitnessReader*(ty: IRType): SeqWitnessReader =
     elif cell.kind in {itFloat32, itFloat64}: swrDistinct
     else: swrNone
   else:
+    # RFC-0016 PRC-23: a seq element (`seq[seq[T]]`) too. It is extracted
+    # as a tree element is (`extractTreeValue`'s `itSeq` arm: each inner
+    # length is the model's, read through `seqElemAt`'s clamp at 0) and read
+    # back by `readSeqAs`'s seq arm (`readCellSeq`).
     if isTreeSeqElemTy(e): swrTree else: swrNone
 
 func isContainerIntLeaf*(t: IRType): bool =

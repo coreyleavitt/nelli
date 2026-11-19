@@ -3759,6 +3759,77 @@ proc parseProcAsValue(procSym, impl: NimNode, ctx: ParseCtx): IRExpr =
 
 # ---- Binop / unop helpers ----------------------------------------------------
 
+const atomEqTypeNames = ["int", "int8", "int16", "int32", "int64", "uint",
+                         "uint8", "uint16", "uint32", "uint64", "bool", "char",
+                         "float", "float32", "float64", "string"]
+  ## RFC-0016 PRC-34. The field types whose `==` is system's own: a type
+  ## whose implementation is one of these symbols (an alias resolves to it).
+  ## A `distinct`, an enum, a range or a record may carry a user's `==`,
+  ## which system's generic `==` on a record reaches through `mixin`.
+
+proc atomRecordFieldTypes(recTy: NimNode): seq[NimNode] =
+  ## RFC-0016 PRC-34. The field types of a tuple or of a plain object (no
+  ## parent, no pragma, no case or `when` part), in declaration order; `@[]`
+  ## (with no fields to decide) when `recTy` is neither, or when a field's
+  ## type is not an atom (`atomEqTypeNames`).
+  if recTy == nil or recTy.kind == nnkNilLit: return @[]
+  let impl = recTy.getTypeImpl
+  var tys: seq[NimNode]
+  if impl.kind == nnkTupleConstr:
+    for c in impl: tys.add c
+  elif impl.kind == nnkTupleTy:
+    for d in impl:
+      if d.kind != nnkIdentDefs: return @[]
+      for _ in 0 ..< d.len - 2: tys.add d[^2]
+  elif impl.kind == nnkObjectTy:
+    if impl.len != 3 or impl[0].kind != nnkEmpty or impl[1].kind != nnkEmpty or
+       impl[2].kind != nnkRecList:
+      return @[]
+    for d in impl[2]:
+      if d.kind != nnkIdentDefs: return @[]
+      for _ in 0 ..< d.len - 2: tys.add d[^2]
+  else:
+    return @[]   # not a record: no fields to decide, the decline stands
+  for t in tys:
+    let ti = t.getTypeImpl
+    if ti.kind != nnkSym or ti.strVal notin atomEqTypeNames: return @[]
+  tys
+
+proc isAtomSeqType(seqTy: NimNode): bool =
+  ## RFC-0016 PRC-34. `seqTy` is a `seq[T]` whose element type `T` is an atom
+  ## (`atomEqTypeNames`): system's generic `==` on two such seqs compares the
+  ## elements with system's own `==`.
+  if seqTy == nil or seqTy.kind == nnkNilLit: return false
+  let impl = seqTy.getTypeImpl
+  if impl.kind != nnkBracketExpr or impl.len != 2: return false
+  let et = impl[1].getTypeImpl
+  et.kind == nnkSym and et.strVal in atomEqTypeNames
+
+proc isSystemRecordEq(sym: NimNode): bool =
+  ## RFC-0016 PRC-34. `sym` is an instance of system's generic `==` on a
+  ## tuple or an object. Its body, as the compiler instantiated it, has the
+  ## `fields` loop unrolled and each field's `a != b` resolved in the
+  ## instantiation's scope (`mixin`): a builtin's `==`, a nested record's
+  ## instance of this same routine, or a user's `==` on the field's type.
+  ## Walked as a routine, it compares each field with the `==` Nim calls;
+  ## a field-by-field model would bypass a user's.
+  if sym.kind != nnkSym or sym.symKind != nskProc: return false
+  let impl = sym.getImpl
+  impl.kind == nnkProcDef and
+    impl.lineInfoObj.filename.replace('\\', '/').endsWith("/lib/system.nim")
+
+proc recordAtomEqIR(l, r: IRExpr; recTy: IRType): IRExpr =
+  ## RFC-0016 PRC-34. System's `==` on two records of atoms: the
+  ## conjunction of the fields' `==` (`true` for a record with none).
+  ## `l` and `r` are side-effect free (bound temps): each is read once per
+  ## field.
+  result = nil
+  for i in 0 ..< recTy.fields.len:
+    let eq = mkBinop(bEq, mkField(l, i, recTy.fieldNames[i]),
+                     mkField(r, i, recTy.fieldNames[i]))
+    result = if result == nil: eq else: mkBinop(bAnd, result, eq)
+  if result == nil: result = mkBoolLit(true)
+
 proc binopForInfix(op: string): IRBinop =
   case op
   of "+":   bAdd
@@ -12611,6 +12682,49 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # after `f`'s write (see `isEagerIR`).
       let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
       return mkBitSet(op, @[l, r], setTy)
+    # RFC-0016 PRC-34: system's generic `==` on two tuples or two plain
+    # objects (`!=` reaches here as `not ==`) is `for a, b in fields(x, y):
+    # if a != b: return false`. Over fields whose types are atoms
+    # (`atomRecordFieldTypes`) that is the conjunction of their builtin `==`;
+    # it was `eqBV` on a tuple value, declined. Any other record walks the
+    # compiler's instance of system's `==` (`isSystemRecordEq`): a field's
+    # `==` may be a user's, reached through `mixin`, and the instance calls
+    # the one Nim resolved.
+    if n.len == 3 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["=="]) and
+       n[1].typeKind in {ntyTuple, ntyObject} and
+       n[2].typeKind == n[1].typeKind:
+      let recTy = classifyType(n[1]).ty
+      let atoms = atomRecordFieldTypes(n[1].getTypeInst)
+      var leaves = recTy.kind == itTuple and atoms.len > 0 and
+                   atoms.len == recTy.fields.len
+      if leaves:
+        for f in recTy.fields:
+          if f.kind notin {itInt, itBool, itFloat32, itFloat64, itString}:
+            leaves = false
+      if leaves:
+        let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
+        let lt = freshSynth(ctx, "receqL")
+        let rt = freshSynth(ctx, "receqR")
+        preamble.add mkLet(lt, recTy, l)
+        preamble.add mkLet(rt, recTy, r)
+        return recordAtomEqIR(mkVar(lt), mkVar(rt), recTy)
+      if isSystemRecordEq(n[0]):
+        return parseRoutineCallExpr(n, n[0], preamble, ctx)
+    # RFC-0016 PRC-34: system's generic `==` on two seqs compares lengths,
+    # then elements with the element type's `==`, reached through `mixin`.
+    # Over an atom element (`isAtomSeqType`) the walker models it whole
+    # (`seqEqZ3`); any other element's `==` may be a user's (an enum or a
+    # `distinct` lifts to a builtin value the walker cannot tell apart), so
+    # the comparison declines here.
+    if n.len == 3 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["=="]) and
+       n[1].typeKind == ntySequence and n[2].typeKind == ntySequence and
+       not isAtomSeqType(n[1].getTypeInst):
+      preamble.add ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "RFC-0016 PRC-34: `==` on two seqs whose element type's " &
+                "`==` may be a user's (`" & n[1].getTypeInst.repr &
+                "`) is not modelled (feUnsupportedOp)"),
+        "seq == over a non-atom element (feUnsupportedOp)")
+      return mkBoolLit(false)
     # Phase 15 S8: `&` string concatenation. Intercept BEFORE binopForInfix
     # (which has no `&` case and would error). Only fire when BOTH operands
     # classify as `itString` — `s & t`, `s & "lit"`, `"lit" & s`. This guard
@@ -19294,6 +19408,15 @@ proc isTableElemCall(n: NimNode): bool =
     n[0].strVal == "[]" and n[1].kind != nnkEmpty and
     classifyType(unwrapHidden(n[1])).ty.kind == itTable
 
+proc nestedSeqElemRecv(recv: NimNode): bool =
+  ## RFC-0016 PRC-34 / PRC-23. `recv` is an element of a seq whose elements
+  ## are seqs (`s[i]` of a `seq[seq[T]]`), so `recv[j] = v` is a write
+  ## through a value chain, not a bare `isIndexAssign` receiver.
+  if recv.kind != nnkBracketExpr or recv.len < 2: return false
+  let outer = classifyType(recv[0]).ty
+  outer != nil and outer.kind == itSeq and seqBackedTy(outer) and
+    outer.seqElemTy != nil and seqCellTy(outer.seqElemTy).kind == itSeq
+
 proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   ## RFC-0005 S8s. Classifies `lhs` as one step of a value field chain. A
   ## variant arm field's `nnkCheckedFieldExpr` (Nim's discriminant check) is
@@ -19374,7 +19497,11 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
     # also what `addr xs[i].x`'s store is rewritten to (`elemAddrNode`). It was
     # the "unsupported nnkAsgn shape" decline. Stored as an array's symbolic
     # index is (`valueFieldWrite`).
-    if not seqBackedTy(recvTy) or not isTreeSeqElemTy(recvTy.seqElemTy):
+    # RFC-0016 PRC-34 / PRC-23: or an element of an inner seq of a seq of
+    # seqs (`s[i][j] = v`): the inner seq is read, stored into and written
+    # back to the outer seq, the outer index checked first, as Nim does.
+    if not seqBackedTy(recvTy) or
+       not (isTreeSeqElemTy(recvTy.seqElemTy) or nestedSeqElemRecv(recv)):
       return false
     var ixNode = t[1]
     while ixNode.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ixNode.len >= 1:
@@ -23328,6 +23455,12 @@ proc parseStmtInner(n: NimNode,
     # is inlined at its `for`, and a template or macro is already expanded
     # at its uses. It was `feUnsupportedStmtKind`, which tainted every path
     # past the declaration.
+    mkBlock(@[])
+  of nnkTypeSection:
+    # RFC-0016 PRC-34: a `type` section in a routine body declares types the
+    # typed body has already resolved at every use (constructors, field
+    # reads, hooks by type); it runs nothing where it stands. It was
+    # `feUnsupportedStmtKind`, which tainted every path past it.
     mkBlock(@[])
   else:
     ctx.declineMarker(feUnsupportedStmtKind, &"statement kind {n.kind} not in supported fragment")

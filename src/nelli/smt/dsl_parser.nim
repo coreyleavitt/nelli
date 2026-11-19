@@ -30019,6 +30019,12 @@ proc dupValue(src: IRExpr; t: NimNode; preamble: var seq[IRStmt];
     mkArrayLit(elems, ity.elemTy)
   else: nil  # k2: fail-closed: nil: an unread type shape
 
+proc dupSiteType(ctx: ParseCtx; key: string): NimNode =
+  ## RFC-0016 PRC-45. The type recorded for the `=dup` site `key` (read where
+  ## the site was classified). A proc's return is a copy, so the caller holds
+  ## no location of `ctx.procScoped` (RFC-0005 S8x).
+  ctx.procScoped.dupSites[key]
+
 proc parseDupSite(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
   ## RFC-0016 PRC-44. A local `n` read at a sink position of its routine that
   ## runs its type's user `=dup` (`dupHookSites`): the hook's call on it, and
@@ -30035,19 +30041,21 @@ proc parseDupSite(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr 
      (n.kind == nnkSym and symKind(n) notin {nskLet, nskVar, nskParam,
                                               nskForVar}):
     return nil
-  let body = ctx.procScoped.dupBody
-  if body.isNil: return nil
+  # RFC-0005 S8x: no `let` binds a location of `ctx.procScoped` (the VM
+  # aliases it); the bodies are read in place.
+  if ctx.procScoped.dupBody.isNil: return nil
   if not ctx.procScoped.dupScanned:
     ctx.procScoped.dupScanned = true
-    let inst = ctx.procScoped.dupInstBody
-    ctx.procScoped.dupSites = dupHookSites(if inst.isNil: body else: inst,
-                                           not inst.isNil,
-                                           ctx.procScoped.dupInstFormals)
+    ctx.procScoped.dupSites = dupHookSites(
+      (if ctx.procScoped.dupInstBody.isNil: ctx.procScoped.dupBody
+       else: ctx.procScoped.dupInstBody),
+      not ctx.procScoped.dupInstBody.isNil,
+      ctx.procScoped.dupInstFormals)
   # PRC-48: in an inlined loop body's copy, the copies it is in.
   let key = dupArgKey(n) & dupCopySuffix(ctx.procScoped.dupCopy.join("/"))
   if key notin ctx.procScoped.dupSites: return nil
   # The argument's type, read where the site was classified (typed there).
-  let t = ctx.procScoped.dupSites[key]
+  let t = dupSiteType(ctx, key)
   # PRC-45: a `sink` parameter read after the site is copied only when its
   # type's destructor is not trivial (`dupClassify`): its hooks are read first.
   if n.kind == nnkSym and symKind(n) == nskParam and

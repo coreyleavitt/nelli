@@ -188,12 +188,24 @@ proc s9TwinClassA(x: int) =
   if x == 3:
     symexTarget("s9_twin_a")
 
+type
+  S9Disc = object
+    case k: bool
+    of true: a: int
+    of false: b: int
+  S9DiscRef = ref S9Disc
+
 proc s9TwinClassB(x: int) =
-  ## Two Class-B declines with one message, both reached.
-  var qq = @[@[x, x]]
-  qq[0][x and 1] += 2
-  qq[0][x and 1] += 2
-  if qq[0][0] > 1:
+  ## Two Class-B declines with one message, both reached: a discriminator
+  ## written through a ref under `{.cast(uncheckedAssign).}` (`parseAsgn`'s
+  ## marker; PRC-37 owns modelling it). It was a nested seq element's
+  ## augmented assignment, which RFC-0016 S8cp-r (walker 400) models.
+  let q = S9DiscRef(k: true, a: x)
+  {.cast(uncheckedAssign).}:
+    q.k = false
+  {.cast(uncheckedAssign).}:
+    q.k = true
+  if x > 1:
     symexTarget("s9_twin_b")
 
 proc s9Clean(x: int) =

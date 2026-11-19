@@ -63,21 +63,28 @@ proc s1bSolverUndefRaise(a, b, c, d: int) =
   if a * b * c * d == 1234567:
     raise newException(ValueError, "s1b rare")
 
-# Class-B `isUnsupported` (no parse-time error of its own): a NESTED seq
-# element's augmented assignment is dropped whole
-# (`tsymex_augmented_assign.nim`; a field-LHS one is modelled since
-# RFC-0005 S8p, a tuple element's since S8s, an array element's at a
-# constant index since S8u and at a symbolic one since S8z, a single-level
-# seq element's since S8am -- this pin's previous shape, now closed). A
-# nested seq element (`qq[0][i]`) still declines: `unwrapHidden(lhs[0])`
-# is itself an `nnkBracketExpr`, not an `nnkSym`, so it never matches the
-# seq-element arm. `b and 1` is 0 or 1, always in bounds.
+# Class-B `isUnsupported` (no parse-time error of its own). The shape was a
+# field augmented assignment, then a tuple element's (RFC-0005 S8s models
+# it), an array element's (S8u, S8z), a single-level seq element's (S8am)
+# and a nested seq element's (`qq[0][b and 1] += b`), which RFC-0016 S8cp-r
+# (walker 400) models: that run is a native-confirmed sxSat with no decline.
+# It is now a discriminator written through a ref under
+# `{.cast(uncheckedAssign).}` (`parseAsgn`'s marker; PRC-37 owns modelling
+# it), the Class-B exhibit `tsymex_rfc0005_s8_scope.nim` and
+# `tsymex_rfc0005_s3_monotonicity.nim` use.
 type S1bPoint = object
   x, y: int
+type
+  S1bDisc = object
+    case k: bool
+    of true: a: int
+    of false: b: int
+  S1bDiscRef = ref S1bDisc
 
 proc s1bFieldAug(p: S1bPoint, b: int) =
-  var qq = @[@[p.x, p.y]]
-  qq[0][b and 1] += b  # nested-seq element LHS -- always declines
+  let q = S1bDiscRef(k: true, a: p.x)
+  {.cast(uncheckedAssign).}:
+    q.k = false    # a discriminator written through a ref -- always declines
   if b > 0:
     symexTarget("s1b_fieldaug")
 

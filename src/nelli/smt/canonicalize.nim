@@ -1442,8 +1442,16 @@ const renderAsChoicesVersion* = "12"
   ##   re-measured at 20,000. A walk the budget cut before spends less and
   ##   may now decide (the k9cg FilterIt shape's unroll 4: 141.4M units to
   ##   86.0M), so verdicts move. No key bytes change.
+  ## - RFC-0016 int6-a (472->473): a stdlib routine whose module pushes
+  ##   `rangeChecks`, `boundChecks`, `fieldChecks` or `objChecks` off at its
+  ##   position on every reading (`system.nim`'s and `strutils.nim`'s
+  ##   `checks: off`), with no check pragma inside its definition, is walked
+  ##   under that scope, as a user routine is, instead of declining
+  ##   `feCheckOption`; its `overflowChecks` turned off so and modelled by no
+  ##   stdlib row are walked `asPushedOff`. Key bytes change: such a body's
+  ##   `@on{...}` scope and stamp, and its digest's `om=`.
 
-const symexWalkerVersion* = "472"
+const symexWalkerVersion* = "473"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

@@ -288,8 +288,17 @@ type RoutineChecks* = object
     ## `coOverflow` its body is stamped `asPushedOff`), as the
     ## build route walks a build that has them off. They are not in `checks`.
     ## A position that may be either way keeps the option in `checks` and
-    ## declines; so does a stdlib module's push (the K4c delta, no row models
-    ## it).
+    ## declines. RFC-0016 int6-a: a stdlib module's push of the four checks
+    ## is modelled the same way (its body is walked under its own scope, as a
+    ## user routine's is), where its definition holds no check pragma of its
+    ## own; its `overflowChecks` stay the K4c delta's until
+    ## `applyStdlibDelta` finds no row models them (`overflowOffExact`).
+  overflowOffExact*: bool
+    ## RFC-0016 int6-a. A stdlib routine whose position turns the build's
+    ## `overflowChecks` off on every reading, with no importer's push reaching
+    ## it and no check pragma inside its definition. `coOverflow` stays in
+    ## `checks` here: the parser moves it to `offModelled` (`asPushedOff`)
+    ## only where no stdlib row models it (`overflowModelled`, `asUnchecked`).
   nanOn*, infOn*: bool
     ## RFC-0016 PRC-07 (float half). The routine's position was read and
     ## `nanChecks` (`infChecks`) is on there on every reading, from the build
@@ -378,6 +387,19 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
         if hit.len > 0:
           return "it carries " & hit & " inside its own definition, so it is " &
                  "checked at some positions and not others"
+
+proc stdlibDefClean(impl: NimNode; file: string; line: int;
+                    m: ModuleScan): bool =
+  ## RFC-0016 int6-a. A stdlib routine's definition, in the text the scan read,
+  ## holds no pragma naming any of the scoped checks, whatever its value: its
+  ## position's state then holds for its whole body. False where the text or
+  ## the definition cannot be found (fail closed: the push stays a deviation).
+  let ast = scannedAst(m, file)
+  if ast == nil: return false
+  let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
+  if def == nil: return false
+  # Every value of a named check is a hit with `off` and `on` both the set.
+  inRoutineChecks(def, scopedChecks, scopedChecks).len == 0
 
 proc routinePlace*(impl: NimNode): string =
   ## For a message: the routine, its file and line.
@@ -480,12 +502,22 @@ proc routineChecks*(impl: NimNode): RoutineChecks =
   # RFC-0016 int6-o: `overflowChecks` likewise; its body is walked unchecked
   # (`asPushedOff`), as the build route walks a `--overflowChecks:off` build.
   # `overflowOn` above was read before the move, so it stays false for it.
-  if result.why.len == 0 and not rootStdlib:
+  # RFC-0016 int6-a: a stdlib routine likewise, now that a body is walked
+  # under its own scope: the K4c delta was the only model of a stdlib push
+  # when a routine could only be walked under the build's checks. Its file's
+  # text is the scan's (`stdlibDefClean`), so a pragma inside its definition
+  # is seen; one that names any of the checks leaves them deviations.
+  let stdlibClean = rootStdlib and result.why.len == 0 and
+                    stdlibDefClean(impl, file, li.line, moduleScans[root])
+  if result.why.len == 0 and (not rootStdlib or stdlibClean):
     for co in scopedChecks * buildSemantics.checks:
       if co in result.checks and co in st.maybeOff and co notin st.maybeOn and
          co notin leaked:
-        result.checks.excl co
-        result.offModelled.incl co
+        if rootStdlib and co == coOverflow:
+          result.overflowOffExact = true
+        else:
+          result.checks.excl co
+          result.offModelled.incl co
   if coRange notin buildSemantics.checks:
     result.rangeOn = coRange notin result.checks
     result.checks = result.checks - {coRange}

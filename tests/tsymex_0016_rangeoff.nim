@@ -38,6 +38,7 @@ type
 
 const rk = cellKey(axBuild, "rangeChecks=off")
 const ik = cellKey(axDefinedness, "index/unchecked")
+const sk = cellKey(faGeneric, "rangeoff_scopes")
 
 proc sutInt8(v: int) =
   if v > 127 and int8(v) == 44'i8: symexTarget("hit")
@@ -141,23 +142,21 @@ when defined(rangeoffPushed):
   {.pop.}
 
 suite "PRC-07: range checks that differ within a routine (never the build's)":
+  # RFC-0016 int6-a: re-pinned against native. Each still declines: a push
+  # inside a routine body is not modelled per statement, and a `when` on
+  # `defined(...)` is not decided by the scan (the int6-a fork).
   test "a push around part of a body declines, it is not read as unchecked":
-    let r = symexFind(sutPartlyChecked, tRaisedExn("RangeDefect"), pinSettingsConst)
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feCheckOption)
-    check not r.trusted
+    check native(sutPartlyChecked(300)) == "RangeDefect"
+    pinDecline(sutPartlyChecked, sk, feCheckOption,
+               target = tRaisedExn("RangeDefect"), needle = "sutPartlyChecked")
   test "a position that is both pushed on and off declines, it is not read as unchecked":
-    let r = symexFind(sutAmbiguous, tRaisedExn("RangeDefect"), pinSettingsConst)
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feCheckOption)
-    check not r.trusted
+    check native(sutAmbiguous(300)) == "RangeDefect"
+    pinDecline(sutAmbiguous, sk, feCheckOption,
+               target = tRaisedExn("RangeDefect"), needle = "sutAmbiguous")
   test "an unchecked head before a checked tail declines whole":
-    let r = symexFind(sutUncheckedPart, tLabel("hit"), pinSettingsConst)
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feCheckOption)
+    check native(sutUncheckedPart(300)) == "RangeDefect"
+    check native(sutUncheckedPart(5)) == "ran"
+    pinDecline(sutUncheckedPart, sk, feCheckOption, needle = "sutUncheckedPart")
 
 suite "PRC-07: range conversions with --rangeChecks:off":
   test "version floor":

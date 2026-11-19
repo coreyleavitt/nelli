@@ -1893,6 +1893,13 @@ proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
   ## body trips is modelled (`overflowModelled`: the body is walked under
   ## `asUnchecked`). Anything else stays a deviation and declines
   ## (`withCheckDeclines`), as does a ledger row, whose delta is unknown.
+  ##
+  ## RFC-0016 int6-a: the four other checks a stdlib push turns off are no
+  ## deviation where its position was read off on every reading
+  ## (`routineChecks` moved them to `offModelled`): the body is walked under
+  ## its own scope, as a user routine's. Its `overflowChecks` turned off so
+  ## (`overflowOffExact`) and modelled by no row are walked `asPushedOff`,
+  ## as a user routine's are; a row's `asUnchecked` comes first.
   let key = stdlibRoutineKey(impl)
   if key.len == 0: return
   ledgerNote(key)
@@ -1903,12 +1910,15 @@ proc applyStdlibDelta(impl: NimNode; c: var RoutineChecks; isMagic: bool) =
     c.unadmitted = why
     c.unadmittedKind = kind.get(feUnadmitted)
     return
-  if not adm.admitted: return
-  if c.why.len > 0 or c.checks == {} or not adm.payload.deltaKnown: return
-  var ex = adm.payload.exercises
-  c.checks = (c.checks * ex) + (c.checks * defaultOff)
-  c.overflowModelled = coOverflow in c.checks
-  if c.overflowModelled: c.overflowRow = adm   # ADM-IR: the stamp's proof
+  if c.why.len > 0 or c.checks == {}: return
+  if adm.payload.deltaKnown:
+    var ex = adm.payload.exercises
+    c.checks = (c.checks * ex) + (c.checks * defaultOff)
+    c.overflowModelled = coOverflow in c.checks
+    if c.overflowModelled: c.overflowRow = adm   # ADM-IR: the stamp's proof
+  if coOverflow in c.checks and not c.overflowModelled and c.overflowOffExact:
+    c.checks.excl coOverflow
+    c.offModelled.incl coOverflow
 proc noaliasWithPeers(impl: NimNode): seq[string] =
   ## RFC-0016 K10a-axis. The names of the `{.noalias.}` parameters of the
   ## routine `impl` when another parameter is pointer-like too (`ptr`, `ref`,

@@ -80,6 +80,15 @@ where that note does not yet cover it.
   cpp), where it used to decline `feUnsupportedOp`; a program with such a
   region carries the variant image through its checked routines, which keep
   their `FieldDefect`. A program with no such region is unchanged.
+- **Stdlib push regions** (migration 5b, int6-a; walker 473). A stdlib routine
+  whose module pushes `rangeChecks`, `boundChecks`, `fieldChecks` or
+  `objChecks` off at its position (`system.nim`'s and `strutils.nim`'s
+  `checks: off`, which cover `system.delete` and `strutils.cmpIgnoreStyle`)
+  is walked under that scope, as a user routine is, instead of declining
+  `feCheckOption`; its `overflowChecks` pushed off and modelled by no stdlib
+  row are walked `asPushedOff`. A stdlib routine with a check pragma inside
+  its own definition, or at a position the scan reads both ways, still
+  declines.
 - **Scanner text guard** (migration 1, int6-w, walker 468). The region reads
   place a routine in its module's text, read from disk during the compile. A
   routine whose text on disk ends before its position, or defines its name but

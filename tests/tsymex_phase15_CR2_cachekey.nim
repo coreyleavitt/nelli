@@ -1443,7 +1443,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## solver): 470->471.
     ## RFC-0016 int6 D1d (a pruning check a kept model satisfies is not
     ## searched): 471->472.
-    check symexWalkerVersion == "472"
+    ## RFC-0016 int6-a (a stdlib routine under its module's push of range,
+    ## bound, field, object or overflow checks is walked under that scope
+    ## instead of declining `feCheckOption`): 472->473.
+    check symexWalkerVersion == "473"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

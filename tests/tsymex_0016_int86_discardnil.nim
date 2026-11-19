@@ -219,13 +219,9 @@ suite "INT-86: a dead nil read is the optimiser's":
 
   test "the walker claims neither side: the nil path declines":
     template declines(fn: untyped) =
-      let a = symexFind(fn, tNilAccess())
-      let b = symexFind(fn, tLabel("after"))
-      checkpoint astToStr(fn) & ": " & $a.status & " " & $b.status
-      check a.status == sxUnknown
-      check a.errors.named(feUnsupportedOp)
-      check b.status == sxUnknown
-      check b.errors.named(feUnsupportedOp)
+      ## Both targets, recorded through `pinDecline` (K9b).
+      pinDecline(fn, keyOf(astToStr(fn)), feUnsupportedOp, tNilAccess())
+      pinDecline(fn, keyOf(astToStr(fn)), feUnsupportedOp, tLabel("after"))
     declines(letUnder)
     declines(letUnused)
     declines(discardTuple)

@@ -398,13 +398,10 @@ template keyOf(form: static string): CellKey =
   cellKey(faGeneric, "k9d/tsymex_0016_int92_deadcallnil/" & form & "/tNilAccess()")
 
 template declines(fn: untyped) =
-  let a = symexFind(fn, tNilAccess())
-  let b = symexFind(fn, tLabel("after"))
-  checkpoint astToStr(fn) & ": " & $a.status & " " & $b.status
-  check a.status == sxUnknown
-  check a.errors.named(feUnsupportedOp)
-  check b.status == sxUnknown
-  check b.errors.named(feUnsupportedOp)
+  ## Both the label and the nil access: a named decline, recorded through
+  ## `pinDecline` (K9b: a kind-naming decline is never a local template).
+  pinDecline(fn, keyOf(astToStr(fn)), feUnsupportedOp, tLabel("after"))
+  pinDecline(fn, keyOf(astToStr(fn)), feUnsupportedOp, tNilAccess())
 
 suite "INT-92: a nil read a call leaves dead is the optimiser's":
   test "natively, in this (unoptimised) build, each crashes":

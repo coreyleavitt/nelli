@@ -292,17 +292,11 @@ suite "INT-89: a discarded array element at a variable index through nil":
       check r.status == sxUnknown
       check r.errors.named(feUnsupportedOp)
 
-template declinesOn(f: untyped; t: static SymexTarget) =
-  block:
-    let r = symexFind(f, t)
-    checkpoint astToStr(f) & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.named(feUnsupportedOp)
-
 template declines(f: untyped) =
-  ## Both the label and the nil access: a named decline.
-  declinesOn(f, tLabel("after"))
-  declinesOn(f, tNilAccess())
+  ## Both the label and the nil access: a named decline, recorded through
+  ## `pinDecline` (K9b: a kind-naming decline is never a local template).
+  pinDecline(f, keyOf(astToStr(f)), feUnsupportedOp, tLabel("after"))
+  pinDecline(f, keyOf(astToStr(f)), feUnsupportedOp, tNilAccess())
 
 suite "INT-89: a view handed on without the address wrapper":
   test "natively: an address handed on reads nothing":

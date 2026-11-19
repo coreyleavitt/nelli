@@ -32,20 +32,12 @@
 ## A genuine Nim `RangeDefect` at the closed form's final counter write is
 ## missed -- wrong verdict (sxUnsat/no witness) instead of `sxRaised`.
 ##
-## Loop body spelling note: every idiom below advances its counter with
-## the explicit `i = i + 1` form rather than `inc i`. Both spellings are
-## accepted by the recognizers' shared `counterAdvancesByOne` predicate,
-## but they are NOT semantically identical in real Nim for a `range`-typed
-## counter -- confirmed empirically (probe run, not committed): `inc i` on
-## a `range[0..3]` at `i == 3` raises `OverflowDefect` (the `inc` magic
-## does checked arithmetic in the range's own representation), while
-## `i = i + 1` computes in the base `int` type and raises `RangeDefect` on
-## the implicit conversion back into `i` -- the SAME defect
-## `forkAssignRangeCheck` always routes for a fixed assignment, regardless
-## of which of R27's/this finding's call sites produced it. Using the
-## `inc`-spelling here would pin a pre-existing (out-of-scope, inherited
-## from R27's inc/dec arm) Overflow-vs-Range modeling mismatch instead of
-## R28's actual narrowing; the `i = i + 1` spelling isolates R28 cleanly.
+## Loop body spelling note: the R28 idioms below advance their counter
+## with `i = i + 1`, which computes in `int` and raises `RangeDefect` on the
+## conversion back into `i`. `inc i` is the `Inc` magic and raises
+## `OverflowDefect` instead; the closed forms reported `RangeDefect` for it
+## until RFC-0016 K9e, whose suites at the end of this file pin both
+## spellings (`scanCounterStore`, dsl_parser.nim).
 ##
 ## House rule: every symbolic expectation is paired with an ORACLE -- the
 ## same computation executed for real in Nim, in this file.
@@ -213,7 +205,211 @@ suite "#163 review R28 -- idiom 3: the recognized closed form keeps the counter'
     check r.status == sxSat
 
 
+# ---------------------------------------------------------------------------
+# K9e: the `inc` spelling raises OverflowDefect, not RangeDefect
+# ---------------------------------------------------------------------------
+#
+# `inc` (and `+=`) is the `Inc` magic. On a range receiver with overflow
+# checks on and a signed base, Nim's C code generator checks the sum against
+# the range itself and raises `OverflowDefect` outside it
+# (`binaryArithOverflowRaw`); with overflow checks off, or an unsigned base,
+# it emits a plain `+=` and nothing is raised (the counter leaves its range).
+# Range checks play no part. `i = i + 1` is the conversion of an `int` sum
+# into the range: `RangeDefect` under range checks (the idioms above),
+# nothing without. Native, Nim 2.2.10, c: a `range[0..3]` counter scanning
+# "abcde" raises `OverflowDefect` under `inc`; an `int8`-based one too; with
+# overflow checks off the scan ends at `s.len` with no raise. An unsigned
+# base cannot be scanned (`i < s.len` does not compile for it), but `inc`,
+# `dec` and `+=` on one are plain: `inc` of 10 in a `range[0'u8 .. 10'u8]`
+# raises nothing, and the walker claimed `OverflowDefect` for it. The closed
+# forms wrote the counter through the assignment's range check and reported
+# `RangeDefect` for the `inc` spelling. Every verdict is judged natively
+# (`pinFind`); the unchecked shapes decline (the value past the range is not
+# modelled), so they claim no raise.
+
+proc scanIncRange(s: string) =
+  var i: range[0..3] = 0
+  while i < s.len and s[i] != '\0': inc i
+  symexTarget("t")
+  discard i
+
+proc scanPairIncRange(s: string): int =
+  var i: range[0..3] = 0
+  while i < s.len:
+    if s[i] == '\0':
+      return i
+    inc i
+  symexTarget("t")
+  return -1
+
+proc accScanIncRange(s: string): string =
+  var acc = ""
+  var i: range[0..3] = 0
+  while i < s.len:
+    if s[i] == '\0':
+      return acc
+    acc.add(s[i])
+    inc i
+  symexTarget("t")
+  return acc
+
+proc scanIncRangeI8(s: string) =
+  var i: range[0'i8..3'i8] = 0
+  while i < s.len and s[i] != '\0': inc i
+  symexTarget("t")
+  discard i
+
+{.push overflowChecks: off.}
+proc scanIncRangeOvfOff(s: string) =
+  var i: range[0..3] = 0
+  while i < s.len and s[i] != '\0': inc i
+  symexTarget("t")
+  discard i
+{.pop.}
+
+{.push rangeChecks: off.}
+proc scanAsgRangeRngOff(s: string) =
+  var i: range[0..3] = 0
+  while i < s.len and s[i] != '\0':
+    i = i + 1
+  symexTarget("t")
+  discard i
+{.pop.}
+
+proc incRangeU8(x: range[0'u8..10'u8]) =
+  var i = x
+  inc i
+  symexTarget("u")
+  discard i
+
+proc decRangeU8(x: range[0'u8..10'u8]) =
+  var i = x
+  dec i
+  symexTarget("u")
+  discard i
+
+proc plusEqRangeU8(x: range[0'u8..10'u8]) =
+  var i = x
+  i += 1
+  symexTarget("u")
+  discard i
+
+suite "K9e -- the oracle: which defect a scan counter's step raises":
+
+  test "inc past a signed range raises OverflowDefect, in each idiom":
+    proc rt1(s: string): int =
+      var i: range[0..3] = 0
+      while i < s.len and s[i] != '\0': inc i
+      int(i)
+    proc rt8(s: string): int =
+      var i: range[0'i8..3'i8] = 0
+      while i < s.len and s[i] != '\0': inc i
+      int(i)
+    expect OverflowDefect: discard rt1("abcde")
+    expect OverflowDefect: discard rt8("abcde")
+    expect OverflowDefect: discard scanPairIncRange("abcde")
+    expect OverflowDefect: discard accScanIncRange("abcde")
+    check rt1("ab") == 2
+    check scanPairIncRange("a\0bc") == 1
+    check accScanIncRange("a\0bc") == "a"
+
+  test "unchecked, the counter leaves its range with no raise":
+    # Each runs past its range to `s.len` and returns normally.
+    scanIncRangeOvfOff("abcde")
+    scanAsgRangeRngOff("abcde")
+    check true
+
+  test "a uint8-based range: inc, dec and += past it raise nothing":
+    # Nim's code generator skips the `Inc` / `Dec` check for an unsigned
+    # underlying type: 10 steps to 11, 0 to 255.
+    incRangeU8(10)
+    decRangeU8(0)
+    plusEqRangeU8(10)
+    check true
+
+suite "K9e -- the closed forms raise what the step raises":
+
+  test "idiom 1, inc: sxRaised(OverflowDefect)":
+    let r = pinFind(scanIncRange, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "OverflowDefect"
+
+  test "idiom 1, inc: no RangeDefect":
+    # The run's one raise is the step's: a `RangeDefect` target reports it.
+    let r = pinFind(scanIncRange, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "OverflowDefect"
+
+  test "idiom 2, inc: sxRaised(OverflowDefect), no RangeDefect":
+    let r = pinFind(scanPairIncRange, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "OverflowDefect"
+    let g = pinFind(scanPairIncRange, tRaisedExn("RangeDefect"))
+    check g.status == sxRaised
+    if g.status == sxRaised:
+      check g.raisedTypeId == "OverflowDefect"
+
+  test "idiom 3, inc: sxRaised(OverflowDefect), no RangeDefect":
+    let r = pinFind(accScanIncRange, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "OverflowDefect"
+    let g = pinFind(accScanIncRange, tRaisedExn("RangeDefect"))
+    check g.status == sxRaised
+    if g.status == sxRaised:
+      check g.raisedTypeId == "OverflowDefect"
+
+  test "an int8-based counter, inc: sxRaised(OverflowDefect)":
+    let r = pinFind(scanIncRangeI8, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "OverflowDefect"
+
+  test "the in-range survivor still reaches the label":
+    check pinFind(scanIncRange, tLabel("t")).status == sxSat
+    check pinFind(scanPairIncRange, tLabel("t")).status == sxSat
+    check pinFind(accScanIncRange, tLabel("t")).status == sxSat
+
+  test "overflow checks off, inc: no raise is claimed":
+    let o = pinFind(scanIncRangeOvfOff, tRaisedExn("OverflowDefect"))
+    checkpoint "OverflowDefect " & $o.status
+    check o.status != sxRaised
+    let g = pinFind(scanIncRangeOvfOff, tRaisedExn("RangeDefect"))
+    checkpoint "RangeDefect " & $g.status
+    check g.status != sxRaised
+
+  test "range checks off, i = i + 1: no raise is claimed":
+    let o = pinFind(scanAsgRangeRngOff, tRaisedExn("OverflowDefect"))
+    checkpoint "OverflowDefect " & $o.status
+    check o.status != sxRaised
+    let g = pinFind(scanAsgRangeRngOff, tRaisedExn("RangeDefect"))
+    checkpoint "RangeDefect " & $g.status
+    check g.status != sxRaised
+
+suite "K9e -- a uint-based range's step claims no raise":
+
+  test "inc past the high bound: no OverflowDefect":
+    let r = pinFind(incRangeU8, tRaisedExn("OverflowDefect"))
+    checkpoint $r.status
+    check r.status != sxRaised
+
+  test "dec past the low bound: no OverflowDefect":
+    let r = pinFind(decRangeU8, tRaisedExn("OverflowDefect"))
+    checkpoint $r.status
+    check r.status != sxRaised
+
+  test "+= past the high bound: no OverflowDefect":
+    let r = pinFind(plusEqRangeU8, tRaisedExn("OverflowDefect"))
+    checkpoint $r.status
+    check r.status != sxRaised
+
 suite "#163 review round 1 -- walker version pin":
 
   test "walker version floor >= 138":
     check parseInt(symexWalkerVersion) >= 138
+
+  test "walker version floor >= 457 (K9e: a scan counter's inc raises OverflowDefect)":
+    check parseInt(symexWalkerVersion) >= 457

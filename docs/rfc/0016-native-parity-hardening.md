@@ -690,7 +690,7 @@ Rows were reconciled against head `83c1d304` in `/architect` round 2 (2026-11-06
 | PRC-13 | `f != nil` on a proc value with no lambda the walker built | S8cd remainder | Not re-probed since 136ad60 (S8cd's base); re-probe at head before work. `ceUnsupportedHof`; last probed at 136ad60 | |
 | PRC-14 | `addr o.xs` bound by a `let` | S8cd remainder | Not re-probed since 136ad60 (S8cd's base); re-probe at head before work. `heUnsafeCast`; last probed at 136ad60 | |
 | PRC-15 | A case object reaching a heap cell, as a global | S8cd item 3 | no entry-value model; declines (`recvValue` reads it at its type) | |
-| PRC-16 | `zeroMem` and `copyMem` on `addr x` (moved to CRH-06) | S8cl remainder | in-band, but a fault rather than a named decline | moved |
+| PRC-16 | `zeroMem` and `copyMem` on `addr x` (moved to CRH-06) | S8cl remainder | in-band: a named `feUnsupportedOp` decline (S8ax) on `addr x` since INT-83 (e8b48a20) replaced the earlier `ptrPointeeTy` fault; re-pinned by 1605bab4 (CRH-06) | moved |
 | PRC-17 | `alloc0` behind a cast | S8cl remainder | `heUnsafeCast` | |
 | PRC-18 | `create` | S8cl item 2; sort S12 | compile stop closed: `tests/tsymex_rfc0005_s8cl_lifetime_b.nim:96-102,193-199` `declines(sutCreate, "cr", "create")` after `nativeHits`; precision only. | |
 | PRC-19 | `new(p, finalizer)` | S8cl item 1 | declines | |

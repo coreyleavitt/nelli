@@ -600,7 +600,7 @@ title = "`zeroMem` and `copyMem` on `addr x` (moved to CRH-06)"
 state = "moved"
 note = ""
 source = "S8cl remainder"
-evidence = "in-band, but a fault rather than a named decline"
+evidence = "in-band: a named `feUnsupportedOp` decline (S8ax) on `addr x` since INT-83 (e8b48a20) replaced the earlier `ptrPointeeTy` fault; re-pinned by 1605bab4 (CRH-06)"
 cells = []
 
 [[row]]

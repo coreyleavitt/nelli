@@ -16,12 +16,13 @@
 ## DoD (RFC §R8b + reconciliation §F-R):
 ##   `proc rebind(p: var ref int) = (p = new int; p[] = 99)`
 ##   `proc f() = (var q = new int; q[] = 0; rebind(q); if q[] == 99: target)`
-##   → symexFind(f, tLabel("rebound")) → sxSat   (FULL write-back)
+##   → pinFind(f, tLabel("rebound")) → sxSat   (FULL write-back)
 ##
 ## R8b is ADDITIVE under walker version "9" (no bump; Cluster R bumps at R12).
 ## See ADR-0010 (logical-heap model) and RFC §R8b.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # The callee REBINDS its `var ref int` param to a freshly allocated cell and
 # writes 99 into it. With full write-back, the caller's `q` ends up pointing at
@@ -53,7 +54,7 @@ proc fStale() =
 suite "symex Phase 15 R8b — var ref T parameter handling (rebind write-back)":
 
   test "R8b: callee rebinds `var ref int` param; caller sees the rebound cell (q[]==99) → sxSat":
-    let r = symexFind(f, tLabel("rebound"))
+    let r = pinFind(f, tLabel("rebound"))
     check r.status == sxSat
 
   test "R8b: write-back is load-bearing — q is the rebound cell, not the stale 0-cell (q[]==0 → sxUnsat)":
@@ -62,5 +63,5 @@ suite "symex Phase 15 R8b — var ref T parameter handling (rebind write-back)":
     # (value 99), so `q[] == 0` is impossible. Had the rebind not propagated,
     # `q` would still be the 0-cell and this would be sxSat — the sxUnsat verdict
     # PROVES the new binding (not just the heap value) crossed back to the caller.
-    let r = symexFind(fStale, tLabel("stale"))
+    let r = pinFind(fStale, tLabel("stale"))
     check r.status == sxUnsat

@@ -13,6 +13,7 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/replayproc
+import ./s8cu_helpers except show
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -229,7 +230,7 @@ when defined(linux) and compileOption("threads"):
 suite "RFC-0005 S8cb: the thread variables a replay carries":
   test "named behind a routine of the same signature":
     s8cbTv = 7
-    let r = symexFind(sutTvBehind, tLabel("tv"))
+    let r = pinFind(sutTvBehind, tLabel("tv"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat or r.errors.hasKind(feReplayDeclined)
 
@@ -250,9 +251,9 @@ when compileOption("threads"):
       check r.status != sxSat
       check r.errors.hasKind(feReplayTimedOut) or r.errors.hasKind(feReplayDeclined)
     test "a later replay of unrelated code proceeds":
-      confirmedOrDeclined(symexFind(sutDisjoint, tLabel("d")))
+      confirmedOrDeclined(pinFind(sutDisjoint, tLabel("d")))
     test "and of code with a global of its own":
-      confirmedOrDeclined(symexFind(sutDisjointGlobal, tLabel("dg")))
+      confirmedOrDeclined(pinFind(sutDisjointGlobal, tLabel("dg")))
     test "a second never-ending replay":
       let r = symexFind(sutHangWriting, tLabel("h"),
                         SymexSettings(replayTimeoutMs: 100))
@@ -262,19 +263,19 @@ when compileOption("threads"):
       # Its write stayed in its child.
       check s8cbHangCount == 0
     test "still leaves unrelated code alone":
-      confirmedOrDeclined(symexFind(sutDisjointGlobal, tLabel("dg")))
+      confirmedOrDeclined(pinFind(sutDisjointGlobal, tLabel("dg")))
     test "and a replay reading what it wrote":
-      confirmedOrDeclined(symexFind(sutSharing, tLabel("s")))
+      confirmedOrDeclined(pinFind(sutSharing, tLabel("s")))
     test "through any depth of calls":
-      confirmedOrDeclined(symexFind(sutSharingDeep, tLabel("sd")))
+      confirmedOrDeclined(pinFind(sutSharingDeep, tLabel("sd")))
     test "and through the stdlib's own state":
       let h = symexFind(sutHangRandom, tLabel("h"),
                         SymexSettings(replayTimeoutMs: 100))
       check h.status != sxSat
-      confirmedOrDeclined(symexFind(sutRandom, tLabel("r")))
+      confirmedOrDeclined(pinFind(sutRandom, tLabel("r")))
     test "a call through a proc value":
-      confirmedOrDeclined(symexFind(sutProcValue, tLabel("pv")))
+      confirmedOrDeclined(pinFind(sutProcValue, tLabel("pv")))
     test "as may a method":
-      confirmedOrDeclined(symexFind(sutMethod, tLabel("m")))
+      confirmedOrDeclined(pinFind(sutMethod, tLabel("m")))
     test "and a foreign routine":
-      confirmedOrDeclined(symexFind(sutForeign, tLabel("f")))
+      confirmedOrDeclined(pinFind(sutForeign, tLabel("f")))

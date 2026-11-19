@@ -3,6 +3,8 @@
 ## `tsymex_rfc0005_s8bk_argtiming` and its two siblings (`_addr`,
 ## `_checks`), split by RFC-0005 S8br so each file compiles and runs under
 ## 60 s on each backend.
+from ./s8cu_helpers import pinFind
+
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
@@ -16,7 +18,7 @@ proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
 template verdict(fn: typed, lbl: string, want: SymexStatusKind): untyped =
   ## `want`, with no decline (`hePtrFamily`, a hint, may accompany a `ptr`).
   block:
-    let r = symexFind(fn, tLabel(lbl))
+    let r = pinFind(fn, tLabel(lbl))
     checkpoint lbl & " " & $r.status & " " & show(r.errors)
     check r.status == want
     for e in r.errors: check e.kind == hePtrFamily

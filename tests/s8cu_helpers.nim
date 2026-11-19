@@ -2041,7 +2041,13 @@ proc boundaryOf*[T](t: typedesc[T]): Domain[T] =
   elif T is enum:
     # every declared value; a holey enum's holes are not values of the type
     var vs: seq[T]
-    for v in declaredValues(T): domPut(vs, v)
+    when T is Ordinal:
+      # no holes, so every ordinal from low to high is declared; this is
+      # also the form an enum subrange (`range[red .. green]`) takes, whose
+      # type node is the range, not the declared values (K9d-11b)
+      for v in low(T) .. high(T): domPut(vs, v)
+    else:
+      for v in declaredValues(T): domPut(vs, v)
     exhaustive(vs)
   elif T is distinct:
     # the base type's domain, each value converted
@@ -2608,6 +2614,34 @@ proc pinRefused*(key: CellKey; probe: string; flags: openArray[string];
     verdict: pvDeclined, declineKind: "refused:" & mustMention,
     native: "compile refused", flags: @(pb.args) & @[pb.backend]))
 
+proc runCrashChild(exe: string; args: openArray[string]
+                  ): tuple[rc: int, output: string, timedOut: bool] =
+  ## Runs `exe` with `args` under a wall-clock budget, stderr into stdout.
+  # A fault must die at once with its code, not wait in the error-reporting
+  # dialog (the child inherits the error mode).
+  when defined(windows):
+    let prevMode = setErrorMode(0x0001'u32 or 0x0002'u32)  # FAILCRITICALERRORS, NOGPFAULTERRORBOX
+  let p = startProcess(exe, args = args, options = {poStdErrToStdOut})
+  when defined(windows): discard setErrorMode(prevMode)
+  # Explicit wall-clock budget: waitForExit's timeout path terminates the
+  # child with code 0 on Windows, which would read as a clean exit.
+  let t0 = epochTime()
+  while p.running and epochTime() - t0 < 20.0: sleep(20)
+  result.timedOut = p.running
+  if result.timedOut: p.kill()
+  result.rc = if result.timedOut: -1 else: p.peekExitCode()
+  result.output = if result.timedOut: "" else: p.outputStream.readAll()
+  p.close()
+
+proc judgeCrash(who: string; rc: int; output: string; timedOut: bool;
+                expect: CrashExpect) =
+  if timedOut: pinFail(who & ": the probe did not finish")
+  if rc == 0:
+    pinFail(who & ": the probe exited 0; expected " & $expect & "\n" & output)
+  if not crashClass(rc, output, expect):
+    pinFail(who & ": exit " & $rc & " is not the expected " & $expect &
+            "\n" & output)
+
 proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
                expect: CrashExpect; kind = "") =
   ## Compiles `probe` in a child with the host's build-relevant defines plus
@@ -2624,34 +2658,72 @@ proc pinCrash*(key: CellKey; probe: string; flags: openArray[string];
   let backend = pb.backend
   let (cout, crc) = execCmdEx(pb.cmd)
   if crc != 0: pinFail("pinCrash " & render(key) & ": probe build failed:\n" & cout)
-  # A fault must die at once with its code, not wait in the error-reporting
-  # dialog (the child inherits the error mode).
-  when defined(windows):
-    let prevMode = setErrorMode(0x0001'u32 or 0x0002'u32)  # FAILCRITICALERRORS, NOGPFAULTERRORBOX
-  let p = startProcess(exe, options = {poStdErrToStdOut})
-  when defined(windows): discard setErrorMode(prevMode)
-  # Explicit wall-clock budget: waitForExit's timeout path terminates the
-  # child with code 0 on Windows, which would read as a clean exit.
-  let t0 = epochTime()
-  while p.running and epochTime() - t0 < 20.0: sleep(20)
-  let timedOut = p.running
-  if timedOut: p.kill()
-  let rc = if timedOut: -1 else: p.peekExitCode()
-  let output = if timedOut: "" else: p.outputStream.readAll()
-  p.close()
+  let (rc, output, timedOut) = runCrashChild(exe, [])
   removeDir(dir)
-  if timedOut: pinFail("pinCrash " & render(key) & ": the probe did not finish")
-  if rc == 0:
-    pinFail("pinCrash " & render(key) & ": the probe exited 0; expected " &
-            $expect & "\n" & output)
-  if not crashClass(rc, output, expect):
-    pinFail("pinCrash " & render(key) & ": exit " & $rc &
-            " is not the expected " & $expect & "\n" & output)
+  judgeCrash("pinCrash " & render(key), rc, output, timedOut, expect)
   writePinRecord(PinRecord(testFile: appTestFile(),
     entry: "pinCrash", cell: key, target: "-", domain: "-",
     verdict: pvCrashed, declineKind: kind,
     native: "rc=" & $rc & " expected=" & $expect,
     flags: @args & @[backend]))
+
+# --- pinCrashSelf: the suite's own SUT, run natively in a child ------------
+#
+# `pinCrash` builds a probe from source, so the code it crashes is a copy of
+# the SUT. `pinCrashSelf` runs THIS test binary again as the child, which
+# runs the suite's own SUT on a named input (a "form") and dies there: the
+# native truth of a crash claim (a Defect under `--panics:on`, a nil
+# dereference) that no in-process run can establish, since the first such
+# run would end the process the suite runs in (K9d-12).
+#
+# The suite dispatches its forms at module level, before its first suite:
+#
+#   crashForms:
+#     case crashForm()
+#     of "overflow": sut(high(int))
+#     else: discard
+#
+# A form that returns (or a name no branch knows) exits 0, which fails the pin.
+
+const crashFormArg = "--nelli-crash-form:"
+
+proc crashForm*(): string =
+  ## The form this process runs as `pinCrashSelf`'s child, else "".
+  if paramCount() >= 1 and paramStr(1).startsWith(crashFormArg):
+    paramStr(1)[crashFormArg.len .. ^1]
+  else: ""
+
+template crashForms*(body: untyped) =
+  ## Module level: in `pinCrashSelf`'s child, run `body` (which reads
+  ## `crashForm()`) and exit 0 if it returns; otherwise nothing.
+  if crashForm().len > 0:
+    body
+    echo "NELLI_CRASH_FORM_RETURNED"
+    quit 0
+
+proc pinCrashSelf*(key: CellKey; form: string; expect: CrashExpect;
+                   kind = "") =
+  ## Runs this test binary as a child on `form` (`crashForms`) and asserts
+  ## its exit class, as `pinCrash` does for a probe. A child that returns or
+  ## exits 0 fails. Recorded as `pinCrash`'s `pvCrashed`, with the form as
+  ## the domain: one native input, the one the suite names.
+  let who = "pinCrashSelf " & render(key) & " " & form
+  let (rc, output, timedOut) = runCrashChild(getAppFilename(),
+                                             [crashFormArg & form])
+  judgeCrash(who, rc, output, timedOut, expect)
+  writePinRecord(PinRecord(testFile: appTestFile(),
+    entry: "pinCrash", cell: key, target: "-", domain: "form:" & form,
+    verdict: pvCrashed, declineKind: kind,
+    native: "rc=" & $rc & " expected=" & $expect,
+    flags: @["self"]))
+
+proc runCrashForm*(form: string): tuple[rc: int, output: string,
+                                       timedOut: bool] =
+  ## Runs this test binary as a child on `form` (`crashForms`), as
+  ## `pinCrashSelf` does, and returns its exit, for a probe whose answer is
+  ## either way (RFC-0016 INT-89's MSVC `/Od` probe). A form that returns
+  ## exits 0 and prints `NELLI_CRASH_FORM_RETURNED`.
+  runCrashChild(getAppFilename(), [crashFormArg & form])
 
 proc skipCell*(key: CellKey; why: string) =
   ## Not run on this build, and why. K2a's census fails a bare `skip(`.

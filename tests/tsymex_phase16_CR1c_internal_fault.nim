@@ -44,6 +44,7 @@ import std/unittest
 import std/strutils
 import nelli/symex
 import nelli/smt/canonicalize
+import ./s8cu_helpers
 
 proc faultInjector() =
   ## The sentinel label name is matched verbatim by the injection hook in
@@ -80,6 +81,13 @@ suite "symex Phase 16 CR-1c — narrow last-resort walker catch":
     # (for `SymexClassifiedDegradeError`) — not some pre-existing arm — is
     # what actually produced this result.
     check "CR-1c synthetic fault" in r.errors[0].msg
+
+  test "natively the label is reached, so the claim is not sxUnsat":
+    # RFC-0016 K9d-12. The injection is the walker's own (runtime.nim): a
+    # native run is a plain target. The one input of a nullary SUT reaches
+    # it, which is the native truth `check r.status != sxUnsat` states.
+    check nativeRun(faultInjector()).hitsTarget(
+      tLabel("__inject_walker_fault__"))
 
 suite "symex Phase 16 CR-1c — walker version pin":
 

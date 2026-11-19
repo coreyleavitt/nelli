@@ -95,7 +95,8 @@ type
 ## a clean `int`.
 proc s4DeadFreshSymbol(p: S4Node, n: int) =
   if p != nil:
-    discard p.s
+    let s = p.s   # kept: a discarded read is not loaded (RFC-0016 INT-86)
+    discard s
   if n == 5 and n == 6:
     symexTarget("s4_dead_fresh_symbol")
 

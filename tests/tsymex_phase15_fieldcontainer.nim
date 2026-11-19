@@ -1,6 +1,7 @@
 import std/unittest
 import nelli/symex
 import std/tables
+import ./s8cu_helpers
 
 # Phase 15 — field-container assert regression: the four `doAssert == iekVar`
 # guards added in commit cecc36a crash on VALID programs where the container /
@@ -103,7 +104,7 @@ suite "symex Phase 15 — field-container assert (iekField containers)":
     ## Before fix: `doAssert stmt.ixArr.kind == iekVar` fires because
     ## `bag.xs` lowers to iekField. After fix: both iekVar and iekField accepted.
     ## Value-typed seq field: no sort mismatch; sxSat.
-    let r = symexFind(seqFieldIndex, tLabel("seqField"))
+    let r = pinFind(seqFieldIndex, tLabel("seqField"))
     check r.status == sxSat
 
   test "field-container-2: deref of field h.p[] — sxSat (CR-19 sort-mismatch fixed)":
@@ -112,23 +113,23 @@ suite "symex Phase 15 — field-container assert (iekField containers)":
     ## tRef(tTuple([],"int")) while isDeref's dElemTy = tInt(64,true) → Z3Sort mismatch.
     ## After CR-19: classifyFieldType for ref-of-primitive falls through to classifyType
     ## → tRef(tInt(64,true)), matching dElemTy exactly → sxSat.
-    let r = symexFind(derefField, tLabel("derefField"))
+    let r = pinFind(derefField, tLabel("derefField"))
     check r.status == sxSat
 
   test "field-container-3: deref-write of field h.p[]=v — sxSat (CR-19 sort-mismatch fixed)":
     ## Same sort-mismatch as shape 2; fixed by the same CR-19 change.
-    let r = symexFind(derefWriteField, tLabel("derefWriteField"))
+    let r = pinFind(derefWriteField, tLabel("derefWriteField"))
     check r.status == sxSat
 
   test "field-container-4: variant field of field o.inner.x>0 — sxSat (RED: doAssert crash before fix)":
     ## Before fix: `doAssert stmt.vfRecv.kind == iekVar` fires because
     ## `o.inner` lowers to iekField (the variant is a field of the outer object).
     ## After fix: sxSat with o.inner.k==true, o.inner.x>0.
-    let r = symexFind(variantFieldOfField, tLabel("variantField"))
+    let r = pinFind(variantFieldOfField, tLabel("variantField"))
     check r.status == sxSat
 
   test "field-container-5: table via field m.t[\"k\"]==42 — sxSat (RED: doAssert crash before fix)":
     ## Before fix: `doAssert stmt.ixArr.kind == iekVar` fires because
     ## `m.t` lowers to iekField. After fix: sxSat via the table model.
-    let r = symexFind(tableViaField, tLabel("tableField"))
+    let r = pinFind(tableViaField, tLabel("tableField"))
     check r.status == sxSat

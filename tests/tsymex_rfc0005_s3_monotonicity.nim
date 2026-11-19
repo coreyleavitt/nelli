@@ -234,14 +234,18 @@ proc s3w1Base(x: int) =
 
 proc s3w1F1Before(p: S3F1Node, x: int, poisonOn: bool) =
   withPoisonedArm(paBefore, poisonOn):
-    if p != nil: discard p.s
+    if p != nil:
+      let s = p.s   # kept: a discarded read is not loaded (RFC-0016 INT-86)
+      discard s
   do:
     if x == 42:
       symexTarget("s3_w1_f1_before")
 
 proc s3w1F1After(p: S3F1Node, x: int, poisonOn: bool) =
   withPoisonedArm(paAfter, poisonOn):
-    if p != nil: discard p.s
+    if p != nil:
+      let s = p.s   # kept: a discarded read is not loaded (RFC-0016 INT-86)
+      discard s
   do:
     if x == 42:
       symexTarget("s3_w1_f1_after")
@@ -402,7 +406,9 @@ proc s3w3Base(n: int) =
 
 proc s3w3F1Before(p: S3F1Node, n: int, poisonOn: bool) =
   withPoisonedArm(paBefore, poisonOn):
-    if p != nil: discard p.s
+    if p != nil:
+      let s = p.s   # kept: a discarded read is not loaded (RFC-0016 INT-86)
+      discard s
   do:
     let r = s3w3Helper(n)
     if r == 6:
@@ -410,7 +416,9 @@ proc s3w3F1Before(p: S3F1Node, n: int, poisonOn: bool) =
 
 proc s3w3F1After(p: S3F1Node, n: int, poisonOn: bool) =
   withPoisonedArm(paAfter, poisonOn):
-    if p != nil: discard p.s
+    if p != nil:
+      let s = p.s   # kept: a discarded read is not loaded (RFC-0016 INT-86)
+      discard s
   do:
     let r = s3w3Helper(n)
     if r == 6:
@@ -485,7 +493,8 @@ suite "RFC-0005 S3 -- W3 (sxSat behind a loop + a call), witness monotonicity":
 
 proc s3ClassifyF1(p: S3F1Node, x: int) =
   if p != nil:
-    discard p.s
+    let s = p.s   # kept: a discarded read is not loaded (RFC-0016 INT-86)
+    discard s
     if x == 42:
       symexTarget("s3_classify_f1")
 
@@ -563,7 +572,8 @@ suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path
 
 proc s3OverTaintF1(p: S3F1Node, n: int) =
   if p != nil:
-    discard p.s
+    let s = p.s   # kept: a discarded read is not loaded (RFC-0016 INT-86)
+    discard s
   if n == 5 and n == 6:
     symexTarget("s3_overtaint_f1")
 

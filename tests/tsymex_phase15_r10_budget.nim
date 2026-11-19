@@ -42,7 +42,7 @@
 ## caching below avoids a THIRD, redundant re-deref of `node.next` (Nim would
 ## never actually re-fetch a value it can bind once), keeping the deref count
 ## at exactly 2 — the cleanest re-derivation of the original "2 levels" intent.
-from ./s8cu_helpers import named
+from ./s8cu_helpers import named, pinFind
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -78,7 +78,7 @@ suite "symex Phase 15 R10 — maxHeapDepth cache-key participation":
 
   test "R10: same SUT reaches sxSat at depth 3 and sxUnknown at depth 2":
     # Depth 3: the 2-real-deref walk is within budget (needs > 2) → sxSat.
-    let rSat = symexFind(reach2, tLabel("two"), depth3)
+    let rSat = pinFind(reach2, tLabel("two"), depth3)
     check rSat.status == sxSat
 
     # Depth 2: the second deref exhausts the budget (2 >= 2) → sxUnknown with
@@ -91,7 +91,7 @@ suite "symex Phase 15 R10 — maxHeapDepth cache-key participation":
     check sawDepth
 
   test "R10: maxHeapDepth=0 (unlimited) reaches sxSat":
-    let r = symexFind(reach2, tLabel("two"), depth0)
+    let r = pinFind(reach2, tLabel("two"), depth0)
     check r.status == sxSat
 
   test "R10: maxHeapDepth participates in the canonical settings key":
@@ -121,5 +121,5 @@ suite "symex Phase 15 R10 — maxHeapDepth cache-key participation":
     let rUnk = symexFind(reach2, tLabel("two"), depth2)
     check rUnk.status == sxUnknown
     check rUnk.errors.named(heDepthExhausted)
-    let rSat = symexFind(reach2, tLabel("two"), depth3)
+    let rSat = pinFind(reach2, tLabel("two"), depth3)
     check rSat.status == sxSat

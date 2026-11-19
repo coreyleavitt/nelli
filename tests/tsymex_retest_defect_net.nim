@@ -19,6 +19,7 @@ import std/strutils
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import ./s8cu_helpers
 
 proc defectInjector() =
   symexTarget("__inject_walker_defect__")
@@ -36,6 +37,13 @@ suite "symex round-3 — Defect net at the runSymex boundary":
       if e.kind == weInternalWalkerFault and "AssertionDefect" in e.msg:
         sawFault = true
     check sawFault
+
+  test "natively the label is reached, so the claim is not sxUnsat":
+    # RFC-0016 K9d-12. The injection is the walker's own (runtime.nim): a
+    # native run is a plain target. The one input of a nullary SUT reaches
+    # it, which is the native truth `check r.status != sxUnsat` states.
+    check nativeRun(defectInjector()).hitsTarget(
+      tLabel("__inject_walker_defect__"))
 
 suite "symex round-3 — walker version pin":
 

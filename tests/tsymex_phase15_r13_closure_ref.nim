@@ -24,6 +24,7 @@
 ## See ADR-0009 (closures), ADR-0010 (logical heap), RFC §R13.
 import std/unittest
 import nelli/symex
+import ./s8cu_helpers
 
 # A `ref int` local is new-allocated and written through the heap to 42. The
 # closure captures the ref `x` (an svRef free variable); when called it derefs
@@ -41,5 +42,5 @@ proc f() =
 suite "symex Phase 15 R13-A — closure capturing ref int local observes write through heap":
 
   test "R13-A: closure capturing ref int local observes write through heap":
-    let r = symexFind(f, tLabel("hit"))
+    let r = pinFind(f, tLabel("hit"))
     check r.status == sxSat

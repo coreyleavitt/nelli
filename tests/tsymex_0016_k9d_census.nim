@@ -17,13 +17,35 @@
 ## plus the K9 verbs that postdate it. The census is per file: a pinned suite
 ## may still hold an unpinned call (`pinFind` returns a decline unpinned).
 ##
-## THE RATCHET. `ceiling` is the number of unpinned verdict suites allowed. It
-## only falls: the test fails above it (a new unpinned verdict suite) and below
-## it (a suite was pinned and the ceiling did not follow).
+## A suite's code includes the files it `include`s (a fixture is its text).
+##
+## EXEMPT (K9d-12): a verdict suite with no native truth to pin, by a reason
+## that names why: its verdict words are not a claim about a Nim program (a
+## log line's text, a hand-built IR program with no source), or its pins are
+## made by code it generates. An exemption is permanent and checked: an exempt
+## suite that stops asserting a verdict, or becomes pinned, fails, so the list
+## holds only what is still true.
+##
+## THE RATCHET. `ceiling` is the number of unpinned verdict suites allowed,
+## exemptions apart. It only falls: the test fails above it (a new unpinned
+## verdict suite) and below it (a suite was pinned and the ceiling did not
+## follow).
 import std/[unittest, os, strutils, algorithm]
 
 const
-  ceiling = 22
+  ceiling = 0
+  exempt = [
+    ("tsymex_0016_d3b_walklog.nim",
+     "its verdict words are the walk-units log's text (`renderWalkUnits`): " &
+     "it runs no SUT, so no native run can disagree"),
+    ("tsymex_0016_k8a_gen.nim",
+     "the generator's own suite: every generated program is pinned by the " &
+     "`pinExactImpl` call `s0016_k8a_gen` writes into its source; the " &
+     "verdict words here are record fields of planted fixtures"),
+    ("tsymex_rfc0005_s1_lattice.nim",
+     "its one verdict is on a hand-built `SymexProgram` (a bare target node), " &
+     "an IR with no Nim source, so there is no native program to run; the " &
+     "rest is a source scan")]
   testsDir = currentSourcePath().parentDir()
   verdictWords = ["sxSat", "sxUnsat", "sxRaised"]
   idioms = ["pinFind", "pinExact", "pinCrash", "pinNever", "pinCap",
@@ -64,13 +86,32 @@ proc pinned*(text: string): bool =
   for w in idioms:
     if w in code: return true
 
+proc withIncludes*(text, dir: string): string =
+  ## `text` and, after it, every file it `include`s from `dir` (one level:
+  ## a fixture includes nothing).
+  result = text
+  for line in codeOf(text).splitLines():
+    let l = line.strip()
+    if l.startsWith("include "):
+      for part in l["include ".len .. ^1].split(','):
+        let f = dir / (part.strip() & ".nim")
+        if fileExists(f): result.add "\n" & readFile(f)
+
+proc isExempt(name: string): bool =
+  for (f, _) in exempt:
+    if f == name: return true
+
+proc unpinnedVerdict(f: string): bool =
+  let t = withIncludes(readFile(f), testsDir)
+  assertsVerdict(t) and not pinned(t)
+
 proc census(): seq[string] =
   var files: seq[string]
   for f in walkFiles(testsDir / "tsymex_*.nim"): files.add f
   files.sort()
   for f in files:
-    let t = readFile(f)
-    if assertsVerdict(t) and not pinned(t): result.add f.extractFilename
+    if unpinnedVerdict(f) and not isExempt(f.extractFilename):
+      result.add f.extractFilename
 
 suite "K9d: every verdict suite runs its SUT natively":
   test "the census reads the shapes it claims to":
@@ -85,6 +126,22 @@ suite "K9d: every verdict suite runs its SUT natively":
     check pinned("discard pinExact(f, k)\n")
     check pinned("let h = nativeHits(f(3))\n")
     check not pinned("# pinFind(f)\nlet r = symexFind(f, tLabel(\"hit\"))\n")
+
+  test "an included fixture is part of the suite's code":
+    let dir = getTempDir() / ("k9d_census_" & $getCurrentProcessId())
+    createDir(dir)
+    writeFile(dir / "fx.nim", "let r = pinFind(f, tLabel(\"hit\"))\n")
+    let t = withIncludes("include fx\ncheck r.status == sxSat\n", dir)
+    check assertsVerdict(t) and pinned(t)
+    check not pinned(withIncludes("# include fx\ncheck r.status == sxSat\n", dir))
+    removeDir(dir)
+
+  test "every exemption is still an unpinned verdict suite, with a reason":
+    for (f, why) in exempt:
+      checkpoint f
+      check fileExists(testsDir / f)
+      check unpinnedVerdict(testsDir / f)   # pinned or verdict-free: drop it
+      check why.len > 0
 
   test "no verdict suite is left without a native pin, ratcheted":
     let found = census()

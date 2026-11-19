@@ -1585,6 +1585,60 @@ type
                                    ## (above, beside its type declaration) for
                                    ## the full rationale and the per-field doc
                                    ## comments preserved there.
+    deadLocals*: seq[NimNode]
+                                   ## RFC-0016 INT-86. The `let`/`var`
+                                   ## symbols no later statement of their
+                                   ## own list names (`parseDeferList`): a
+                                   ## value bound to one lands in a dead C
+                                   ## variable, whose load is the C
+                                   ## optimiser's to keep (`deadReadOf`).
+    viewAddrCall*: NimNode
+                                   ## RFC-0016 INT-89. The call returning
+                                   ## `var T`/`lent T` whose result is
+                                   ## discarded, while its lowering registers
+                                   ## the callee (`ensureProcRegistered`):
+                                   ## that callee is registered computing
+                                   ## only the address it returns.
+    resultAddrOnly*: bool
+                                   ## RFC-0016 INT-89. The routine being
+                                   ## parsed is such a callee: `result =
+                                   ## <location>` reads nothing the address
+                                   ## does not (`viewAddrLower`).
+    viewDeadCall*: bool
+                                   ## RFC-0016 INT-89. `viewAddrCall`'s value
+                                   ## is copied into a dead local: the read
+                                   ## of the location is the C optimiser's
+                                   ## (`-O0` loads it, `-O2` drops it).
+    resultDead*: bool
+                                   ## RFC-0016 INT-89. The routine being
+                                   ## parsed is such a callee (`#viewdead`):
+                                   ## a nil pointer the location is offset
+                                   ## from declines as well.
+    deadResultCallNode*: NimNode
+                                   ## RFC-0016 INT-92. The call whose value
+                                   ## nothing reads (a discard, a dead
+                                   ## local), while its lowering registers
+                                   ## the callee (`#resultdead`).
+    resultValueDead*: bool
+                                   ## RFC-0016 INT-92. The routine being
+                                   ## parsed is such a callee: a pure read
+                                   ## only `result` takes is dead
+                                   ## (`deadResultLower`).
+    deadResultLive*: seq[string]
+                                   ## RFC-0016 INT-92. The fields of
+                                   ## `deadResultCallNode`'s object value its
+                                   ## caller reads (none: the whole value is
+                                   ## dead).
+    resultLiveFields*: seq[string]
+                                   ## RFC-0016 INT-92. Under
+                                   ## `resultValueDead`, the fields of
+                                   ## `result` the caller reads
+                                   ## (`resultSlotDead`).
+    deadLocalsBound*: seq[NimNode]
+                                   ## RFC-0016 INT-92. The `deadLocals` a
+                                   ## later statement names, each use dead
+                                   ## (`onlyDeadUses`): bound to a zero no
+                                   ## live use reads.
 
 proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
   ## `procScoped`'s fields (`ProcScopedCollectors`, round-6 R4: `seq[NimNode]`
@@ -4794,6 +4848,624 @@ func intConvExact(dst, src: NimTypeKind): bool =
                                  ntyBool, ntyUInt, ntyUInt64}
   of ntyFloat, ntyFloat32, ntyFloat64: true
   else: false
+
+# ---- RFC-0016 INT-86: a read whose value nothing uses -----------------------
+#
+# Nim emits a discarded expression as `(void)(E);` and never elides a read
+# itself. What the C compiler then does with it (pinned toolchain, gcc and
+# g++, c and cpp, `-O0` through `-d:danger`; `tsymex_0016_int86_discardnil`):
+#   * `E` with no check and no call (a path through `.` and `[]`, a literal
+#     array index, a comparison, an unchecked conversion or arithmetic): the
+#     statement is dropped at every optimisation level, so no load happens
+#     and a nil `ref`/`ptr` on the path does not fault. `drElided`.
+#   * `E` whose value a check or a call consumes, or a value that is used:
+#     loaded under every build; the ordinary lowering (`drPlain`).
+#   * the value bound to a dead C variable (an unused `let`, `let _ =`, a
+#     discarded tuple or `len`): loaded at `-O0`, dropped at `-O2`. The C
+#     compiler's level is not a fact the walker has (`OptLevel` is only
+#     `optUnknown`), so a nil on the path is claimed neither way: it
+#     declines (`drOptimiser`).
+
+type DeadRead = enum
+  drPlain      ## no `ref`/`ptr` dereference, or the value is consumed
+  drElided     ## the C compiler drops `(void)(E)`: no load
+  drOptimiser  ## a dead C variable holds the value: the optimiser's
+
+const
+  pureCompareMagics = ["EqI", "LeI", "LtI", "EqI64", "LeI64", "LtI64",
+    "EqU", "LeU", "LtU", "LeU64", "LtU64", "EqF64", "LeF64", "LtF64",
+    "EqB", "LeB", "LtB", "EqCh", "LeCh", "LtCh", "EqEnum", "LeEnum",
+    "LtEnum", "EqRef", "EqProc", "LePtr", "LtPtr", "Not", "And", "Or", "Xor",
+    "BitandI", "BitorI", "BitxorI", "BitnotI", "ShrI", "AshrI",
+    "AddU", "SubU", "MulU", "UnaryPlusI", "UnaryPlusF64"]
+    ## C operators Nim emits with no check under every build.
+  signedArithMagics = ["AddI", "SubI", "MulI", "UnaryMinusI", "UnaryMinusI64",
+    "AddI64", "SubI64", "MulI64"]
+    ## Checked (`OverflowDefect`) unless the routine is compiled without.
+  floatArithMagics = ["AddF64", "SubF64", "MulF64", "DivF64", "UnaryMinusF64"]
+    ## Checked only under `nanChecks`/`infChecks`.
+  divModMagics = ["DivI", "ModI", "DivI64", "ModI64"]
+  lengthMagics = ["LengthSeq", "LengthStr", "LengthOpenArray"]
+
+proc cPure(n: NimNode; ctx: ParseCtx; derefs, checks: var seq[NimNode]): bool =
+  ## RFC-0016 INT-86. Whether `n` is emitted as a C expression with no check
+  ## and no call, collecting the `ref`/`ptr` operands it dereferences, in
+  ## evaluation order (`p` before `p.q` in `p.q.n`).
+  ## RFC-0016 INT-89: or with no check but index checks, collected in
+  ## `checks` (innermost first). Nim emits each as a statement before the
+  ## expression, so it runs whatever becomes of the value: an array's reads
+  ## its index only (against the static length), a seq's or string's reads
+  ## the container's length too (`indexCheckLower` lowers them, with their own
+  ## reads). The operands a check reads are free of calls, as a nil guard
+  ## after it (`mkNilGuard`) reads them again.
+  case n.kind
+  of nnkSym:
+    symKind(n) in {nskLet, nskVar, nskParam, nskResult, nskConst, nskForVar,
+                   nskTemp}
+  of nnkCharLit .. nnkFloat128Lit, nnkStrLit .. nnkTripleStrLit, nnkNilLit:
+    true
+  of nnkDerefExpr, nnkHiddenDeref:
+    if n.len != 1 or not cPure(n[0], ctx, derefs, checks): return false
+    if n[0].typeKind in {ntyRef, ntyPtr}: derefs.add n[0]
+    true
+  of nnkDotExpr:
+    n.len == 2 and n[1].kind == nnkSym and cPure(n[0], ctx, derefs, checks)
+  of nnkCheckedFieldExpr:
+    # A variant field: its field check reads the discriminant.
+    n.len >= 1 and not ctx.checkedHere(coField) and cPure(n[0], ctx, derefs, checks)
+  of nnkBracketExpr:
+    if n.len != 2: return false
+    let k = n[0].typeKind
+    let tk = if k == ntyVar: n[0].getTypeInst[0].typeKind else: k
+    var ix = n[1]
+    while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
+          ix.len >= 1:
+      ix = ix[^1]
+    # An array's literal index is checked by the compiler, and one of the
+    # array's own index type is not checked where range checks are off
+    # (`uncheckedTypedIndex`); any other index check reads its operand (a
+    # seq's or string's reads its length).
+    let unchecked = tk == ntyArray and (ix.kind in {nnkCharLit .. nnkUInt64Lit} or
+        uncheckedTypedIndex(ctx.checkedHere(coRange), n[1])) or
+      tk in {ntyArray, ntySequence, ntyString} and not ctx.checkedHere(coBound)
+    if unchecked:
+      return cPure(n[0], ctx, derefs, checks) and cPure(ix, ctx, derefs, checks)
+    if tk notin {ntyArray, ntySequence, ntyString}: return false
+    # RFC-0016 INT-89: the check is a statement of its own. An array's
+    # container is only addressed (its dereferences are the expression's); a
+    # seq's or string's is read by the check, which `indexCheckLower` walks.
+    var readD, readC: seq[NimNode]
+    if not cPure(ix, ctx, readD, readC): return false
+    if tk == ntyArray:
+      if not cPure(n[0], ctx, derefs, checks): return false
+    elif not cPure(n[0], ctx, readD, readC): return false
+    checks.add n
+    true
+  of nnkPar:
+    n.len == 1 and cPure(n[0], ctx, derefs, checks)
+  of nnkConv, nnkHiddenStdConv, nnkHiddenSubConv:
+    if n.len < 1: return false
+    let src = n[^1]
+    let dst = n.typeKind
+    const scalar = {ntyInt .. ntyUInt64, ntyChar, ntyEnum, ntyRange, ntyBool,
+                    ntyFloat .. ntyFloat128}
+    if dst notin scalar or src.typeKind notin scalar: return false
+    let checked = dst in {ntyInt .. ntyUInt64, ntyChar, ntyEnum, ntyRange,
+                          ntyBool} and
+      src.typeKind notin {ntyFloat .. ntyFloat128} and
+      not intConvExact(dst, src.typeKind) and ctx.checkedHere(coRange)
+    not checked and cPure(src, ctx, derefs, checks)
+  of nnkInfix, nnkPrefix, nnkCall:
+    if n.len < 2: return false
+    let m = routineMagic(n[0])
+    let pure =
+      if m in pureCompareMagics: true
+      elif m in signedArithMagics: not ctx.overflowChecked
+      elif m in floatArithMagics: ctx.floatCheckedHere == {}
+      elif m in divModMagics:
+        # A literal divisor other than 0 and -1 is emitted with no check.
+        var d = n[^1]
+        while d.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and d.len >= 1:
+          d = d[^1]
+        d.kind in {nnkCharLit .. nnkUInt64Lit} and d.intVal notin [0'i64, -1]
+      else: false
+    if not pure: return false
+    for i in 1 ..< n.len:
+      if not cPure(n[i], ctx, derefs, checks): return false
+    true
+  else: false
+
+proc deadReadOf(n: NimNode; ctx: ParseCtx; discarded: bool):
+    tuple[kind: DeadRead; derefs, checks: seq[NimNode]] =
+  ## RFC-0016 INT-86. What a value nothing uses costs natively: `n` is the
+  ## operand of a `discard` (`discarded`) or a dead local's initialiser.
+  ## RFC-0016 INT-89: `checks`, the index checks that run before it either
+  ## way (`indexCheckLower`).
+  var derefs, checks: seq[NimNode]
+  if cPure(n, ctx, derefs, checks):
+    if derefs.len == 0: return (drPlain, @[], @[])
+    return ((if discarded: drElided else: drOptimiser), derefs, checks)
+  # A tuple, an array literal or a `len` of pure parts is built into a C
+  # temporary: a dead variable either way.
+  var parts: seq[NimNode]
+  case n.kind
+  of nnkTupleConstr, nnkBracket:
+    for c in n:
+      parts.add(if c.kind == nnkExprColonExpr: c[1] else: c)
+  of nnkPar:
+    if n.len > 1:
+      for c in n: parts.add c
+  of nnkCall, nnkPrefix:
+    if n.len == 2 and routineMagic(n[0]) in lengthMagics: parts.add n[1]
+  else: discard
+  if parts.len == 0: return (drPlain, @[], @[])
+  for c in parts:
+    if not cPure(c, ctx, derefs, checks): return (drPlain, @[], @[])
+  if derefs.len == 0: (drPlain, @[], @[]) else: (drOptimiser, derefs, checks)
+
+proc mkNilGuard(ctx: ParseCtx; bases: seq[NimNode]; i: int): seq[IRStmt]
+
+const viewCheckMaxLen = 256
+  ## RFC-0016 INT-89. The longest array whose index check `indexCheckLower`
+  ## spells over a stand-in array (`termWalkMaxDepth`: a longer one's access
+  ## at a symbolic index declines anyway).
+
+proc indexCheckLower(ctx: ParseCtx; checks: seq[NimNode];
+                     preamble: var seq[IRStmt]) =
+  ## RFC-0016 INT-89. The index checks `cPure` collected, in Nim's order, with
+  ## nothing of the expression they guard. An array's reads the index (with
+  ## its own reads, as the check uses its value) and tests it against the
+  ## array's static bounds: the `isIndex` of a stand-in array of that length,
+  ## whose element nothing reads (`ixCheckOnly`), so `IndexDefect`, a
+  ## `boundChecks: off` build and the follow-concrete modes are the ordinary
+  ## access's. A seq's or string's check reads the container's length through
+  ## every pointer on its path: the element read, whose own value is a valid
+  ## location once the check passes, is that read.
+  for b in checks:
+    let k = b[0].typeKind
+    let tk = if k == ntyVar: b[0].getTypeInst[0].typeKind else: k
+    if tk != ntyArray:
+      let v = parseExpr(b, preamble, ctx)
+      if v != nil:
+        preamble.add mkLet(freshSynth(ctx, "viewChk"), classifyType(b).ty, v)
+      continue
+    let aty = classifyType(b[0]).ty
+    if aty.kind != itArray or aty.size > viewCheckMaxLen:
+      preamble.add ctx.declineMarker(feUnsupportedOp,
+        "an index check on an array the walker does not spell over a " &
+        "stand-in (RFC-0016 INT-89; feUnsupportedOp)")
+      return
+    ctx.indexConvPending = b[1].kind in {nnkHiddenStdConv, nnkHiddenSubConv}
+    let idxIR = parseExpr(b[1], preamble, ctx)
+    ctx.indexConvPending = false
+    var zeros: seq[IRExpr]
+    for _ in 0 ..< aty.size: zeros.add mkIntLit(0)
+    let stand = freshSynth(ctx, "viewArr")
+    preamble.add mkLet(stand, tArray(tInt(), aty.size, aty.lo),
+                       mkArrayLit(zeros, tInt()))
+    preamble.add mkIndexStmt(freshSynth(ctx, "viewChk"), mkVar(stand), idxIR,
+                             tInt(), siteLoc(b), arrayIndexLow(b[0]),
+                             checkOnly = true)
+
+proc deadReadDecline(ctx: ParseCtx; derefs: seq[NimNode]): IRStmt =
+  ## RFC-0016 INT-86. The lowering of a `drOptimiser` read: each pointer it
+  ## dereferences is tested in turn, and a nil one declines (the path goes
+  ## on, tainted); the value itself is dead, so nothing is read.
+  mkBlock(ctx.mkNilGuard(derefs, 0))
+
+# ---- RFC-0016 INT-89: a discarded view --------------------------------------
+#
+# A routine returning `var T` or `lent T` returns an address: `proc varN(p:
+# ref B): var int = p.n` is `result = &(*p).n;`, which loads nothing, and the
+# caller's `discard varN(p)` is `T = varN(p); (void)(*T);`, whose read the C
+# compiler drops. So a discarded call to one runs the callee's own reads and
+# the index checks of the address it computes, never a read of the location
+# (pinned toolchain, gcc and g++, c and cpp, `-O0` through `-d:danger`;
+# `tsymex_0016_int89_varretnil`). A pointer the address is computed FROM
+# (`p.q.n` loads `p.q`) is loaded in the callee at `-O0` and dead once the
+# call is inlined at `-O2`: the optimiser's, so a nil there declines. The
+# callee is registered for such a call under a key of its own
+# (`ensureProcRegistered`, `#viewaddr`), parsed with `resultAddrOnly`.
+
+proc typeIsLent(ty: NimNode): bool  ## RFC-0005 S8cq fwd decl
+
+proc calleeReturnSpelling(n: NimNode): NimNode =
+  ## RFC-0016 INT-92c. The return type `n`'s callee symbol declares (an
+  ## `nnkEmpty` for none), read off the symbol's own signature; nil when the
+  ## callee is no symbol of a routine type. A call node need not carry a
+  ## type: semcheck spells `wasMoved(x)` as a call of the type's generated
+  ## `=wasMoved` hook with none, and `getTypeInst` on such a node stops the
+  ## whole compile ("node has no type"; its `typeKind` is not even reliable,
+  ## see `isBitwiseAndOr`). A resolved routine symbol always has its type.
+  if n.kind notin {nnkCall, nnkCommand, nnkInfix, nnkPrefix} or n.len == 0 or
+     n[0].kind != nnkSym:
+    return nil
+  let t = n[0].getTypeInst
+  if t.kind != nnkProcTy or t.len == 0 or t[0].kind != nnkFormalParams or
+     t[0].len == 0:
+    return nil
+  t[0][0]
+
+proc isViewCall(n: NimNode): bool =
+  ## RFC-0016 INT-89. `n` is a call returning `var T` or `lent T`. A call of
+  ## a routine symbol is read off the symbol's signature
+  ## (`calleeReturnSpelling`: the call node may have no type).
+  if n.kind notin {nnkCall, nnkCommand} or n.len == 0: return false
+  if n[0].kind == nnkSym:
+    let ret = calleeReturnSpelling(n)
+    return ret != nil and (ret.kind == nnkVarTy or typeIsLent(ret))
+  n.typeKind == ntyVar or typeIsLent(n.getTypeInst)
+
+proc viewAddrExpr(ctx: ParseCtx; call: NimNode; preamble: var seq[IRStmt];
+                  dead = false): IRExpr =
+  ## RFC-0016 INT-89. The view call `call`, its callee computing only the
+  ## address it returns (`#viewaddr`), or, `dead`, an address whose
+  ## location a dead C local then loads (`#viewdead`). The value is a zero
+  ## nothing reads.
+  let saved = ctx.viewAddrCall
+  let savedDead = ctx.viewDeadCall
+  ctx.viewAddrCall = call
+  ctx.viewDeadCall = dead
+  result = parseExpr(call, preamble, ctx)
+  ctx.viewAddrCall = saved
+  ctx.viewDeadCall = savedDead
+
+proc viewCallLower(ctx: ParseCtx; deref: NimNode; preamble: var seq[IRStmt];
+                   dead = false) =
+  ## RFC-0016 INT-89. `deref` is `HiddenDeref(<view call>)` whose value
+  ## nothing reads (or, `dead`, a dead local's: `viewAddrExpr`).
+  let v = ctx.viewAddrExpr(deref[0], preamble, dead)
+  if v != nil:
+    preamble.add mkLet(freshSynth(ctx, "viewSink"), classifyType(deref).ty, v)
+
+proc viewAddrLower(lv: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): bool =
+  ## RFC-0016 INT-89. The address of the location `lv` (`result = lv` of a
+  ## view callee under `resultAddrOnly`): its index checks, and a nil guard
+  ## on each pointer it loads, but not the location's own pointer, which is
+  ## only addressed (under `resultDead` that one too: the dead local's load
+  ## of it is the optimiser's). False for a shape this does not read (the
+  ## ordinary read stands).
+  if lv.kind in {nnkHiddenDeref, nnkDerefExpr} and lv.len == 1 and
+     isViewCall(lv[0]):
+    ctx.viewCallLower(lv, preamble, ctx.resultDead)
+    return true
+  var derefs, checks: seq[NimNode]
+  if not cPure(lv, ctx, derefs, checks): return false
+  var top = lv
+  while true:
+    case top.kind
+    of nnkDotExpr, nnkPar, nnkCheckedFieldExpr:
+      top = top[0]
+    of nnkBracketExpr:
+      let k = top[0].typeKind
+      let tk = if k == ntyVar: top[0].getTypeInst[0].typeKind else: k
+      if tk != ntyArray: break
+      top = top[0]
+    of nnkDerefExpr, nnkHiddenDeref:
+      if top[0].typeKind in {ntyRef, ntyPtr} and not ctx.resultDead:
+        for i in 0 ..< derefs.len:
+          if derefs[i] == top[0]:
+            derefs.delete(i)
+            break
+      break
+    else: break
+  ctx.indexCheckLower(checks, preamble)
+  if derefs.len > 0: preamble.add ctx.deadReadDecline(derefs)
+  true
+
+proc viewResultLower(rhs: NimNode; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): IRExpr =
+  ## RFC-0016 INT-89. `result = rhs` (`HiddenAddr(<location>)`) in a view
+  ## callee registered for a discarded call (`resultAddrOnly`): the address's
+  ## reads go to `preamble`, and the value returned is a zero no caller reads.
+  ## Nil where the ordinary lowering stands.
+  if not ctx.resultAddrOnly or rhs.kind != nnkHiddenAddr or rhs.len != 1:
+    return nil
+  let zero = zeroValueForType(classifyType(rhs[0]).ty)
+  if zero == nil: return nil
+  var pre: seq[IRStmt]
+  if not viewAddrLower(rhs[0], pre, ctx): return nil
+  preamble.add pre
+  zero
+
+# ---- RFC-0016 INT-92: a nil read a call leaves dead -------------------------
+#
+# INT-86's optimiser class across a call. A read whose value reaches nothing
+# observable is loaded at `-O0` and dropped at `-O2`, where the call is
+# inlined (pinned toolchain, gcc and g++, c and cpp, the default build and
+# `-d:release`; `tsymex_0016_int92_deadcallnil`): `discard rd(nil)` and an
+# unused `let x = rd(nil)` with `rd(p: ref B): int = p.n` (the result is
+# dead), `noReadL(p.n)` (the callee never names its formal). A nil on such a
+# read declines, never a claim. The analysis is a proof of deadness, never a
+# guess: a callee whose body reads `result` (`if result > 5: ...`), declares
+# a routine, or assigns `result` anything but a pure read keeps the ordinary
+# lowering, as does a formal the body names at all (a branch on it, a
+# store of it: live under every build). The callee of a call whose result is
+# dead is registered under `#resultdead` (`ensureProcRegistered`), parsed
+# with `resultValueDead` (`deadResultLower`).
+#
+# The remaining shapes generalise this into one summary, composed at the call
+# site. A value is dead when every place it reaches is (`onlyDeadUses`): a
+# `discard`, a local whose own uses are all dead (`let v = p.n; result = v`),
+# a by-value formal its callee uses only so (`formalDeadIn`: `discard x`, an
+# unused `let y = x`), or a slot of `result` its caller does not read: the
+# whole of it, or a field of an object result other than the ones the caller
+# selects (`ResultUse`; `result.a = p.n` under `discard mk(p)` or
+# `mk(p).b`). A call whose value nothing reads, or of whose object value only
+# some fields are read, registers its callee under `#resultdead` (with
+# `:<fields read>`), and a call forwarded into such a callee's whole result
+# is one too (`result = rd(p)`: `#resultdead` again). Each rule is a proof;
+# anything else is live, so the claim stands.
+
+type ResultUse = object
+  ## RFC-0016 INT-92. What a routine's caller reads of its `result`: with
+  ## `dead`, nothing but the top-level fields `live` of an object result.
+  dead: bool
+  live: seq[string]
+
+proc isResultName(n: NimNode): bool =
+  n.kind in {nnkSym, nnkIdent} and n.strVal == "result"
+
+proc resultFieldTop(n: NimNode): string =
+  ## RFC-0016 INT-92. The field of `result` a path of field selections
+  ## (`result.a.b`: no dereference, no index) starts with; "" otherwise.
+  var c = n
+  var top = ""
+  while c.kind == nnkDotExpr and c.len == 2 and
+        c[1].kind in {nnkSym, nnkIdent}:
+    top = c[1].strVal
+    c = c[0]
+  if top.len > 0 and isResultName(c): top else: ""
+
+proc resultReadIn(n: NimNode; live: seq[string] = @[]): bool =
+  ## RFC-0016 INT-92. `n` reads `result`, or declares a routine (whose own
+  ## `result` this does not tell apart): anything but the left-hand side of
+  ## an assignment to it or to a field path of it (`result.a = E`), and a
+  ## read of a field path whose field the caller reads (`live`), counts.
+  case n.kind
+  of nnkSym, nnkIdent:
+    return n.strVal == "result"
+  of nnkAsgn, nnkFastAsgn:
+    if n.len == 2 and (isResultName(n[0]) or resultFieldTop(n[0]).len > 0):
+      return resultReadIn(n[1], live)
+  of nnkDotExpr:
+    if live.len > 0 and resultFieldTop(n) in live: return false
+  of RoutineNodes:
+    return true
+  else: discard
+  for c in n:
+    if resultReadIn(c, live): return true
+  false
+
+proc hasPointerDeref(n: NimNode): bool =
+  ## RFC-0016 INT-92. `n` dereferences a `ref`/`ptr` somewhere.
+  if n.kind in {nnkDerefExpr, nnkHiddenDeref} and n.len == 1 and
+     n[0].typeKind in {ntyRef, ntyPtr}:
+    return true
+  for c in n:
+    if hasPointerDeref(c): return true
+  false
+
+proc userRoutineCall(n: NimNode): bool =
+  ## RFC-0016 INT-92. `n` calls a routine with a body that is no magic.
+  n.kind in {nnkCall, nnkCommand, nnkInfix, nnkPrefix} and n.len > 0 and
+    n[0].kind == nnkSym and symKind(n[0]) in {nskProc, nskFunc} and
+    routineMagic(n[0]).len == 0
+
+proc mayDeadRead(n: NimNode; depth = 3): bool =
+  ## RFC-0016 INT-92. `n` dereferences a `ref`/`ptr`, or calls a routine
+  ## whose body may (`depth` calls deep): a dead result forwarded through a
+  ## further call reaches the read there.
+  if hasPointerDeref(n): return true
+  if depth <= 0 or n.kind in RoutineNodes: return false
+  if userRoutineCall(n):
+    let impl = resolveRoutineImpl(n[0])
+    if impl != nil and impl.kind == nnkProcDef and impl.len > 6 and
+       mayDeadRead(impl[6], depth - 1):
+      return true
+  for c in n:
+    if mayDeadRead(c, depth): return true
+  false
+
+proc writesDeadField(n: NimNode; live: seq[string]): bool =
+  ## RFC-0016 INT-92. `n` assigns a field of `result` outside `live`.
+  if n.kind in {nnkAsgn, nnkFastAsgn} and n.len == 2:
+    let top = resultFieldTop(n[0])
+    if top.len > 0 and top notin live: return true
+  for c in n:
+    if writesDeadField(c, live): return true
+  false
+
+proc deadResultCandidate(impl: NimNode; live: seq[string] = @[]): bool =
+  ## RFC-0016 INT-92. A callee whose result, once its caller drops it (all
+  ## but the fields `live`), is provably dead in its own body too: it never
+  ## reads that part, and some dereference in it, or in a routine it calls,
+  ## may be a read only that part takes.
+  impl != nil and impl.kind == nnkProcDef and impl.len > 6 and
+    impl[6].kind != nnkEmpty and not resultReadIn(impl[6], live) and
+    (live.len == 0 or writesDeadField(impl[6], live)) and
+    mayDeadRead(impl[6])
+
+proc deadResultCall(call: NimNode; live: seq[string] = @[]): bool =
+  ## RFC-0016 INT-92. `call` is a call to a routine with a body, returning a
+  ## value (not a view; an object, when only its fields `live` are read),
+  ## that `deadResultCandidate` admits: its result, when nothing reads it,
+  ## is the `#resultdead` registration's.
+  ## A callee declaring no return type has no value to drop: decided off
+  ## its signature (`calleeReturnSpelling`), as a hook call has no type.
+  if not userRoutineCall(call) or isViewCall(call): return false
+  let ret = calleeReturnSpelling(call)
+  if ret == nil or ret.kind == nnkEmpty or
+     ret.kind in {nnkSym, nnkIdent} and eqIdent(ret, "void") or
+     call.typeKind in {ntyNone, ntyEmpty} or
+     live.len > 0 and call.typeKind != ntyObject:
+    return false
+  deadResultCandidate(resolveRoutineImpl(call[0]), live)
+
+proc deadResultExpr(ctx: ParseCtx; call: NimNode;
+                    preamble: var seq[IRStmt];
+                    live: seq[string] = @[]): IRExpr =
+  ## RFC-0016 INT-92. `call`, of whose value nothing (or only the fields
+  ## `live`) is read, its callee registered under `#resultdead`.
+  let saved = ctx.deadResultCallNode
+  let savedLive = ctx.deadResultLive
+  ctx.deadResultCallNode = call
+  ctx.deadResultLive = live
+  result = parseExpr(call, preamble, ctx)
+  ctx.deadResultCallNode = saved
+  ctx.deadResultLive = savedLive
+
+proc derefsTestable(derefs: seq[NimNode]): bool =
+  ## RFC-0016 INT-92. Every pointer a dead read goes through is one the walk
+  ## tests for nil (`mkNilGuard`): otherwise the ordinary lowering stands,
+  ## rather than a decline the read did not need.
+  for d in derefs:
+    if classifyType(d).ty.kind notin {itRef, itPtr}: return false
+  true
+
+proc resultSlotDead(ctx: ParseCtx; lhs: NimNode): bool =
+  ## RFC-0016 INT-92. `lhs` (nil: the whole `result`) is a part of the
+  ## routine's result its caller does not read (`resultValueDead`).
+  if not ctx.resultValueDead: return false
+  if lhs == nil or isResultName(lhs): return ctx.resultLiveFields.len == 0
+  let top = resultFieldTop(lhs)
+  top.len > 0 and top notin ctx.resultLiveFields
+
+proc deadResultLower(rhs: NimNode; preamble: var seq[IRStmt];
+                     ctx: ParseCtx; lhs: NimNode = nil): IRExpr =
+  ## RFC-0016 INT-92. `lhs = rhs` (`lhs` nil or `result`: the whole result;
+  ## else a field path of it) in a callee registered for a call that does
+  ## not read that part (`resultSlotDead`): a pure read through a
+  ## `ref`/`ptr` is dead (`deadReadOf`'s `drOptimiser`), so its index checks
+  ## run, a nil pointer on it declines, and the value is a zero no caller
+  ## reads. A call forwarded into the whole result is a call of whose value
+  ## the same part is read (`deadResultExpr`). Nil where the ordinary
+  ## lowering stands.
+  if not ctx.resultValueDead: return nil
+  if (lhs == nil or isResultName(lhs)) and
+     deadResultCall(rhs, ctx.resultLiveFields):
+    return ctx.deadResultExpr(rhs, preamble, ctx.resultLiveFields)
+  if not ctx.resultSlotDead(lhs): return nil
+  let dead = deadReadOf(rhs, ctx, discarded = false)
+  if dead.kind != drOptimiser or not derefsTestable(dead.derefs): return nil
+  let zero = zeroValueForType(classifyType(rhs).ty)
+  if zero == nil: return nil
+  ctx.indexCheckLower(dead.checks, preamble)
+  preamble.add ctx.deadReadDecline(dead.derefs)
+  zero
+
+proc isNameOf(n: NimNode; name: string): bool =
+  n.kind in {nnkSym, nnkIdent} and eqIdent(n, name)
+
+proc namesName(n: NimNode; name: string): bool =
+  ## RFC-0016 INT-92. `n` names `name` anywhere.
+  if isNameOf(n, name): return true
+  for c in n:
+    if namesName(c, name): return true
+  false
+
+proc onlyDeadUses(n: NimNode; name: string; ru: ResultUse; depth = 3): bool
+
+proc formalDeadIn(calleeSym: NimNode; k: int; ru: ResultUse;
+                  depth = 3): bool =
+  ## RFC-0016 INT-92. The callee uses its `k`th formal, a by-value one, only
+  ## in dead ways (`onlyDeadUses`, by name, so a capture, a shadowing local
+  ## or a template's use counts as live): the actual's value is dead once
+  ## the call is inlined. `ru`: what the caller reads of the call's result.
+  let impl = resolveRoutineImpl(calleeSym)
+  if impl == nil or impl.kind != nnkProcDef or impl.len < 7 or
+     impl[3].kind != nnkFormalParams or impl[6].kind == nnkEmpty:
+    return false
+  var name = ""
+  var pos = 0
+  for j in 1 ..< impl[3].len:
+    let d = impl[3][j]
+    if d.kind != nnkIdentDefs: return false
+    for x in 0 ..< d.len - 2:
+      if pos == k:
+        if d[^2].kind == nnkVarTy or d[x].kind notin {nnkSym, nnkIdent}:
+          return false
+        name = d[x].strVal
+      inc pos
+  if name.len == 0 or name == "_": return false
+  var ru = ru
+  if ru.dead and resultReadIn(impl[6], ru.live): ru = ResultUse()
+  onlyDeadUses(impl[6], name, ru, depth)
+
+proc onlyDeadUses(n: NimNode; name: string; ru: ResultUse; depth = 3): bool =
+  ## RFC-0016 INT-92. Every use of the local or formal `name` in `n` is dead:
+  ## `discard name`; `let y = name` with `y`'s own uses dead in the rest of
+  ## its list; `result = name` (or `result.f = name`) where the caller does
+  ## not read that part (`ru`); a by-value actual whose formal its callee
+  ## uses only so (`formalDeadIn`, `depth` calls deep). Any other occurrence,
+  ## one in a nested routine included, is live.
+  case n.kind
+  of nnkSym, nnkIdent:
+    return not eqIdent(n, name)
+  of RoutineNodes:
+    return not namesName(n, name)
+  of nnkDiscardStmt:
+    if n.len == 1 and isNameOf(n[0], name): return true
+  of nnkAsgn, nnkFastAsgn:
+    if n.len == 2 and isNameOf(n[1], name) and ru.dead:
+      if isResultName(n[0]) and ru.live.len == 0: return true
+      let top = resultFieldTop(n[0])
+      if top.len > 0 and top notin ru.live: return true
+  of nnkStmtList, nnkStmtListExpr:
+    for k in 0 ..< n.len:
+      let c = n[k]
+      if c.kind in {nnkLetSection, nnkVarSection} and c.len == 1 and
+         c[0].kind == nnkIdentDefs and c[0].len == 3 and
+         c[0][0].kind in {nnkSym, nnkIdent} and isNameOf(c[0][2], name):
+        let y = c[0][0].strVal
+        if y != "_":
+          var rest = newNimNode(nnkStmtList)
+          for j in k + 1 ..< n.len: rest.add n[j]
+          if not onlyDeadUses(rest, y, ru, depth): return false
+        continue
+      if not onlyDeadUses(c, name, ru, depth): return false
+    return true
+  of nnkLetSection, nnkVarSection:
+    # A lone one: nothing after it names the local.
+    if n.len == 1 and n[0].kind == nnkIdentDefs and n[0].len == 3 and
+       n[0][0].kind in {nnkSym, nnkIdent} and isNameOf(n[0][2], name):
+      return true
+  of nnkCall, nnkCommand:
+    if depth > 0 and userRoutineCall(n) and not isViewCall(n):
+      for i in 1 ..< n.len:
+        if isNameOf(n[i], name):
+          if not formalDeadIn(n[0], i - 1, ResultUse(), depth - 1):
+            return false
+        elif not onlyDeadUses(n[i], name, ru, depth):
+          return false
+      return true
+  else: discard
+  for c in n:
+    if not onlyDeadUses(c, name, ru, depth): return false
+  true
+
+proc mkNilGuard(ctx: ParseCtx; bases: seq[NimNode]; i: int): seq[IRStmt] =
+  if i >= bases.len: return @[]
+  let ty = classifyType(bases[i]).ty
+  let v = parseExpr(bases[i], result, ctx)
+  if v == nil or ty.kind notin {itRef, itPtr}:
+    result.add ctx.declineMarker(feUnsupportedOp,
+      "a dead read through a `ref`/`ptr` the walker cannot test for nil " &
+      "(RFC-0016 INT-86; feUnsupportedOp)")
+    return
+  let c = freshSynth(ctx, "deadBase")
+  result.add mkLet(c, ty, v)
+  result.add mkIf(@[mkBranch(mkBinop(bEq, mkVar(c), mkNil(ty)),
+      ctx.declineMarker(feUnsupportedOp,
+        "a dead read through a nil `ref`/`ptr`: whether it faults is the " &
+        "C compiler's optimisation level (RFC-0016 INT-86; feUnsupportedOp)"))],
+    mkBlock(ctx.mkNilGuard(bases, i + 1)))
+
+proc namesSym(n, sym: NimNode): bool =
+  if n == sym: return true
+  for c in n:
+    if namesSym(c, sym): return true
 
 func isRoutineDefNode(n: NimNode): bool =
   n.kind in RoutineNodes
@@ -9840,7 +10512,7 @@ proc arrayFormalActualDecline(n: NimNode; i: int): string =
   "`" & bare.repr & "` is a part of a location the walk passes as a copy"
 
 proc byValueWritten(n, a, calleeSym: NimNode; k: int;
-                    outer: seq[NimNode]): string =
+                    outer: seq[NimNode]; addrOnly = false): string =
   ## RFC-0005 S8cq. Why the call `n` is not known to leave alone the memory its
   ## by-value actual `a` (the `k`th) shares, or "" when the walk's copy is right.
   ## The rule is inverted from naming what can go wrong (batch 9's list of types,
@@ -9885,7 +10557,9 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
   # as the actual's location (`addrTakenArrayFormal`), not a copy; an actual
   # it cannot be passed so declines at the call (`arrayFormalActualDecline`).
   if addrTakenArrayFormal(impl, k): return ""
-  if typeIsLent(impl[3][0]): return "a `lent` result"
+  # RFC-0016 INT-89: the address of a view call nothing reads through
+  # (`addrOnly`, `#viewaddr`) holds no memory past the call.
+  if not addrOnly and typeIsLent(impl[3][0]): return "a `lent` result"
   var acc = OpaqueEffects(inert: true, writesOnly: true)
   var seen, stack: seq[NimNode]
   scanOpaqueEffects(calleeSym, acc, seen, stack)
@@ -9918,7 +10592,10 @@ proc byValueWritten(n, a, calleeSym: NimNode; k: int;
     # RFC-0016 S8ch: an array formal whose address the callee takes is the
     # actual's location (`addrTakenArrayFormal`): not a copy that address
     # could escape from.
-    if formalAddressTaken(impl, addrTakenArrayFormalNames(impl)):
+    # RFC-0016 INT-89: a `ref`/`ptr` formal is the callee's own copy of
+    # the pointer, and a view call's address (`addrOnly`) is read by no one.
+    if formalAddressTaken(impl, addrTakenArrayFormalNames(impl)) and
+       not (addrOnly and bare.typeKind in {ntyRef, ntyPtr}):
       return "a formal whose address the callee takes"
     for j in 1 ..< n.len:
       if n[j].typeKind == ntyProc: return "a routine passed in the same call"
@@ -10010,6 +10687,21 @@ proc seqViewElems(n: NimNode; i: int): seq[int] =
     if lvalueRoot(lv, hs) != nil and seqViewPeer(n, j, lv, hs).arg == i:
       result.add j
 
+proc bareViewActuals(n0, calleeSym: NimNode): NimNode =
+  ## RFC-0016 INT-89. `n0` with each `var` formal's actual of the shape
+  ## `HiddenAddr(HiddenDeref(<view call>))` replaced by the call, or `n0`
+  ## itself when there is none. Shallow: every other node is `n0`'s.
+  result = n0
+  for i in 1 ..< n0.len:
+    let a = n0[i]
+    if a.kind == nnkHiddenAddr and a.len == 1 and
+       a[0].kind in {nnkHiddenDeref, nnkDerefExpr} and a[0].len == 1 and
+       isViewCall(a[0][0]) and formalIsVar(calleeSym, i - 1):
+      if result == n0:
+        result = copyNimNode(n0)
+        for c in n0: result.add c
+      result[i] = a[0][0]
+
 proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
                   preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
@@ -10060,7 +10752,10 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
   ## written back over the viewed elements of the storage in the same
   ## `finally` (an openArray's length never changes), under the gates of a
   ## `var` actual's write-back.
-  var n = varSeqViews(n0)   # RFC-0005 S8br: and its hoisted index calls
+  # RFC-0016 INT-89: a view call handed to a `var` formal is the address it
+  # returns; the C++ backend spells it `HiddenAddr(HiddenDeref(<call>))`,
+  # the C one the bare call: one shape for both (`viewAddrExpr` below).
+  var n = varSeqViews(bareViewActuals(n0, calleeSym))
   var argIRs: seq[IRExpr]
   var byRefs: seq[ByRefSub]   ## RFC-0005 S8ba
   var writeBacks: seq[IRStmt]
@@ -10139,7 +10834,9 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
                     "feUnsupportedOp)"),
             "array argument whose formal's address the callee takes " &
             "(feUnsupportedOp)")
-      let why = byValueWritten(n, n[i], calleeSym, i - 1, outerOf())
+      let why = byValueWritten(n, n[i], calleeSym, i - 1, outerOf(),
+                               addrOnly = ctx.viewAddrCall != nil and
+                                          n0 == ctx.viewAddrCall)
       if why.len > 0:
         # Before the call: a target in the body would otherwise be reached
         # on the copy, ahead of a marker placed after it.
@@ -10424,7 +11121,34 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
       argIRs.add(if dummy != nil: dummy else: mkIntLit(0))
       continue
     let irLo = preamble.len
-    var ir = parseExpr(n[i], preamble, ctx)
+    # RFC-0016 INT-89: a view call handed straight to a `var` formal passes
+    # the address it returns, not the location's value (`noRead(varN(nil))`
+    # loads nothing natively); the write-back decline below follows.
+    let viewActual = n[i].kind in {nnkCall, nnkCommand} and
+                     isViewCall(n[i]) and formalIsVar(calleeSym, i - 1)
+    # RFC-0016 INT-92: a by-value actual whose formal the callee never names
+    # is dead once the call is inlined: a pure read through a `ref`/`ptr`
+    # in it is the optimiser's (`noReadL(p.n)`: `-O0` faults, `-O2` does
+    # not), so its index checks run and a nil on it declines; the formal
+    # gets a zero nothing reads.
+    # The remaining shapes: a formal the callee uses only in dead ways
+    # (`formalDeadIn`: `discard x`, an unused `let y = x`), given what the
+    # caller reads of the call's value.
+    var deadArg: IRExpr = nil
+    let ru = if n0 == ctx.deadResultCallNode:
+               ResultUse(dead: true, live: ctx.deadResultLive)
+             else: ResultUse()
+    if not viewActual and n[i].kind != nnkHiddenAddr and arrayLv == nil and
+       argTys[^1] != nil and formalDeadIn(calleeSym, i - 1, ru):
+      let dead = deadReadOf(n[i], ctx, discarded = false)
+      if dead.kind == drOptimiser and derefsTestable(dead.derefs):
+        deadArg = zeroValueForType(argTys[^1])
+        if deadArg != nil:
+          ctx.indexCheckLower(dead.checks, preamble)
+          preamble.add ctx.deadReadDecline(dead.derefs)
+    var ir = if deadArg != nil: deadArg
+             elif viewActual: ctx.viewAddrExpr(n[i], preamble)
+             else: parseExpr(n[i], preamble, ctx)
     let irHi = preamble.len
     # RFC-0005 S8bz (item 3): a `var` actual's copy-in observes nothing; the
     # callee's read of its formal does (`glWatched`).
@@ -12211,6 +12935,18 @@ proc literalCharSet(n: NimNode; chars: var string): bool =
   true
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  # RFC-0016 INT-92: a field of a call's object value, the only part read:
+  # the callee's writes of its other fields are dead (`#resultdead:<f>`).
+  if n.kind == nnkDotExpr and n.len == 2 and n[1].kind == nnkSym and
+     n[0] != ctx.deadResultCallNode and deadResultCall(n[0], @[n[1].strVal]):
+    let saved = ctx.deadResultCallNode
+    let savedLive = ctx.deadResultLive
+    ctx.deadResultCallNode = n[0]
+    ctx.deadResultLive = @[n[1].strVal]
+    result = parseExpr(n, preamble, ctx)
+    ctx.deadResultCallNode = saved
+    ctx.deadResultLive = savedLive
+    return
   # RFC-0005 S8bd: a by-reference base marked from an element or a call
   # result (`markByRef`) is its parameter, as a marked symbol is.
   # RFC-0005 S8ca: the element a `mitems` body uses (`miElemGuards`; its
@@ -19701,6 +20437,28 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
   var stmts: seq[IRStmt]
   for k in start ..< items.len:
     let c = items[k]
+    # RFC-0016 INT-86: a local no later statement of this list names is dead
+    # (its scope is the rest of the list): `deadReadOf`'s `drOptimiser`.
+    if c.kind in {nnkLetSection, nnkVarSection} and c.len == 1 and
+       c[0].kind == nnkIdentDefs and c[0].len == 3 and
+       (c[0][0].kind == nnkSym or c[0][0].kind == nnkIdent and
+        c[0][0].strVal == "_"):
+      var named = false
+      if c[0][0].kind == nnkSym:
+        for j in k + 1 ..< items.len:
+          if namesSym(items[j], c[0][0]): named = true; break
+      # RFC-0016 INT-92: or whose every later use is dead (`onlyDeadUses`:
+      # `discard v`, `result = v` of a result the caller drops), bound to
+      # a zero those uses read.
+      if named and c[0][2].kind != nnkEmpty:
+        var rest = newNimNode(nnkStmtList)
+        for j in k + 1 ..< items.len: rest.add items[j]
+        if onlyDeadUses(rest, c[0][0].strVal,
+                        ResultUse(dead: ctx.resultValueDead,
+                                  live: ctx.resultLiveFields)):
+          named = false
+          ctx.deadLocalsBound.add c[0][0]
+      if not named: ctx.deadLocals.add c[0][0]
     if c.kind == nnkDefer:
       let fin = parseStmt(c[c.len - 1], ctx)   # lexically first
       stmts.add mkTry(parseDeferList(items, k + 1, ctx), @[], fin)
@@ -19713,7 +20471,9 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
     if c.kind == nnkAsgn and c.len == 2 and c[0].kind == nnkSym and
        symKind(c[0]) == nskResult and c[1].kind == nnkStmtListExpr and
        c[1].len > 1:
-      var anyAlias = false
+      # RFC-0016 INT-92: so is the tail of a routine whose result the caller
+      # drops, so a dead local among them is one of the list's.
+      var anyAlias = ctx.resultValueDead
       for i in 0 ..< c[1].len - 1:
         if addrAliasDecl(c[1][i]).p != nil: anyAlias = true
       if anyAlias:
@@ -21640,6 +22400,20 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
   ## is).
   template asgnRhs(): IRExpr =
     (if rhsOverride != nil: rhsOverride else: parseExpr(n[1], preamble, ctx))
+  # RFC-0016 INT-89: a view callee's `result = <location>`, for a call whose
+  # result is discarded, computes the address only (`viewResultLower`).
+  if rhsOverride == nil and n[0].kind == nnkSym and
+     symKind(n[0]) == nskResult:
+    let z = viewResultLower(n[1], preamble, ctx)
+    if z != nil: return parseAsgn(n, z, preamble, ctx)
+    # RFC-0016 INT-92: a dead result's pure read (`deadResultLower`).
+    let d = deadResultLower(n[1], preamble, ctx)
+    if d != nil: return parseAsgn(n, d, preamble, ctx)
+  # RFC-0016 INT-92: a field of `result` the caller does not read.
+  if rhsOverride == nil and ctx.resultValueDead and
+     resultFieldTop(n[0]).len > 0:
+    let d = deadResultLower(n[1], preamble, ctx, n[0])
+    if d != nil: return parseAsgn(n, d, preamble, ctx)
   # RFC-0005 S8cp (item 2): the heap model's discriminator store checks its
   # branch and keeps its one array per tag (S8l); unchecked, it declines.
   if ctx.procScoped.uncheckedAssign > 0 and isHeapDiscriminator(n[0]):
@@ -23236,10 +24010,49 @@ proc parseStmtInner(n: NimNode,
       mkReturn()
     elif inner.kind == nnkAsgn and inner[0].kind == nnkSym and
          inner[0].strVal == "result":
-      mkReturnVal(parseExpr(inner[1], preamble, ctx))
+      # RFC-0016 INT-89: a view callee's address only (`viewResultLower`).
+      var z = viewResultLower(inner[1], preamble, ctx)
+      # RFC-0016 INT-92: a dead result's pure read (`deadResultLower`).
+      if z == nil: z = deadResultLower(inner[1], preamble, ctx)
+      mkReturnVal(if z != nil: z else: parseExpr(inner[1], preamble, ctx))
     else:
       mkReturnVal(parseExpr(inner, preamble, ctx))
   of nnkLetSection, nnkVarSection:
+    # RFC-0016 INT-86: a local no later statement names (`parseDeferList`)
+    # binds its value to a dead C variable: a read through a `ref`/`ptr` into
+    # it is loaded at `-O0` and dropped at `-O2`, so a nil there declines.
+    if n.len == 1 and n[0].kind == nnkIdentDefs and n[0].len == 3 and
+       n[0][2].kind != nnkEmpty and n[0][0] in ctx.deadLocals:
+      let dead = deadReadOf(n[0][2], ctx, discarded = false)
+      # RFC-0016 INT-92: one a later dead use names is bound to a zero.
+      let bound = n[0][0] in ctx.deadLocalsBound
+      let boundTy = if bound: classifyType(n[0][0]).ty else: nil
+      let boundZero = if bound: zeroValueForType(boundTy) else: nil
+      if dead.kind == drOptimiser and
+         (not bound or boundZero != nil and derefsTestable(dead.derefs)):
+        # RFC-0016 INT-89: its index checks run first, under every build.
+        ctx.indexCheckLower(dead.checks, preamble)
+        if not bound: return ctx.deadReadDecline(dead.derefs)
+        return mkBlock(@[ctx.deadReadDecline(dead.derefs),
+                         mkLet(n[0][0].strVal, boundTy, boundZero)])
+      # RFC-0016 INT-89: a view call's location copied into it is loaded at
+      # `-O0` and dropped at `-O2`: the callee computes the address, and a
+      # nil pointer on it declines (`#viewdead`).
+      let ini = n[0][2]
+      if ini.kind in {nnkHiddenDeref, nnkDerefExpr} and ini.len == 1 and
+         isViewCall(ini[0]):
+        var pre: seq[IRStmt]
+        ctx.viewCallLower(ini, pre, dead = true)
+        preamble.add pre
+        return mkBlock(@[])
+      # RFC-0016 INT-92: a call whose value lands in it is a call whose
+      # value nothing reads (`#resultdead`).
+      if deadResultCall(ini):
+        let v = ctx.deadResultExpr(ini, preamble)
+        if v == nil: return mkBlock(@[])
+        return mkLet((if bound: n[0][0].strVal
+                      else: freshSynth(ctx, "deadSink")),
+                     classifyType(ini).ty, v)
     var stmts: seq[IRStmt]
     for id0 in n:
       id0.expectKind nnkIdentDefs
@@ -23913,7 +24726,30 @@ proc parseStmtInner(n: NimNode,
       # value IR (lambda/closure) binds under the let-section arm's
       # placeholder-type precedent. `discard` of a `void` expression cannot
       # occur (Nim rejects it), so the node has a type.
-      let sinkIR = parseExpr(n[0], preamble, ctx)
+      # RFC-0016 INT-86: a discarded read the C compiler does not load (a
+      # pure path through a `ref`/`ptr`) is not a dereference: nothing is
+      # walked, as nothing runs. One whose value lands in a dead temporary
+      # (a tuple, a `len`) is the optimiser's: a nil on its path declines.
+      # RFC-0016 INT-89: an index check in it runs either way
+      # (`indexCheckLower`), and a call returning `var T`/`lent T` hands
+      # out an address nothing reads (`viewCallLower`).
+      let dead = deadReadOf(n[0], ctx, discarded = true)
+      case dead.kind
+      of drElided:
+        ctx.indexCheckLower(dead.checks, preamble)
+        return mkBlock(@[])
+      of drOptimiser:
+        ctx.indexCheckLower(dead.checks, preamble)
+        return ctx.deadReadDecline(dead.derefs)
+      of drPlain: discard
+      if n[0].kind in {nnkHiddenDeref, nnkDerefExpr} and n[0].len == 1 and
+         isViewCall(n[0][0]):
+        ctx.viewCallLower(n[0], preamble)
+        return mkBlock(@[])
+      # RFC-0016 INT-92: a call whose value nothing reads; its callee's
+      # pure read only `result` takes is dead (`#resultdead`).
+      let sinkIR = if deadResultCall(n[0]): ctx.deadResultExpr(n[0], preamble)
+                   else: parseExpr(n[0], preamble, ctx)
       if sinkIR == nil:
         mkBlock(@[])
       elif sinkIR.kind in {iekLambda, iekClosureCall}:
@@ -24908,6 +25744,21 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     for b in byRef: key.add "#byref" & $b.idx & ":" & b.keyPart
     if key notin ctx.procs and key notin ctx.parsing and typeSubst.len == 0:
       impl = substByRefImpl(impl, byRef)
+  # RFC-0016 INT-89: the callee of a discarded view call computes only the
+  # address it returns (`viewResultLower`), under a key of its own.
+  let viewAddr = ctx.viewAddrCall != nil and callSite != nil and
+                 callSite == ctx.viewAddrCall
+  let viewDead = viewAddr and ctx.viewDeadCall
+  if viewAddr: key.add(if viewDead: "#viewdead" else: "#viewaddr")
+  # RFC-0016 INT-92: the callee of a call whose value nothing reads, when its
+  # body never reads `result` either (`deadResultLower`).
+  let deadRes = not viewAddr and ctx.deadResultCallNode != nil and
+                callSite != nil and callSite == ctx.deadResultCallNode and
+                deadResultCandidate(impl, ctx.deadResultLive)
+  let deadLive = if deadRes: ctx.deadResultLive else: newSeq[string]()
+  if deadRes:
+    key.add "#resultdead"
+    for i, f in deadLive: key.add((if i == 0: ":" else: ",") & f)
   if key in ctx.procs or key in ctx.parsing:
     return key  ## already known, or actively being parsed (mutual-recursion)
   # Phase 15 G6 / RFC-0005 S8 (§2.5 point 3). A stdlib-concept violation is
@@ -25026,9 +25877,33 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # (`vm_alias_guard`, RFC-0005 S8ab).
   var savedViews: seq[tuple[node: NimNode, baseTy: NimNode]]
   swap(savedViews, borrowBaseViews)
+  let savedViewCall = ctx.viewAddrCall
+  let savedAddrOnly = ctx.resultAddrOnly
+  let savedDead = ctx.resultDead
+  let savedDeadCall = ctx.viewDeadCall
+  ctx.viewAddrCall = nil
+  ctx.viewDeadCall = false
+  ctx.resultAddrOnly = viewAddr
+  ctx.resultDead = viewDead
+  let savedDeadResNode = ctx.deadResultCallNode
+  let savedValueDead = ctx.resultValueDead
+  let savedDeadLive = ctx.deadResultLive
+  let savedLiveFields = ctx.resultLiveFields
+  ctx.deadResultCallNode = nil
+  ctx.resultValueDead = deadRes
+  ctx.deadResultLive = @[]
+  ctx.resultLiveFields = deadLive
   var sig = parseCalleeImpl(impl, ctx, typeSubst,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
     else: nil, byRef)
+  ctx.deadResultCallNode = savedDeadResNode
+  ctx.resultValueDead = savedValueDead
+  ctx.deadResultLive = savedDeadLive
+  ctx.resultLiveFields = savedLiveFields
+  ctx.viewAddrCall = savedViewCall
+  ctx.resultAddrOnly = savedAddrOnly
+  ctx.resultDead = savedDead
+  ctx.viewDeadCall = savedDeadCall
   swap(savedViews, borrowBaseViews)
   sig.captures = captures
   # RFC-0005 S8ba: each by-reference formal's slot holds the ref its lvalue
@@ -25246,6 +26121,9 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
       # RFC-0016 S8ch: a tail with an address alias among its statements is
       # a statement list (`parseDeferList` spells it `...; result = e`).
       if inner[1].kind == nnkStmtListExpr:
+        # RFC-0016 INT-92: so is one whose result the caller drops (a local
+        # there may hold a dead read: `let v = p.n; v`).
+        if ctx.resultValueDead: return nil
         for i in 0 ..< inner[1].len - 1:
           if addrAliasDecl(inner[1][i]).p != nil: return nil
       inner[1]
@@ -25262,7 +26140,11 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
     if rhs != nil:
       # `proc f(...): T = expr` shape: rewrite as `return expr`.
       var preamble: seq[IRStmt]
-      let valIR = parseExpr(rhs, preamble, ctx)
+      # RFC-0016 INT-89: a view callee's address only (`viewResultLower`).
+      var viewIR = viewResultLower(rhs, preamble, ctx)
+      # RFC-0016 INT-92: a dead result's pure read (`deadResultLower`).
+      if viewIR == nil: viewIR = deadResultLower(rhs, preamble, ctx)
+      let valIR = if viewIR != nil: viewIR else: parseExpr(rhs, preamble, ctx)
       if preamble.len == 0:
         mkReturnVal(valIR)
       else:
@@ -25275,6 +26157,10 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
          bodyNode[0].kind == nnkSym and bodyNode[0].strVal == "result":
       # RFC-0016 S8ch: a lone `result = (...)` the shortcut left (above) is
       # a one-statement list, so the list's lowering sees it.
+      parseStmt(newTree(nnkStmtList, bodyNode), ctx)
+    elif bodyNode.kind in {nnkLetSection, nnkVarSection}:
+      # RFC-0016 INT-92: a lone local is a one-statement list, whose
+      # lowering tells a dead one (`parseDeferList`).
       parseStmt(newTree(nnkStmtList, bodyNode), ctx)
     else:
       parseStmt(bodyNode, ctx)

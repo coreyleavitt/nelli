@@ -6,6 +6,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import ./s8cu_helpers except show
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -17,7 +18,7 @@ template c(name: untyped, want: SymexStatusKind, body: untyped) {.dirty.} =
   proc name(x: int, y: int) =
     body
   test astToStr(name):
-    let r = symexFind(name, tLabel("t"))
+    let r = pinFind(name, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == want
 
@@ -314,26 +315,26 @@ proc rangeInline(p: ptr RO) =
 
 suite "RFC-0005 S8cb cells (4): a whole read asserts the declared ranges":
   test "a ptr object's range field":
-    check symexFind(rangeObj, tLabel("t")).status == sxUnsat
+    check pinFind(rangeObj, tLabel("t")).status == sxUnsat
   test "and the values in range are reached":
-    check symexFind(rangeObjSat, tLabel("t")).status == sxSat
+    check pinFind(rangeObjSat, tLabel("t")).status == sxSat
   test "a ref object's range field":
-    check symexFind(rangeRef, tLabel("t")).status == sxUnsat
+    check pinFind(rangeRef, tLabel("t")).status == sxUnsat
   test "a nested object's range field":
-    let r = symexFind(rangeNested, tLabel("t"))
+    let r = pinFind(rangeNested, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
   test "an array field's range elements":
-    let r = symexFind(rangeNestedArr, tLabel("t"))
+    let r = pinFind(rangeNestedArr, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
   test "an enum range field":
-    let r = symexFind(rangeEnum, tLabel("t"))
+    let r = pinFind(rangeEnum, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
   test "a named tuple's range field":
-    let r = symexFind(rangeTuple, tLabel("t"))
+    let r = pinFind(rangeTuple, tLabel("t"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
   test "a field read of the same pointer":
-    check symexFind(rangeInline, tLabel("t")).status == sxUnsat
+    check pinFind(rangeInline, tLabel("t")).status == sxUnsat

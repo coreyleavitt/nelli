@@ -88,8 +88,8 @@ confirms per SUT before choosing a per-suite idiom.
 | K9d-8 | float family | 17 | |
 | K9d-9 | regex family (string domain, per-row records): done, 23 converted, 38 already pinned, 2 to K9d-10 (see the result section) | 63 → 25 left | regex members and near-misses (`k9d_regex.nim`) |
 | K9d-10 | ref family (sat replay; unsat explicit domain) | 22 | |
-| K9d-11 | impure family, per suite (state reset, `pinExact`): split by name (see the K9d-11a result section); 11a done | 58 → 11a (29, 15 unpinned) / 11b (29, 5 unpinned) | |
-| K9d-12 | triage: unresolved, meta, non-`symexFind` path, nullary | 37 | |
+| K9d-11 | impure family, per suite (state reset, `pinExact`): split by name (see the K9d-11a result section); 11a done | 58 → 11a (29, 15 unpinned) / 11b (29, 5 unpinned); 11a and 11b done | |
+| K9d-12 | triage: unresolved, meta, non-`symexFind` path, nullary: done, census 22 -> 1 with 3 exemptions (see the result section) | 37 | `pinCrashSelf` |
 
 After each slice the census ceiling falls by the suites pinned; K9e measures
 the pins' strength (mutation kills over `runtime.nim`'s arithmetic and raise
@@ -847,6 +847,116 @@ Row filed:
   pin while also carrying an allowlist entry, which turned
   `tsymex_0016_universe` red at 954662c2. It now names no pin, as INT-84
   does.
+
+## K9d-11b result (`k9d12`)
+
+The five suites 11a left to 11b, each pinned. Confirmed per SUT, as 11a did:
+none writes state a later run reads without first setting it.
+`rfc0005_s8bh_remainder_c`'s globals are write-only sinks;
+`rfc0005_s8cb_replay`'s `sutSharing` increments a counter the suite checks
+only before the pinned calls run; the never-ending replays (`sutHang`,
+`sutHangWriting`, `sutHangRandom`) stay on `symexFind`, as their verdict is
+`!= sxSat` and a native run would not return.
+
+- `rfc0005_s8az_remainder`: its verdict words are the cache fixtures'
+  (`RawResult(status: sxRaised)`); its two SUTs' findings are untrusted (their
+  gaps), so no pin judges them, but each cold and warm witness is decoded
+  (`decodeWitness`) and replayed natively: the sat one hits, the raised one
+  raises `AssertionDefect`.
+- `rfc0005_s8bh_remainder_c`: the `clean` helper is `pinFind`.
+- `rfc0005_s8cb_cells`: every call is `pinFind` (33 int SUTs, eight `ptr`/`ref`
+  object SUTs over the ref domains). Harness fix: `boundaryOf` of an enum
+  subrange (`range[red .. green]`, a field of `RE`) did not compile, as
+  `declaredValues` read the range node; an Ordinal enum (no holes, a subrange
+  included) now takes `low .. high`.
+- `rfc0005_s8cb_replay`: the confirmed-or-declined calls and the thread
+  variable call are `pinFind` (a declined replay returns unpinned).
+- `rfc0005_s8ct_b19`: its verdict is `sxUnknown` here (no record); the
+  `sxRaised` branch now replays the child-confirmed witness natively, and a
+  test pins the native fact the branch rests on: `high(int)` raises
+  `OverflowDefect` at the first frame.
+
+## K9d-12 result (`k9d12`)
+
+Every remaining census suite has a disposition. The census ceiling 22 -> 1,
+with three permanent exemptions (below) and one suite held by a finding.
+
+The harness piece: `pinCrashSelf(key, form, expect)` (s8cu_helpers). It runs
+THIS test binary again as a child on a named form (`crashForms` at module
+level dispatches `crashForm()` to the suite's own SUT and input), and asserts
+the exit class as `pinCrash` does for a probe (`pinCrash`'s run and judgement
+are now shared: `runCrashChild`, `judgeCrash`). It pins the real SUT, not a
+copy of its source. Record: entry `pinCrash`, `pvCrashed`, domain
+`form:<name>`. Self-test in `tsymex_0016_k9d_pinfind`: a Defect form, a nil
+read form, and a form that returns, an unknown form and a wrong class each
+failing the pin with no record.
+
+The census now reads a suite's `include`d files as its code (a fixture is
+its text; `s8bk_argtiming_fixture`), and takes an exemption list: each entry
+names its reason, and is checked (an exempt suite that stops asserting a
+verdict or becomes pinned fails), so the list holds only what is true.
+
+Converted:
+- `0016_wa_runtime_panics`: each claim (`lossyOverflow`, `lossyAssert`) and
+  the declined candidate's overflow (`candidateOverflow`, natively real, so
+  the decline refutes nothing) by `pinCrashSelf`, `ceDefect`.
+- nullary: `phase15_r13_closure_ref` and `phase15_r8b_varref` by `pinFind`
+  (one native run); `phase16_CR1c_internal_fault` and `retest_defect_net`
+  assert `sxUnknown` from the walker's own fault injection, and their
+  `!= sxUnsat` is pinned against the one native run, which reaches the label
+  (the injection is the walker's; natively it is a plain target).
+- `0016_k5a_segment`: the verified-host `sxSat` by `pinFind`.
+- `163rev_degrade_classification_c`: the verdict is never a trusted definite
+  one (`feGlobalHavoc`), so `pinFind` would record nothing; instead an `sxSat`
+  witness is replayed natively, and the native fact behind `in {sxSat,
+  sxUnknown}` is pinned: the global holds 10 here and input 11 hits.
+- `phase15_fieldcontainer`, `phase15_r10_budget` (the sat calls),
+  `r6_bug2_scopeddecline`: `pinFind`.
+- `rfc0005_s7_closure`: its verdicts are `runSymex` over `progOf(fn)` (the raw
+  result); each definite one now has the same SUT and target through
+  `pinFind`, pinned natively, and must agree with the raw status.
+- `rfc0005_s8bk_argtiming`, `rfc0005_s8bk_argtiming_addr`: the shared
+  fixture's `verdict` is `pinFind` (each SUT sets the globals it reads before
+  reading them), so these and `_checks` pin every sat and unsat call.
+
+Exempt (permanent, in the census):
+- `0016_d3b_walklog`: its verdict words are the walk-units log's text; it
+  runs no SUT.
+- `0016_k8a_gen`: the generator's own suite; each generated program is pinned
+  by the `pinExactImpl` call `s0016_k8a_gen` writes into its source.
+- `rfc0005_s1_lattice`: its one verdict is on a hand-built `SymexProgram`
+  with no Nim source, so there is no native program.
+
+Held: `0016_wa_runtime` (the census's 1). Its `lossyNil` claim
+(`sxRaised(NilAccessDefect)`) is false natively: run in a child on its only
+nil input it returns. INT-86. It is pinned when INT-86 closes (and its SUT
+then needs a kept read, or its claim inverts).
+
+INT-86 closed (`wip/int86`, walker 447 provisional): `lossyNil` keeps its
+read (`result = p.n`) and is pinned with `pinCrashSelf`; the census ceiling
+is 0. INT-89 (a `var` result through nil) was filed from its native probe.
+
+Rows filed (each with a red reproducer, unregistered while red, and an
+`ids.txt` entry):
+- INT-86, soundness: a discarded read through a nil `ref` or `ptr` (`discard
+  p.n`, `discard p[]`) is claimed a crash and the label behind it refuted;
+  natively the C compiler does not load `(void)((*p).n)`, the call returns
+  and the label is reached (c and cpp). `tsymex_0016_int86_discardnil`.
+- INT-87, precision: a `cstring` parameter still declines
+  (`feUnsupportedParamType`) at walker 444. `tsymex_0016_int87_cstringparam`.
+- INT-88, witness fidelity (the verdict is sound): the plan's "non-nil
+  pointer compare across types" is not closed by INT-83. Two `ptr`
+  parameters of different pointee types that the target needs at one address
+  are a right trusted `sxSat`, but the witness builds a cell for each, at two
+  addresses, and does not replay. Two refs of different types are
+  `sxUnsat`, pinned. `tsymex_0016_int88_crossptralias`.
+- A `pointer` parameter (INT-83): verified closed (`sxSat`, pinned); no row.
+
+Seen, not filed here: `tsymex_rfc0005_s7_closure`'s source-scan pin of the
+`trySolve` drain list fails on this base, independent of K9d: INT-82
+(39736fd6) added `refProvenanceRoots` as a solver sink and the audited list
+(section 2.4) was not updated. Whether the new sink belongs in the audited
+set is INT-82's call.
 
 ## The suites by family (at 7f6dca28; K9d-1's 43 are the int family's `phase*` rows without assume)
 

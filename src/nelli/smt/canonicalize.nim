@@ -1228,8 +1228,51 @@ const renderAsChoicesVersion* = "12"
   ##   checks int32 (`RangeDefect`, it was a false `sxSat`); an int
   ##   conversion of a Rune (`uint32(r)`) converts its int32 value (it was
   ##   the identity). No key bytes change.
+  ## - RFC-0016 INT-86 (444->447, provisional; 445-446 are reserved for
+  ##   in-flight work): a discarded read the C compiler does not load (a
+  ##   path through `.`/`[]`, a comparison, an unchecked conversion or
+  ##   arithmetic: `discard p.n`, `discard p[]`) is not a dereference; a
+  ##   nil `ref`/`ptr` there was a false `sxRaised(NilAccessDefect)` and the
+  ##   label behind it a false refutation. A read into a dead C variable (an
+  ##   unused `let`, `let _ =`, a discarded tuple or `len`) faults at `-O0`
+  ##   and not at `-O2`: a nil on its path declines (`feUnsupportedOp`). A
+  ##   read whose value is used or checked still faults. No key bytes change.
+  ## - RFC-0016 INT-89 (447->449, provisional; 448 is reserved for
+  ##   in-flight work): a discarded call returning `var T`/`lent T` computes
+  ##   an address, not a read: its callee (registered `#viewaddr`) runs its
+  ##   own reads and the address's index checks, and a nil pointer the
+  ##   address is only offset from is no dereference (`discard varN(nil)`
+  ##   was a false `sxRaised(NilAccessDefect)`, the label a false
+  ##   refutation); a pointer the address loads declines (`-O0` faults,
+  ##   `-O2` inlines it dead). A discarded or dead array element at a
+  ##   variable index runs its bound check against the static length and
+  ##   reads nothing through a nil `ref` (`discard p.arr[i]` was a false
+  ##   nil-access claim). No key bytes change.
+  ## - RFC-0016 INT-89 remnants (449->450, provisional): a view handed on
+  ##   without the address wrapper. A discarded `lent` call is an address,
+  ##   as a `var` one is (`discard lentN(nil)` declined); a view of a view
+  ##   is the inner call's address; a view call as a `var` actual passes the
+  ##   address and the call declines (`noRead(varN(nil))` was a false
+  ##   `sxRaised(NilAccessDefect)`); an unused local copying a view's
+  ##   location is the optimiser's (`#viewdead`: a nil on it declines; it
+  ##   was a nil-access claim, `-O2` returns). No key bytes change.
+  ## - RFC-0016 INT-92 (450->452, provisional; 451 is reserved): INT-86's
+  ##   optimiser class across a call. A call whose value nothing reads (a
+  ##   discard, a dead local) registers its callee under `#resultdead`; if
+  ##   the body never reads `result`, a pure read through a `ref`/`ptr` only
+  ##   `result` takes is dead, and a nil on it declines (`discard rd(nil)`
+  ##   was a false `sxRaised(NilAccessDefect)`: `-O0` faults, `-O2`
+  ##   returns). A by-value actual whose formal the callee never names is
+  ##   dead the same way (`noReadL(p.n)`). No key bytes change.
+  ## - RFC-0016 INT-92 remaining shapes (452->453, provisional): a value is
+  ##   dead when every place it reaches is (`onlyDeadUses`): a `discard`, a
+  ##   local whose own uses are dead, a by-value formal its callee uses only
+  ##   so, a part of `result` the caller does not read (the whole, or an
+  ##   object's other fields: `#resultdead:<f>`), and a call forwarded into
+  ##   such a result. Each was a false `sxRaised(NilAccessDefect)` (`-O0`
+  ##   faults, `-O2` returns); a nil there now declines. No key bytes change.
 
-const symexWalkerVersion* = "446"
+const symexWalkerVersion* = "453"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

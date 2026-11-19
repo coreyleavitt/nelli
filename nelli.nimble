@@ -2097,6 +2097,8 @@ task test, "Run the test suite":
             "tsymex_0016_int90_crosssortheap",
             # RFC-0016 INT-90: every write of a path's heaps goes through heapPut (a shared view's leaf is spliced or desyncs the path).
             "tsymex_0016_int90_heapput_audit",
+            # RFC-0016 INT-93: a local's address is an object of its own (distinct from other locals and the entry state; its fields and elements at their offsets).
+            "tsymex_0016_int93_localaddr",
             # RFC-0016 INT-87: a cstring parameter is held by value, whether it is nil and its bytes up to the NUL.
             "tsymex_0016_int87_cstringparam",
             "tsymex_0016_k9cg_unbacked",

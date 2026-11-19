@@ -1113,11 +1113,13 @@ proc emitStmt*(s: IRStmt): NimNode =
     elif s.nAddrField.len > 0:   # RFC-0005 S8bo: a field cell
       newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy),
               newLit(s.nAddrOf), newNilLit(),
-              newLit(s.nAddrField))
+              newLit(s.nAddrField), newLit(false),
+              newLit(s.nFrame), newLit(s.nFrameOff))   # RFC-0016 INT-93
     else:
       newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy),
               newLit(s.nAddrOf), newNilLit(), newLit(""),
-              newLit(s.nUninit))   # RFC-0005 S8ax; RFC-0016 PRC-07 `uninit`
+              newLit(s.nUninit),   # RFC-0005 S8ax; RFC-0016 PRC-07 `uninit`
+              newLit(s.nFrame), newLit(s.nFrameOff))   # RFC-0016 INT-93
   of isDerefWrite:   ## Phase 15 R3: heap write `p[] = v` (walker no-ops at R3).
     if s.dwField.len > 0:       ## Phase 15 R6: `p.field = v` field write.
       newCall(bindSym"mkFieldDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
@@ -8315,25 +8317,67 @@ proc fieldCellOf(e: NimNode): tuple[root, lv: NimNode; field: string] =
     return
   (t, lv, field)
 
+proc frameSlotLocal(x: NimNode): bool =
+  ## RFC-0016 INT-93. `x` is a `var` or `let` of the routine itself: its
+  ## storage is the routine's frame slot, made when the routine runs. Not a
+  ## parameter (a `var` formal is the caller's location; an object passed by
+  ## value may be too), not `result` (a caller's destination), not a
+  ## module-level or `{.global.}` variable (static storage a caller's pointer
+  ## may reach), not a `for` variable (it may be a view of the container).
+  x.kind == nnkSym and symKind(x) in {nskVar, nskLet} and not isModuleGlobal(x)
+
+proc frameFieldOffset(oty: IRType; field: string): int =
+  ## RFC-0016 INT-93. The byte offset of `field` within a value of the plain
+  ## object or tuple type `oty`, -1 where it is not known: an object's offset
+  ## is the compiler's (`cFieldOffsets`); an anonymous tuple is a C struct of
+  ## its fields in order, so its first field is at 0 and, when no field can be
+  ## zero-sized, each later one at a distinct offset (its index stands in).
+  if oty.kind != itTuple: return -1
+  var ix = -1
+  if field.len > 1 and field[0] == '#':
+    try: ix = parseInt(field[1 .. ^1])
+    except ValueError: return -1
+  else:
+    ix = oty.fieldNames.find(field)
+  if ix < 0 or ix >= oty.fields.len: return -1
+  if oty.objectName.len > 0:
+    return (if ix < oty.cFieldOffsets.len: oty.cFieldOffsets[ix] else: -1)
+  if ix == 0: return 0
+  for f in oty.fields:
+    if f == nil or f.kind notin {itInt, itBool, itFloat32, itFloat64, itString,
+                                 itSeq, itRef, itPtr}:
+      return -1
+  ix
+
 proc lowerArmFieldCell(e, root, lv: NimNode; field: string;
                        preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8bo. `addr o.a` (`fieldCellOf`): the arm is checked where
   ## `addr` takes the field (a `FieldDefect` there, as Nim checks it), and
   ## the cell is the field's.
+  ## RFC-0016 INT-93: a field of a plain object or tuple local is an address
+  ## into that local's frame slot, at the field's offset (`isNew.nFrame`).
   if lv.kind == nnkCheckedFieldExpr:
     preamble.add mkLet(freshSynth(ctx, "armChk"), classifyType(lv).ty,
                        parseExpr(lv, preamble, ctx))
   let cell = freshSynth(ctx, "fieldCell")
+  let oty = classifyType(root).ty
+  let frame = frameSlotLocal(root) and oty.kind == itTuple
   preamble.add mkNewT(cell, classifyType(e).ty, addrOf = strVal(root),
-                      addrField = field)
+                      addrField = field, frame = frame,
+                      frameOff = (if frame: frameFieldOffset(oty, field)
+                                  else: -1))
   mkVar(cell)
 
 proc lowerAddrCell(e, x: NimNode; preamble: var seq[IRStmt];
                    ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8ax. `addr x` (`addrCellLocal`): the address cell of `x`,
   ## allocated by its first `addr` in the frame and the same pointer after.
+  ## RFC-0016 INT-93: of a `var` or `let` of the routine, the address of its
+  ## own frame slot (`isNew.nFrame`, offset 0).
   let name = strVal(x)
-  preamble.add mkNewT(addrCellName(name), classifyType(e).ty, addrOf = name)
+  let frame = frameSlotLocal(x)
+  preamble.add mkNewT(addrCellName(name), classifyType(e).ty, addrOf = name,
+                      frame = frame, frameOff = (if frame: 0 else: -1))
   mkVar(addrCellName(name))
 
 proc isSymOf(n, sym: NimNode): bool =

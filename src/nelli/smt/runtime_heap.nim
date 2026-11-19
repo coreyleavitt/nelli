@@ -63,6 +63,16 @@ proc freshRef*(ctx: Z3Context, refSort: RawZ3Sort, typeId: string,
   let name = "ref_" & typeId & "_" & $n
   wrap[Z3AnyAst](ctx, rawConstOf(ctx, refSort, name))
 
+proc freshFrameRef*(ctx: Z3Context, refSort: RawZ3Sort, typeId: string,
+                    path: Path; obj, off: int): Z3AnyAst =
+  ## RFC-0016 INT-93. `freshRef` for an address into the frame object `obj`
+  ## at offset `off` (`isNew.nFrame`): the same counter, under the slot's own
+  ## name (`frameCellName`), which records it.
+  let n = path.allocCounters.getOrDefault(typeId, 0) + 1
+  path.allocCounters[typeId] = n
+  wrap[Z3AnyAst](ctx, rawConstOf(ctx, refSort,
+                                 frameCellName(typeId, n, obj, off)))
+
 proc ptrPreKey*(typeId: string): string =
   ## RFC-0005 S8bh. The `liveRefs` key of the objects of type `typeId` a
   ## pointer of unknown origin addresses: each predates every allocation.
@@ -1028,7 +1038,12 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
         if cl == local: why = "of a variable a closure captures"
     let refSort = allocRefSort(ctx, ty)
     var child = forkPath(p, p.pc, p.env)
-    let newRef = freshRef(ctx, refSort, typeId, child)
+    # RFC-0016 INT-93: a local's own slot is an object of its own.
+    let newRef =
+      if stmt.nFrame and why.len == 0 and not isModuleGlobalEnvName(local):
+        freshFrameRef(ctx, refSort, typeId, child,
+                      frameObjectId(w.frame.frameId, local), stmt.nFrameOff)
+      else: freshRef(ctx, refSort, typeId, child)
     assertFreshness(ctx, child, typeId, newRef, w.settings)
     # RFC-0016 S8ch: an address cell is its own cell, as every allocation is
     # (S8bh's model above `tyMayHold`): `sel = 0` at its address. Left free,
@@ -1278,7 +1293,13 @@ proc walkFieldCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
       continue
     let refSort = allocRefSort(ctx, ty)
     var child = forkPath(p, p.pc, p.env)
-    let newRef = freshRef(ctx, refSort, typeId, child)
+    # RFC-0016 INT-93: a field of a plain object or tuple local is an address
+    # into the local's own slot, at the field's offset.
+    let newRef =
+      if stmt.nFrame and why.len == 0 and p.env[root].kind == svTuple:
+        freshFrameRef(ctx, refSort, typeId, child,
+                      frameObjectId(w.frame.frameId, root), stmt.nFrameOff)
+      else: freshRef(ctx, refSort, typeId, child)
     assertFreshness(ctx, child, typeId, newRef, w.settings)
     var env2 = child.env
     env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,

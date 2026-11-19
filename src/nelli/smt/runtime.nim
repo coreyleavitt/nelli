@@ -30955,7 +30955,8 @@ lowerHooks = LowerHooks(
 # is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
 
 proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
-  releaseToDefault(freshnessCapHints, heapDepthErrors, newFieldZeroErrors,
+  releaseToDefault(cstringWitnessBufs,   # RFC-0016 INT-87
+    freshnessCapHints, heapDepthErrors, newFieldZeroErrors,
     ptrFamilyHints, closureEnvWrites, loweringReadNames, z3ApiErrorCount,
     z3ApiFirstError, arithFrames, checkScopes, obligationLog, seqOobConds,
     uninitReadConds, arithTrapConds, currentVariantHeaps,

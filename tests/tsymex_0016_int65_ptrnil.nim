@@ -13,9 +13,10 @@
 ## probing INT-63 (K8b's typeop axis suite, INT-56).
 ##
 ## Model: a `pointer` holds the address it was converted from (a `ptr` or a
-## `ref`, nil exactly when that is), and its own `nil`. Two addresses of
-## different pointee types compare equal only when both are nil; a non-nil
-## pair of them declines (a `cast` may alias them). A proc value is the
+## `ref`, nil exactly when that is), and its own `nil`. Two locals'
+## addresses differ whatever their types (INT-93: a local's slot is an object
+## of its own); two `ptr` parameters of different pointee types may share
+## one (INT-90). A proc value is the
 ## routine or closure it was built from, or nil; a call through nil
 ## declines. A `pointer` that is not an address (an integer cast) and a
 ## `ptr` cast from a `pointer` decline.
@@ -141,12 +142,14 @@ suite "INT-65: a `pointer` is an address with a nil":
     discard pinExact(i65PointerDistinctVars, cellKey(axTypeClass, "pointer"),
                      domain = sampled([3'i8, 0'i8]))
 
+  test "two locals of two types are two addresses (INT-93)":
+    # It was a trusted false sxSat once INT-83's conversion met this
+    # program: a local's address is now an object of its own.
+    check parseInt(symexWalkerVersion) >= 455
+    discard pinExact(i65PointerCrossSort, cellKey(axTypeClass, "pointer"),
+                     domain = sampled([3'i8, 0'i8]))
+
   test "what the walk cannot know declines by name":
-    # Two `ptr`s of different sorts as `pointer`s: the model does not relate
-    # them, so it declines (it was a trusted false sxSat once INT-83's
-    # conversion met this program).
-    pinDecline(i65PointerCrossSort, cellKey(axTypeClass, "pointer"),
-               heUnresolvedRef)
     pinDecline(i65PointerArith, cellKey(axTypeClass, "pointer"),
                feUnsupportedExprKind, needle = "nnkCast")
 

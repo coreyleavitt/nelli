@@ -1869,6 +1869,17 @@ type
                              ## union bytes no field write reaches are
                              ## indeterminate. `new(T)` and a constructor
                              ## that omits a field zero the cell.
+      nFrame*:     bool      ## RFC-0016 INT-93: with `nAddrOf` a `var` or
+                             ## `let` of the routine (not a parameter, a
+                             ## `result`, a global or a `{.global.}`), the
+                             ## address is into that local's own frame slot,
+                             ## an object no caller's pointer reaches and no
+                             ## other local shares (`walkAddrCell`,
+                             ## `walkFieldCell`).
+      nFrameOff*:  int       ## RFC-0016 INT-93: with `nFrame`, the byte
+                             ## offset of the address within the slot (0 for
+                             ## the local itself, a field's C offset); -1
+                             ## where the parser does not know it.
     of isDerefWrite:
       dwPtr*:      IRExpr    ## Phase 15 R3: the ref/ptr expr being written through.
       dwValue*:    IRExpr    ## the RHS value stored into `dwPtr[]`.
@@ -4839,7 +4850,8 @@ proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType,
          dPtrFamily: true, dCell: cell)
 
 proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
-             addrIdx: IRExpr = nil; addrField = ""; uninit = false): IRStmt =
+             addrIdx: IRExpr = nil; addrField = ""; uninit = false;
+             frame = false; frameOff = -1): IRStmt =
   ## Phase 15 R1a (ADR-0010). `let retName = new(T)` allocation binding a fresh
   ## ref. `refTy` is the allocated `itRef`/`itPtr` type.
   ## RFC-0005 S8ax: `addrOf` names a local whose address cell this is.
@@ -4847,8 +4859,11 @@ proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
   ## RFC-0005 S8bo: `addrField`, an arm field of it (`isNew.nAddrField`).
   ## RFC-0016 PRC-07: `uninit`, a constructor's unzeroed allocation
   ## (`isNew.nUninit`).
+  ## RFC-0016 INT-93: `frame`, `frameOff`, an address into a local's own
+  ## frame slot at that offset (`isNew.nFrame`, `isNew.nFrameOff`).
   IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy, nAddrOf: addrOf,
-         nAddrIdx: addrIdx, nAddrField: addrField, nUninit: uninit)
+         nAddrIdx: addrIdx, nAddrField: addrField, nUninit: uninit,
+         nFrame: frame, nFrameOff: frameOff)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
                    ptrFamily = false, cell = false, inPlace = false): IRStmt =
@@ -5483,7 +5498,8 @@ proc render*(s: IRStmt): string =
       (if s.nAddrOf.len > 0: "@" & s.nAddrOf else: "") &   # RFC-0005 S8ax
       (if s.nAddrIdx != nil: "[" & render(s.nAddrIdx) & "]" else: "") &   # S8be
       (if s.nAddrField.len > 0: "." & s.nAddrField else: "") &   # RFC-0005 S8bo
-      (if s.nUninit: " uninit" else: "")   # RFC-0016 PRC-07
+      (if s.nUninit: " uninit" else: "") &   # RFC-0016 PRC-07
+      (if s.nFrame: " frame+" & $s.nFrameOff else: "")   # RFC-0016 INT-93
   of isDerefWrite:
     let fam = if s.dwPtrFamily: "ptr" else: "ref"
     let fld = if s.dwField.len > 0: "." & s.dwField else: ""

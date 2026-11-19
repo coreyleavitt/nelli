@@ -1306,8 +1306,20 @@ const renderAsChoicesVersion* = "12"
   ##   leaf heap that no splice reflects desyncs the path wherever it is
   ##   made (a `ptr`'s store into a field of a view object was a false
   ##   `sxUnsat`), and a `new`'s zero is spliced. No key bytes change.
+  ## - RFC-0016 int6 integration + INT-93 (454->455): the address of a `var`
+  ##   or `let` of the routine, and of a field of a plain object or tuple
+  ##   one, is an address into the local's own frame slot
+  ##   (`isNew.nFrame`/`nFrameOff`; `frameCellName`, heap_model.nim): no
+  ##   object of the entry state (INT-82), and as a `pointer` an address of
+  ##   the frame kind, its own object and its field's offset, so two locals'
+  ##   addresses differ whatever their types and two addresses into one local
+  ##   are equal exactly at one offset. `pointer(addr x) == pointer(addr y)`
+  ##   of an `int` and a `float` local was a trusted false `sxSat` once
+  ##   INT-83 met INT-65; so was a `ptr float` parameter's `pointer` equal
+  ##   to a local's, and a local's equal to a `new` object's. The key adds `;frame=<off>` to such an `isNew`. Also INT-80's
+  ##   `seq & T` tells a seq element from a whole seq operand (9bb7738c).
 
-const symexWalkerVersion* = "454"
+const symexWalkerVersion* = "455"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged
@@ -7649,9 +7661,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     let ofFld = if s.nAddrField.len > 0: ";fld=" & s.nAddrField else: ""
     # RFC-0016 PRC-07: a constructor's unzeroed allocation.
     let ofUninit = if s.nUninit: ";uninit" else: ""
+    # RFC-0016 INT-93: an address into a local's own frame slot.
+    let ofFrame = if s.nFrame: ";frame=" & $s.nFrameOff else: ""
     let slot = bindLocal(env, s.nRetName)
     "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ofIdx &
-      ofFld & ofUninit & ">"
+      ofFld & ofUninit & ofFrame & ">"
   of isDerefWrite:
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).

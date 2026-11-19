@@ -1924,10 +1924,12 @@ proc heapCellWfConds*(ctx: Z3Context; key: string; refSort: RawZ3Sort;
   let sv = heapCellSelect(ctx, input, refAst, valTy)
   svCellWf(sv, valTy, false)
 
-var crossSortAccessed*, crossSortWritten* {.threadvar.}: bool
+var crossSortAccessed* {.threadvar.}: bool
   ## RFC-0016 INT-90. Some path of the run read a pointee's heap
-  ## (`crossSortLink`) or stored into one a view's leaf may be (`heapPut`)
-  ## so far (`crossSortEnter`).
+  ## (`crossSortLink`) so far (`crossSortEnter`).
+var crossSortWritten* {.threadvar.}: bool
+  ## RFC-0016 INT-90. Some path of the run stored into a heap a view's leaf
+  ## may be (`heapPut`) so far (`crossSortEnter`).
 
 proc heapCellStore*(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
                    valSV: SymVal; valTy: IRType): HeapCell =
@@ -2399,6 +2401,25 @@ proc refProvenanceRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
 # `pointerWholeObject`): the walk's `ref` values are always whole objects. A
 # `ptr` is not tagged: `addr o.f` of a first field is `o`'s own address.
 #
+# RFC-0016 INT-93: the address of a named local. `addr x` of a `var` or
+# `let` of the routine (`isNew.nFrame`), and `addr o.f` of a field of a plain
+# object or tuple one, is an address into the local's own frame slot: an
+# object made when the routine ran, as a `ref`'s is made by `new`. Its typed
+# cell is minted under a name of its own (`frameCellName`), so a fact about
+# the constant holds on every path that has it (a counter name such as
+# `ref_int_1` is minted on sibling paths for unrelated cells):
+#   * provenance: the cell is no object of the walk's entry state
+#     (`allocatedNames`, INT-82's `not @pre`), so no pointer a parameter
+#     reaches is it;
+#   * converted to `pointer`, its address carries the frame kind
+#     (`frameKindCode`, never a `ref`'s whole-object code: a frame slot is no
+#     heap object), its object's number (`@addrObj`; one per local per frame
+#     descent, so two locals' addresses differ whatever their types) and,
+#     where known, its offset (`@addrOff`); two addresses of one object at
+#     one offset are one address (the first field is the object's own).
+# Two `ptr` PARAMETERS of different sorts still may share an address
+# (INT-90): neither is a frame slot.
+#
 # What the model does not follow is a location read at two types (a `float`
 # cell read back as an `int`): the walk declines (`heUnsafeCast`) once
 # pointers of one run are cast to one sort and converted from or to another
@@ -2418,13 +2439,16 @@ var pointerSortsUsed* {.threadvar.}: HashSet[string]
   ## RFC-0016 INT-83. The sorts the run converted a pointer from or to.
 var pointerReadSorts* {.threadvar.}: HashSet[string]
   ## RFC-0016 INT-83. The sorts the run read a `pointer` as.
-var pointerAddrSorts* {.threadvar.}: HashSet[string]
-  ## RFC-0016 INT-83 with INT-65 (int6). The sorts of the typed addresses the
-  ## run converted to `pointer` that are not a whole object (a `ptr`, which
-  ## carries no kind tag). Two such addresses of different sorts (`addr x`
-  ## of an `int` local and `addr y` of a `float` one) are unrelated by the
-  ## model, so their `pointer`s compared equal was a trusted false `sxSat`;
-  ## mixing a sort's untagged address with another sort's address declines.
+var frameObjIds {.threadvar.}: Table[string, int]
+  ## RFC-0016 INT-93. The object of each local whose address the run took:
+  ## `"<frame id>:<local>"` -> its number (`frameObjectId`).
+var frameCells {.threadvar.}: Table[string, tuple[obj, off: int]]
+  ## RFC-0016 INT-93. Each frame-slot address the run minted, by its
+  ## constant's name (`frameCellName`): its object and its byte offset in it
+  ## (-1 unknown).
+var framePtrs {.threadvar.}: seq[tuple[p: Z3AnyAst; obj, off: int]]
+  ## RFC-0016 INT-93. Each frame-slot address the run converted to `pointer`
+  ## (`pointerAddrOf`), with its object and offset.
 var pointerDecls {.threadvar.}: tuple[ctx: pointer; decls: Table[string, RawZ3FuncDecl]]
   ## RFC-0016 INT-83. `@toAddr_<T>` / `@fromAddr_<T>` / `@addrKind` of the
   ## run's context.
@@ -2740,11 +2764,63 @@ proc pointerWholeObject*(ctx: Z3Context; t: RawZ3Ast): bool =
     for i in 0 ..< n: stack.add (Z3_get_app_arg(ctx.raw, app, cuint(i)), lvl + 1)
   true
 
+proc frameObjectId*(frameId: int; local: string): int =
+  ## RFC-0016 INT-93. The number of the object `local`'s slot is in the frame
+  ## descent `frameId`: one per local per descent, the same on every path.
+  let key = $frameId & ":" & local
+  if not frameObjIds.hasKey(key): frameObjIds[key] = frameObjIds.len + 1
+  frameObjIds[key]
+
+proc frameCellName*(typeId: string; n, obj, off: int): string =
+  ## RFC-0016 INT-93. The name of the typed cell of an address into the
+  ## frame object `obj` at offset `off` (-1 unknown), minted as the `n`th
+  ## address of `typeId`'s sort on its path. It keeps `freshRef`'s
+  ## `ref_<typeId>_<n>` prefix (a non-nil fresh address, `hasNonNilFact`);
+  ## the rest names the slot, so one name is one slot on every path.
+  result = "ref_" & typeId & "_" & $n & "@fo" & $obj & "+" &
+           (if off >= 0: $off else: "?")
+  frameCells[result] = (obj: obj, off: off)
+  allocatedNames.incl result   # INT-82: no object of the entry state
+
+const frameKindCode = int64(hash("@frame"))
+  ## RFC-0016 INT-93. The `@addrKind` of an address into a frame slot: no
+  ## `ref`'s whole-object code (`hash` of a type id, which has no `@`).
+
+proc pointerFrameFacts(ctx: Z3Context; x, p: Z3AnyAst) =
+  ## RFC-0016 INT-93. When the typed address `x` is a frame-slot cell
+  ## (`frameCellName`), the facts of its `pointer` image `p`: its kind, its
+  ## object, its offset, and its equality with every earlier image of the
+  ## same object at the same offset.
+  if Z3_get_ast_kind(ctx.raw, x.raw) != Z3_APP_AST: return
+  let app = Z3_to_app(ctx.raw, x.raw)
+  if Z3_get_app_num_args(ctx.raw, app) != 0: return
+  let name = declName(ctx, Z3_get_app_decl(ctx.raw, app))
+  if not frameCells.hasKey(name): return
+  let (obj, off) = frameCells[name]
+  let pSort = allocRefSort(ctx, pointerPointeeTy())
+  let intSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
+  proc fact(fname: string; v: int64) =
+    let a = pointerApp(ctx, pointerDecl(ctx, fname, pSort, intSort), p.raw)
+    let c = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw, v,
+      sortOfRaw(ctx, a.raw)))
+    pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, c.raw))
+  fact("@addrKind", frameKindCode)
+  fact("@addrObj", int64(obj))
+  if off >= 0:
+    fact("@addrOff", int64(off))
+    for q in framePtrs:
+      if q.obj == obj and q.off == off and
+         astId(ctx, q.p.raw) != astId(ctx, p.raw):
+        pointerFacts.add wrap[Z3Bool](ctx, checkedEq(ctx, p.raw, q.p.raw))
+  framePtrs.add (p: p, obj: obj, off: off)
+
 proc pointerAddrOf*(ctx: Z3Context; x: Z3AnyAst; pointee: IRType;
                     wholeObject: bool): Z3AnyAst =
   ## RFC-0016 INT-83. The typed address `x` (of `pointee`'s sort) as a
   ## `pointer`. `wholeObject`: `x` is a `ref`'s whole object
   ## (`pointerWholeObject`), whose address no other sort's object has.
+  ## RFC-0016 INT-93: an address into a local's frame slot carries its
+  ## object and offset (`pointerFrameFacts`).
   let tid = refPointeeTypeId(pointee)
   if tid == pointerTypeId: return x
   let sp = pointerSortPair(ctx, pointee)
@@ -2760,6 +2836,7 @@ proc pointerAddrOf*(ctx: Z3Context; x: Z3AnyAst; pointee: IRType;
       int64(hash(tid)), sortOfRaw(ctx, k.raw)))
     let isNil = wrap[Z3Bool](ctx, checkedEq(ctx, x.raw, sp.tNil.raw))
     pointerFacts.add(isNil or wrap[Z3Bool](ctx, checkedEq(ctx, k.raw, code.raw)))
+  pointerFrameFacts(ctx, x, result)
   pointerViews.add (addrAst: result, typedAst: x, pointee: pointee)
 
 proc pointerAsTyped*(ctx: Z3Context; p: Z3AnyAst; pointee: IRType): Z3AnyAst =
@@ -2807,7 +2884,9 @@ proc resetHeapModel*() =
   pointerViews = @[]
   pointerSortsUsed = initHashSet[string]()
   pointerReadSorts = initHashSet[string]()
-  pointerAddrSorts = initHashSet[string]()
+  frameObjIds = initTable[string, int]()   # RFC-0016 INT-93
+  frameCells = initTable[string, tuple[obj, off: int]]()
+  framePtrs = @[]
   pointerDecls = (ctx: nil, decls: initTable[string, RawZ3FuncDecl]())
   pointerSortTypes = initTable[string, IRType]()   # RFC-0016 INT-90
   crossSortFacts = @[]
@@ -5036,7 +5115,7 @@ proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
     heapChainKinds, allocInputDomain, enumHolesMade, heapFieldOwners,
     preExistingNames, madeKinds, allocatedNames, preDecls, provKinds,
     pointerFacts, pointerViews, pointerSortsUsed, pointerReadSorts,
-    pointerAddrSorts, pointerDecls, crossSortAccessed, crossSortWritten,
+    frameObjIds, frameCells, framePtrs, pointerDecls, crossSortAccessed, crossSortWritten,
     pointerSortTypes, crossSortFacts, crossSortFactIds, crossSortAnyDesync,
     crossSortFactsOff)
 

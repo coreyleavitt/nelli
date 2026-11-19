@@ -822,6 +822,28 @@ const renderAsChoicesVersion* = "12"
   ##   call too). Its re-run's depths were not modelled, and a call on a
   ##   literal or pinned subject read -21 for -1 or a match and the other
   ##   way round (SND-16); such a call is now unknown. No key bytes change.
+  ## - RFC-0016 S8ci (374->379; 375-378 are Wave 4 lanes in flight): a
+  ##   query's own context (`ownContextSolver`) makes its terms in Z3's own
+  ##   translation order of the roots, not S8by's `queryTermOrder` (roots in
+  ##   order, arguments last to first). Verdicts are unchanged; Z3 units on
+  ##   a query move (`lastNl`: 1,026,624 to 498,821 on Z3 5.1), so a walk
+  ##   cut by its budget can cut elsewhere. No key bytes change.
+  ## - RFC-0016 S8ci follow-up (379->384; 380-383 are Wave 4 lanes in
+  ##   flight): an own-context search (`ownContextSolver`) runs Z3's
+  ##   defaults under the first half of its bound; only one that half ran
+  ##   out on goes on, on the same solver, with `smt.arith.propagate_eqs`
+  ##   off, under what is left (`ownContextCheck`): the cheap equality
+  ##   search spends wall time `rlimit` does not count. A query decided
+  ##   within half its bound is searched as before; past that, verdicts are
+  ##   the query's own either way, but a search cut by its bound can cut
+  ##   elsewhere. No key bytes change.
+  ## - RFC-0016 S8ci uneven split (384->389; 385-388 are reserved): Z3's
+  ##   defaults get the first seven eighths of an own-context search's bound
+  ##   (`eqsSplitShare`), not half; only a search that share ran out on goes
+  ##   on without the cheap equality search. At half, two pinned UNSATs were
+  ##   lost to the bound (`s8aq_rfind_before_piece`, `grow_stale_dead`), and
+  ##   at three quarters the first still was. A search cut by its bound can
+  ##   cut elsewhere than at 384. No key bytes change.
 
 const symexWalkerVersion* = "412"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

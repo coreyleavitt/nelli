@@ -1903,6 +1903,8 @@ task test, "Run the test suite":
             "tsymex_0016_s8cj_mkunique",
             # RFC-0016 S8ch (PRC-30): the address of a module-level variable in a walked callee is the global's own cell.
             "tsymex_0016_s8ch_addrglobal",
+            # RFC-0016 S8ci (PRC-31): an own-context search runs Z3's defaults under seven eighths of its bound, the rest without the uncharged cheap equality search.
+            "tsymex_0016_s8ci_eqsplit",
             "tsymex_0016_wa_undefined_e2e",
             "tsymex_0016_w3z_r5_render",
             "tsymex_0016_w3z_r5b_diag",

@@ -10472,36 +10472,47 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   result.setParams(solverParams)
   for c in roots: result.add(c)
 
-proc queryTermOrder*(ctx: Z3Context; roots: openArray[Z3Bool]):
-    seq[Z3AnyAst] =
-  ## RFC-0005 S8by. Every term of `roots`, each once, children before
-  ## parents: the roots in order, each term's arguments last to first.
-  ## `ownContextSolver` makes a query's terms in its context in this
-  ## order. Z3's units on a query were a function of the query and of the
-  ## process's Z3 memory since S8bp (RFC-0016 S8cj: the default solver's
-  ## strategy reads `memory::get_allocation_size()` as its `memory` probe,
-  ## so a query costs 72k units in a small process and 876k in one holding
-  ## 100 MB of contexts; nothing the context holds, only how much the
-  ## process does), but not the wall time a unit costs: the search a unit
-  ## pays for follows the context's term ids (`r4_strip`'s budget-out step
-  ## 3, 10M units, ran 135 s in its own context against 58.5 s in the
-  ## walk's, S8bp). The order moves the search, so units as well as wall
-  ## time. `r4_strip`'s binary, CPU seconds side by side under one load
-  ## (Z3 5.1): 133 and 122 against 143 and 129 in Z3's own translation
-  ## order, root by root.
+proc queryTermCount(ctx: Z3Context; roots: openArray[Z3Bool]): int =
+  ## RFC-0016 S8ci. The number of distinct terms of `roots`: what
+  ## translating them into a context of their own visits, each once
+  ## (`ownContextSolver`'s K7 charge). A function of the query alone.
   var done: HashSet[int]
-  var stack: seq[tuple[t: Z3AnyAst, expanded: bool]]
-  for i in countdown(roots.len - 1, 0): stack.add (toAnyAst(roots[i]), false)
+  var stack: seq[Z3AnyAst]
+  for c in roots: stack.add toAnyAst(c)
   while stack.len > 0:
-    let (t, expanded) = stack.pop()
+    let t = stack.pop()
     let id = astId(ctx, t.raw)
     if id in done: continue
-    if expanded or getAstKind(t) != akApp:
-      done.incl id
-      result.add t
-      continue
-    stack.add (t, true)
-    for a in unpackApp(t).args: stack.add (a, false)
+    done.incl id
+    inc result
+    if getAstKind(t) == akApp:
+      for a in unpackApp(t).args: stack.add a
+
+const eqsSplitShare = (num: 7'u, den: 8'u)
+  ## RFC-0016 S8ci. The share of an own-context search's bound that Z3's
+  ## defaults get before `ownContextCheck` searches on without the cheap
+  ## equality search: seven eighths, the least share tried (one half, three
+  ## quarters, seven eighths) that loses no pinned UNSAT (see
+  ## `ownContextCheck`).
+
+proc eqsSplitFirst(rlimit: uint): uint =
+  ## The part of `rlimit` Z3's defaults get: at least `eqsSplitShare` of
+  ## it, rounded up, and never more than `rlimit`. Written so a large
+  ## bound cannot overflow.
+  rlimit - (rlimit div eqsSplitShare.den) * (eqsSplitShare.den - eqsSplitShare.num)
+
+var eqsSplitCaps {.threadvar.}: Table[pointer, uint]
+  ## RFC-0016 S8ci. The whole bound of each `ownContextSolver` solver not
+  ## yet checked, keyed by the solver: the solver itself carries only its
+  ## first share (`eqsSplitFirst`, see `ownContextSolver`), and
+  ## `ownContextCheck` gives a search that share did not decide the rest.
+  ## Removed when it is checked.
+
+when defined(symexQueryStats):
+  var symexEqsSplits* {.threadvar.}: int
+    ## RFC-0016 S8ci. The own-context checks whose first share ran out undecided
+    ## and were searched on without Z3's cheap equality search
+    ## (`ownContextCheck`). Never reset by the engine.
 
 proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
                       rlimit: uint; seqTheory = true): Z3Solver =
@@ -10514,27 +10525,38 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   ## walk's is restored. RFC-0005 S8bp: every `checkCapped` step's solver,
   ## the theory-free ones (`seqTheory = false`) included.
   ##
-  ## RFC-0005 S8by: the query's terms are made in the new context in one
-  ## order, a function of the query alone (`queryTermOrder`), and so are
-  ## their ids, which Z3's search reads. Its units were already the
-  ## query's and the process's Z3 memory's (S8bp; RFC-0016 S8cj); the
-  ## wall time a unit costs follows the order too.
+  ## RFC-0016 S8ci: the roots are translated as one vector (one cache), so
+  ## the query's terms are made in the new context in Z3's own translation
+  ## order, a function of the query alone. The order moves the search, so
+  ## the units as well as the wall time a unit costs (and the units follow
+  ## the process's Z3 memory too, RFC-0016 S8cj). Three orders were
+  ## measured over 54 (suite, Z3) cells, the heaviest solver-bound tsymex
+  ## suites on Z3 5.1 and 4.13.4: S8by's (the roots in order, each term's
+  ## arguments last to first) 1,992.7M Z3 units; the walk context's
+  ## creation order (ids ascending) 1,540.9M; Z3's 1,464.7M, the least,
+  ## and the least summed CPU time (967 s against 1,138 s and 990 s). The
+  ## creation order won some cells, but no choice between the two earns a
+  ## rule: picking the better of them per cell would save 2.6%. Z3's
+  ## order costs `r4_strip` wall time (118.7 s against S8by's 108.5 s and
+  ## S8bm's 86.7 s, Z3 5.1, side by side); its units are the same in
+  ## every order (a budget-out step).
   let prev = currentContext()
   let own = newContext()
   setCurrentContext(prev)
-  let order = queryTermOrder(ctx, roots)
-  chargeWalkerTerms(order.len)   ## RFC-0016 K7: one build/translate visit per term
-  var at: Table[int, int]
+  chargeWalkerTerms(queryTermCount(ctx, roots))   ## RFC-0016 K7: one translate visit per term
   let terms = newAstVector(ctx)
-  for i, t in order:
-    at[astId(ctx, t.raw)] = i
-    terms.add t
-  # One translation (one cache), in that order: each term made once, its
-  # arguments before it.
+  for c in roots: terms.add toAnyAst(c)
   let made = translate(terms, own)
   var inOwn = newSeq[Z3Bool](roots.len)
-  for i, c in roots: inOwn[i] = wrap[Z3Bool](own, made[at[astId(ctx, c.raw)]])
-  querySolver(own, inOwn, rlimit, seqTheory)
+  for i in 0 ..< roots.len: inOwn[i] = wrap[Z3Bool](own, made[i])
+  result = querySolver(own, inOwn, rlimit, seqTheory)
+  # RFC-0016 S8ci: Z3's defaults get the first share of the bound; the
+  # rest is `ownContextCheck`'s, without the cheap equality search.
+  if rlimit > 1'u and eqsSplitFirst(rlimit) < rlimit:
+    let first = newParams(own)
+    first.set("rlimit", eqsSplitFirst(rlimit))
+    result.setParams(first)
+    eqsSplitCaps[cast[pointer](result)] = rlimit
 
 when defined(symexTestInjectWalkerFault):
   proc injectedSolveFaultTerms(s: Z3Solver): seq[Z3Bool] =
@@ -10551,6 +10573,31 @@ proc ownContextCheck(s: Z3Solver;
   ## context's whole step count (nothing else ran there) added to
   ## `ownContextUnits`. RFC-0005 batch 7: the check is S8bu's
   ## `solveBounded`, so a solve the clock cut off is noted here too.
+  ##
+  ## RFC-0016 S8ci. With `smt.arith.propagate_eqs` on (Z3's default), every
+  ## LP bound propagation runs `lp_bound_propagator::cheap_eq_on_nbase` over
+  ## the touched rows and explains each equality it finds by walking its
+  ## row (`lar_solver::explain_fixed_in_row`); none of that advances
+  ## `rlimit`, so a unit's wall time grows with the tableau's rows, which
+  ## follow the order the query's terms were made in (`r4_strip`'s
+  ## budget-out step 3: 228 of 300 stack samples there, Z3 5.1.0; 45 s in
+  ## S8bm's term order, 71 s in S8bp's, the same units). Turning it off
+  ## everywhere bounds that, but loses what it decides cheaply
+  ## (`s8bb_replace_d` 3.8M units to 26.5M and red). So the search is
+  ## split: Z3's defaults under the first share of the bound
+  ## (`eqsSplitShare`, `ownContextSolver`), and only a search that share ran
+  ## out on goes on, on the same solver, without the equality search, under
+  ## what the bound has left. A query decided within its first share is
+  ## searched exactly as before; one that spends its whole bound spends the
+  ## rest where a unit costs about the same wall time in any term order. The
+  ## units counted are the context's whole step count, both parts.
+  ##
+  ## The share is seven eighths, by measurement: at one half,
+  ## `s8aq_rfind_before_piece` and `grow_stale_dead` (UNSATs Z3's defaults
+  ## reach only past half the bound) were lost; at three quarters the first
+  ## still was. At seven eighths `r4_strip` runs 82.0 s / 81.6 s against the
+  ## unsplit 108.2 s / 107.5 s and S8bm's 84.0 s / 83.8 s (eos, Z3 5.1, side
+  ## by side, 2 reps; units unchanged).
   when defined(symexTestInjectWalkerFault):
     # RFC-0005 batch 8 fault injection (compiled out of every normal build):
     # a query over a parameter named for the shape raises, as `extractLeaf`'s
@@ -10565,10 +10612,23 @@ proc ownContextCheck(s: Z3Solver;
       held = injectedSolveFaultTerms(s)
       discard held
   result = solveBounded(s, assumptions)
-  let st = s.getStatistics()
-  if st.contains("rlimit count"):
-    ownContextUnits += (if st.isInt("rlimit count"): st.getInt("rlimit count")
-                        else: int(st.getFloat("rlimit count")))
+  var st = s.getStatistics()
+  proc spentIn(st: Z3Stats): uint =
+    if not st.contains("rlimit count"): 0'u
+    elif st.isInt("rlimit count"): uint(st.getInt("rlimit count"))
+    else: uint(st.getFloat("rlimit count"))
+  var cap: uint
+  if eqsSplitCaps.pop(cast[pointer](s), cap) and result == zsUnknown:
+    let spent = spentIn(st)
+    if spent >= eqsSplitFirst(cap) and spent < cap:
+      let rest = newParams(s.ctx)
+      rest.set("rlimit", cap - spent)
+      rest.set("smt.arith.propagate_eqs", false)
+      s.setParams(rest)
+      when defined(symexQueryStats): inc symexEqsSplits
+      result = solveBounded(s, assumptions)
+      st = s.getStatistics()
+  ownContextUnits += int(spentIn(st))
   chargeWalkWork()   ## RFC-0016 K7
 
 var intDivDeclKinds {.threadvar.}:

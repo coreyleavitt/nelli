@@ -29,12 +29,12 @@
 ##       unchanged; 607,363 of `lastNl`'s 1,106,184 units are gone (Z3
 ##       5.1, in S8bp's term order; (3) moves the rest of its search).
 ##   (3) a query's terms are made in its own context in one order, a
-##       function of the query alone (`queryTermOrder`: the roots in
-##       order, each term's arguments last to first, children first); Z3's
-##       search, so its wall time per unit and its units, follows that
-##       order (and the process's Z3 memory, S8cj; the order is what the
-##       query itself fixes) (`r4_strip`'s binary 133 and 122 CPU seconds against 143 and
-##       129, side by side, Z3 5.1);
+##       function of the query alone; Z3's search, so its wall time per
+##       unit and its units, follows that order (and the process's Z3
+##       memory, S8cj). RFC-0016 S8ci replaced S8by's order (the roots in
+##       order, each term's arguments last to first) with Z3's own
+##       translation order of the roots, the least Z3 units over the
+##       heaviest solver-bound suites; pinned by `lastNl`'s units;
 ##   (4) a regex membership below the top level -- under a disjunction
 ##       (`a or not s.contains(re"b")`), in an `ite` branch, under a `not`
 ##       -- is merged with the memberships of the same string that hold
@@ -256,25 +256,22 @@ suite "S8by (2): no (1b) or (1c) after a facts-first SAT":
 
 # ---- (3) the order a query's terms are made in --------------------------------
 
-suite "S8by (3): a query's terms in one order, the query's own":
+suite "S8by (3), RFC-0016 S8ci: a query's terms in Z3's own translation order":
 
-  test "queryTermOrder: roots in order, arguments last to first, each once":
-    let ctx = newContext()
-    let x = mkIntVar(ctx, "x")
-    let y = mkIntVar(ctx, "y")
-    let zero = mkInt(ctx, 0)
-    let two = mkInt(ctx, 2)
-    let sum = x + y
-    let prod = y * two
-    let r0 = sum > zero
-    let r1 = prod == x
-    var got: seq[int]
-    for t in queryTermOrder(ctx, [r0, r1]): got.add astId(ctx, t.raw)
-    var want: seq[int]
-    for t in [toAnyAst(zero), toAnyAst(y), toAnyAst(x), toAnyAst(sum),
-              toAnyAst(r0), toAnyAst(two), toAnyAst(prod), toAnyAst(r1)]:
-      want.add astId(ctx, t.raw)
-    check got == want
+  test "lastNl's walk spends what Z3's translation order costs, on both Z3s":
+    ## RFC-0016 S8ci: `ownContextSolver` translates the query's roots as
+    ## one vector, so its terms are made in the own context in Z3's own
+    ## translation order; no Nim-side order. The order moves the search,
+    ## so the units: `lastNl`'s walk took 1,026,624 units (Z3 5.1) and
+    ## 1,219,607 (4.13.4) in S8by's order (roots in order, arguments last
+    ## to first), 498,867 and 676,321 sorted by the walk context's ids.
+    let w = walk(lastNl, "s8by_lastnl", smallCap)
+    check w.status == sxSat
+    if z351: check w.units == 498_821
+    else: check w.units == 786_466
+
+  test "symexWalkerVersion >= 379 (S8ci: Z3's translation order)":
+    check parseInt(symexWalkerVersion) >= 379
 
 # ---- (4) memberships below the top level -------------------------------------
 

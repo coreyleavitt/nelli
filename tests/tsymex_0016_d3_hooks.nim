@@ -15,5 +15,9 @@ suite "RFC-0016 D3c-2: lowerHooks":
       checkpoint name
       check not f.isNil
       inc n
-    check n == 5
+    # The exact inventory: lower, lowerClosureCall, currentFrameId,
+    # registerCapCell, depositStrIndexOob and (INT-87, 9e37524b)
+    # depositUndefinedOob. The sixth is filled in `runtime.nim`'s
+    # `lowerHooks = LowerHooks(...)`; a seventh must be named here.
+    check n == 6
 

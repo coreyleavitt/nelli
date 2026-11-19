@@ -1424,7 +1424,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 K2 c_longdouble sentinel (an element, slot, dereference or
     ## cast of the type declines like its other sites): 459->460.
     ## RFC-0016 int6 (a store into a float range is checked, NaN is a value
-    ## of one; 461-462 reserved by sibling branches): 460->463.
+    ## of one; an if/case/block/conversion/field container of c_longdouble
+    ## declines; 461-462 reserved by sibling branches): 460->463.
     check symexWalkerVersion == "463"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

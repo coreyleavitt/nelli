@@ -159,29 +159,50 @@ proc isBuiltinTypeHead*(head: NimNode; names: openArray[string]): bool =
     return false
   head.kind == nnkIdent or isStdlibTypeSym(head)
 
-proc typeTreeNamesLongDouble(t: NimNode): bool =
+proc typeTreeNamesLongDouble(t: NimNode; seen: var seq[string]): bool =
   ## RFC-0016 K2. True iff the type tree `t` names `c_longdouble` anywhere
   ## (`array[2, c_longdouble]`, `ptr c_longdouble`, `(c_longdouble, int)`).
+  ## int6: a named type is expanded (`type P = array[2, c_longdouble]`, an
+  ## object with such a field), each once (`seen`: a recursive type ends).
   if t == nil: return false
   if isBuiltinTypeHead(t, ["c_longdouble", "clongdouble"]): return true
-  if t.kind == nnkSym: return false  # a named type is not expanded here
+  if t.kind == nnkSym:
+    if t.symKind != nskType: return false
+    let key = t.strVal & "@" & $t.lineInfoObj
+    if key in seen: return false
+    seen.add key
+    return typeTreeNamesLongDouble(t.getTypeImpl, seen)
   for c in t:
-    if typeTreeNamesLongDouble(c): return true
+    if typeTreeNamesLongDouble(c, seen): return true
   false
+
+proc typeTreeNamesLongDouble(t: NimNode): bool =
+  var seen: seq[string]
+  typeTreeNamesLongDouble(t, seen)
 
 proc containerHoldsLongDouble(n: NimNode): bool =
   ## RFC-0016 K2. An element, tuple slot or dereference reads a value out of
   ## its container, and the element node carries no type of its own to read:
-  ## true iff the container's root symbol (or call result) is typed with
-  ## `c_longdouble` somewhere in its structure. Over-approximate on purpose
-  ## (a tuple `(c_longdouble, int)` indexed at the `int` slot is true too):
-  ## the caller declines, which is the safe side.
+  ## true iff the container is typed with `c_longdouble` somewhere in its
+  ## structure. Over-approximate on purpose (a tuple `(c_longdouble, int)`
+  ## indexed at the `int` slot is true too): the caller declines, which is the
+  ## safe side. The container is read off the nearest symbol on the way to
+  ## the root: a field (`b.xs[i]`, the field's type), the root symbol, or a
+  ## call's result. int6: a root that yields one of its branches (an `if`,
+  ## `case`, `block` or statement-list expression, a conversion) is read
+  ## through each value it may yield (probed:
+  ## `tsymex_0016_k2_longdouble_sentinel`, where each of them reached
+  ## `weInternalWalkerFault` past a false here).
   var r = n
   while r != nil and r.kind in {nnkBracketExpr, nnkDerefExpr, nnkHiddenDeref,
                                  nnkHiddenAddr, nnkAddr, nnkDotExpr,
                                  nnkCheckedFieldExpr, nnkPragmaExpr,
-                                 nnkPar} and r.len > 0:
-    r = r[0]
+                                 nnkPar, nnkHiddenStdConv, nnkHiddenSubConv} and
+        r.len > 0:
+    if r.kind == nnkDotExpr and r.len == 2 and r[1].kind == nnkSym and
+       r[1].symKind == nskField:
+      return typeTreeNamesLongDouble(r[1].getTypeInst)
+    r = if r.kind in {nnkHiddenStdConv, nnkHiddenSubConv}: r[^1] else: r[0]
   if r == nil: return false
   case r.kind
   of nnkSym:
@@ -192,10 +213,27 @@ proc containerHoldsLongDouble(n: NimNode): bool =
   of nnkCall, nnkCommand, nnkInfix, nnkPrefix:
     if r.len == 0 or r[0].kind != nnkSym or
        r[0].symKind notin {nskProc, nskFunc, nskMethod, nskConverter}:
-      return false
+      return false  # k2: n/a: a callee that is no routine symbol is a closure value, whose call the walk declines before any element of its result is read (probed: tsymex_0016_k2_longdouble_sentinel, closure call)
     let sig = r[0].getTypeInst
     sig.kind == nnkProcTy and sig.len > 0 and sig[0].kind == nnkFormalParams and
       sig[0].len > 0 and typeTreeNamesLongDouble(sig[0][0])
+  of nnkConv, nnkCast:
+    r.len == 2 and (typeTreeNamesLongDouble(r[0]) or
+                    containerHoldsLongDouble(r[1]))
+  of nnkIfExpr, nnkIfStmt:
+    for b in r:
+      if b.len > 0 and containerHoldsLongDouble(b[^1]): return true
+    false
+  of nnkCaseStmt:
+    for i in 1 ..< r.len:
+      if r[i].kind in {nnkOfBranch, nnkElse, nnkElifBranch} and r[i].len > 0 and
+         containerHoldsLongDouble(r[i][^1]):
+        return true
+    false
+  of nnkBlockExpr, nnkBlockStmt:
+    r.len == 2 and containerHoldsLongDouble(r[1])
+  of nnkStmtListExpr, nnkStmtList:
+    r.len > 0 and containerHoldsLongDouble(r[^1])
   else:
     false  # k2: n/a: a literal or constructor root holds values the program wrote, never a c_longdouble the declared sites have not declined
 
@@ -241,7 +279,7 @@ proc isLongDoubleTyped*(n: NimNode): bool =
       return false
     t = sig[0][0]
   else:
-    return false  # k2: n/a: a literal, a statement or a type node carries no c_longdouble value; the value-producing kinds (an if, a case, a block) yield one of their branches' symbols, which are read here (probed: tsymex_0016_k2_longdouble_sentinel)
+    return false  # k2: n/a: probed, a literal, a statement or a type node carries no c_longdouble value; an if, case, block or statement-list expression yields one of its branches, each read here on its own node, and an element or dereference of one is read through containerHoldsLongDouble (tsymex_0016_k2_longdouble_sentinel: if/block/case/stmt-list roots, an if dereferenced, named and field containers, call roots)
   if t != nil and t.kind == nnkVarTy and t.len == 1: t = t[0]
   t != nil and isBuiltinTypeHead(t, ["c_longdouble", "clongdouble"])
 

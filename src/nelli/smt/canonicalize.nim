@@ -1363,6 +1363,12 @@ const renderAsChoicesVersion* = "12"
   ##   a plain `float64` routine and stays unchecked. Nim's check is `x < lo
   ##   or x > hi`, so NaN is a value of a float range (`rangeCondsIfNeeded`),
   ##   which INT-77 had excluded.
+  ## - RFC-0016 int6 c_longdouble containers (same bump): an element or
+  ##   dereference whose container is an `if`, `case`, `block` or
+  ##   statement-list expression, a conversion, a field, or of a named
+  ##   container type is read as the container's type
+  ##   (`containerHoldsLongDouble`), and declines `feUnsupportedParamType`;
+  ##   each was a `weInternalWalkerFault`. No key bytes change.
 
 const symexWalkerVersion* = "463"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

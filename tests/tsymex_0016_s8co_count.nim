@@ -10,6 +10,7 @@
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+from ./s8cu_helpers import pinFind
 
 const alpha = ["a", "b", "\xe9", "c"]
 
@@ -110,18 +111,18 @@ suite "S8co item 9: count of a set[char], overlapping count":
 
   test "a set[char] count":
     check parseInt(symexWalkerVersion) >= 387
-    check symexFind(setPinned, tLabel("co_cnt_set_pin")).status == sxUnsat
-    check symexFind(setPinnedSat, tLabel("co_cnt_set_pin_sat")).status == sxSat
+    check pinFind(setPinned, tLabel("co_cnt_set_pin")).status == sxUnsat
+    check pinFind(setPinnedSat, tLabel("co_cnt_set_pin_sat")).status == sxSat
     check symexFind(setAgrees, tLabel("co_cnt_set_ref")).status != sxSat
-    check symexFind(setSat, tLabel("co_cnt_set_sat")).status == sxSat
-    check symexFind(setBound, tLabel("co_cnt_set_bound")).status == sxUnsat
-    check symexFind(setNone, tLabel("co_cnt_set_none")).status == sxUnsat
+    check pinFind(setSat, tLabel("co_cnt_set_sat")).status == sxSat
+    check pinFind(setBound, tLabel("co_cnt_set_bound")).status == sxUnsat
+    check pinFind(setNone, tLabel("co_cnt_set_none")).status == sxUnsat
 
   test "an overlapping count":
-    check symexFind(overPinned, tLabel("co_cnt_over_pin")).status == sxUnsat
-    check symexFind(overPinnedSat, tLabel("co_cnt_over_pin_sat")).status == sxSat
-    check symexFind(overPinnedAba, tLabel("co_cnt_over_pin_aba")).status == sxUnsat
+    check pinFind(overPinned, tLabel("co_cnt_over_pin")).status == sxUnsat
+    check pinFind(overPinnedSat, tLabel("co_cnt_over_pin_sat")).status == sxSat
+    check pinFind(overPinnedAba, tLabel("co_cnt_over_pin_aba")).status == sxUnsat
     check symexFind(overAgrees, tLabel("co_cnt_over_ref")).status != sxSat
-    check symexFind(overSat, tLabel("co_cnt_over_sat")).status == sxSat
+    check pinFind(overSat, tLabel("co_cnt_over_sat")).status == sxSat
     check symexFind(overVsNon, tLabel("co_cnt_over_non")).status != sxSat
-    check symexFind(overNone, tLabel("co_cnt_over_none")).status == sxUnsat
+    check pinFind(overNone, tLabel("co_cnt_over_none")).status == sxUnsat

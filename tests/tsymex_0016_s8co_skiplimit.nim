@@ -13,6 +13,7 @@ import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/regex_parser
 import ./s8bt_harness/limit_oracle
+from ./s8cu_helpers import pinFind
 
 const
   patterns = [
@@ -105,5 +106,5 @@ suite "S8co item 4: a kept ignore_skip_arg under a limit":
     check parseInt(symexWalkerVersion) >= 380
     let rx = re"(*LIMIT_MATCH=5)(?:a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x)+|c"
     check "abab".find(rx) == -1
-    check symexFind(keptSym, tLabel("co_kept")).status == sxSat
-    check symexFind(keptSymNo, tLabel("co_kept_no")).status == sxUnsat
+    check pinFind(keptSym, tLabel("co_kept")).status == sxSat
+    check pinFind(keptSymNo, tLabel("co_kept_no")).status == sxUnsat

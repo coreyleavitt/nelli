@@ -78,8 +78,8 @@ suite "S8co: OP_BRAMINZERO's count on the 8.37 JIT":
     check parseInt(symexWalkerVersion) >= 380
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
-    check symexFind(bzSym, tLabel("co_bz")).status == sxSat
-    check symexFind(bzSymNo, tLabel("co_bz_no")).status == sxUnsat
+    check pinFind(bzSym, tLabel("co_bz")).status == sxSat
+    check pinFind(bzSymNo, tLabel("co_bz_no")).status == sxUnsat
     check symexFind(bzClass, tLabel("co_bz_class")).status notin {sxSat, sxUnsat}
 
   test "every limited call is read":

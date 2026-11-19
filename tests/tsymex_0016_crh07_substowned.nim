@@ -20,6 +20,7 @@
 import std/[unittest, re, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+from ./s8cu_helpers import pinFind
 
 proc countPlain(s: string) =
   # one definition: `count` alone
@@ -51,14 +52,14 @@ suite "RFC-0016 CRH-07: substituted definition terms are owned":
     check "ab".replace(re"a", "b").replace(re"b", "c") == "cc"
 
   test "count alone":
-    check symexFind(countPlain, tLabel("crh07_plain")).status == sxSat
+    check pinFind(countPlain, tLabel("crh07_plain")).status == sxSat
 
   test "count over a replace value":
-    check symexFind(countNo, tLabel("crh07_count_no")).status == sxUnsat
-    check symexFind(countBy, tLabel("crh07_count_by")).status == sxSat
+    check pinFind(countNo, tLabel("crh07_count_no")).status == sxUnsat
+    check pinFind(countBy, tLabel("crh07_count_by")).status == sxSat
 
   test "a replace over a replace value":
-    check symexFind(nested, tLabel("crh07_nested")).status == sxSat
+    check pinFind(nested, tLabel("crh07_nested")).status == sxSat
     # No subject reaches it. Z3 leaves the substituted query undecided
     # (`sxUnknown`): a precision limit of the nested term, not this slice's.
     # What this pins is that it is never a false `sxSat` and never a crash.

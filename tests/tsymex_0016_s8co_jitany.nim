@@ -14,6 +14,7 @@ import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
 import ./s8bt_harness/member
+from ./s8cu_helpers import pinFind
 
 const
   heads = ["\\x{85}b", "\\x{85}\\x{85}", "\\sb", "(?:\\sb|\\x{85})b",
@@ -85,5 +86,5 @@ suite "S8co item 7: (*ANY) in UTF mode under the JIT's scan":
     check parseInt(symexWalkerVersion) >= 380
     overridePcreLib("8.37 2015-04-28", true)
     defer: clearPcreLibOverride()
-    check symexFind(anyHit, tLabel("co_any_hit")).status == sxSat
-    check symexFind(anyNo, tLabel("co_any_no")).status == sxUnsat
+    check pinFind(anyHit, tLabel("co_any_hit")).status == sxSat
+    check pinFind(anyNo, tLabel("co_any_no")).status == sxUnsat

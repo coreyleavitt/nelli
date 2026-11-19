@@ -23,6 +23,8 @@ import nelli/symex
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
+from ./s8cu_helpers import nativeRun, hitsTarget
+from ./s8cu_helpers import pinFind
 
 const
   # Attempt 1 runs n SKIP:x (no MARK:x), re-runs with the count n, then
@@ -95,6 +97,8 @@ suite "S8co item 6b: the kept SKIP:NAME count past argCap":
     let r = symexFind(inherentNoOcc, tLabel("co_sat_noocc"))
     echo "  walker: ", r.status
     check r.status != sxUnsat
+    # and natively `x` reaches the target, so unsat would be a wrong verdict
+    check nativeRun(inherentNoOcc("x")).hitsTarget(tLabel("co_sat_noocc"))
 
   test "within an attempt, the saturated count never reads as covered":
     var bad: seq[string]

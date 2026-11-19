@@ -42,6 +42,10 @@ const
      "the generator's own suite: every generated program is pinned by the " &
      "`pinExactImpl` call `s0016_k8a_gen` writes into its source; the " &
      "verdict words here are record fields of planted fixtures"),
+    ("tsymex_0016_k8b_pairs.nim",
+     "it runs no walk: its verdict words are the `walker` field of a " &
+     "planted record fixture (`pvExact`, \"sxSat\"), a string the pairwise " &
+     "figure reads, so there is no SUT to run natively"),
     ("tsymex_rfc0005_s1_lattice.nim",
      "its one verdict is on a hand-built `SymexProgram` (a bare target node), " &
      "an IR with no Nim source, so there is no native program to run; the " &

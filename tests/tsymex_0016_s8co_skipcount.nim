@@ -19,6 +19,7 @@ import nelli/symex
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
 import nelli/smt/pcre_engine
+from ./s8cu_helpers import pinFind
 
 const
   unbounded = "(?:a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x)+|c"
@@ -67,8 +68,8 @@ suite "S8co: SKIP:NAME counts past the old concrete cap":
 
   test "the walker decides a call past the old cap":
     check find(w, re(unbounded)) == 302
-    check symexFind(atPoint, tLabel("co_skip_at")).status == sxSat
-    check symexFind(notAtPoint, tLabel("co_skip_not")).status == sxUnsat
+    check pinFind(atPoint, tLabel("co_skip_at")).status == sxSat
+    check pinFind(notAtPoint, tLabel("co_skip_not")).status == sxUnsat
 
   test "search languages of a re-run past argCap":
     var bad: seq[string]

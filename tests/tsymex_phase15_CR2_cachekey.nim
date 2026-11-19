@@ -1434,6 +1434,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## system's integer `*=` is the build's; 466 reserved): 465->467.
     ## RFC-0016 int6-w (a routine whose module text on disk disagrees with
     ## the position the compiler parsed declines `feCheckOption`): 467->468.
+    ## RFC-0016 int6 D1 (a command-syntax call is a call in expression
+    ## position; 459 reserved): 458->460.
+    ## RFC-0016 int6 D1b (the walk budget charges each query's own-context
+    ## solver; 461-463 reserved): 460->464.
+    ## RFC-0016 int6 D1d (a pruning check a kept model satisfies is not
+    ## searched; 465 reserved): 464->466.
     check symexWalkerVersion == "468"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":

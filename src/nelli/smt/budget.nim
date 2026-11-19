@@ -185,8 +185,10 @@ type
     walkRLimit*: uint = 1_000_000_000
       ## RFC-0016 K7. The total work units every solver check of ONE walk may
       ## spend together (Z3 `rlimit` units plus, at `walkerTermUnits` per term
-      ## visit, the walker's own query construction and fact passes, so the
-      ## budget bounds wall time and not only solver time); `0` opts out (unbounded). The
+      ## visit, the walker's own query construction and fact passes, plus, at
+      ## `walkerContextUnits` per check's own Z3 context, each query's fixed
+      ## cost, so the budget bounds wall time and not only solver time, for a
+      ## walk of many small queries too: RFC-0016 int6 D1b); `0` opts out (unbounded). The
       ## per-query bounds above do not bound the SUM: a loop nest whose
       ## unrolled paths multiply (`for l in s.splitLines` over an unbounded
       ## `string`: three nested loops, each unrolled 5x, the live set 1, 33,
@@ -213,6 +215,28 @@ type
       ## to the cap. The largest walks overall (175.3M, then 120,601,918
       ## `label:ti_tuple` and 103,233,480 `label:t`, both `sxUnknown`) were
       ## undecided anyway. Re-measure when the corpus or the solver changes.
+      ##
+      ## Re-measured for int6 D1b (the per-context charge, `walkerContextUnits`;
+      ## c and cpp agree): `tsymex_0016_k9cg_unbacked_p`'s `FilterIt` walk, a
+      ## k-unroll of about 50k small queries, spent 684,800,652 units before the
+      ## charge and ended `sxSat`, which made it the largest decided walk by
+      ## far, 3.9x the 175.3M above and 68% of this cap. With each query's
+      ## context charged it spends 1,019,644,994 and ends on the cap
+      ## (`ckWalkWork`, `sxUnknown`, untrusted), which is the intended outcome:
+      ## its wall time, not its solver time, was the unbounded part. No other
+      ## walk in the measured suites moved verdict. The largest decided walk is
+      ## again `label:prod12`, now 175,363,037 (52,070 walker units, of which
+      ## 50,000 are its two contexts), so the default is still about 5.7x the
+      ## largest decided walk.
+      ##
+      ## Re-measured for int6 D1d (a pruning check a kept model satisfies is
+      ## not searched, `refuteStatus`; `walkerContextUnits` re-fit at 20,000):
+      ## the `FilterIt` walk still ends on this cap, now at 1,000,001,541
+      ## units (934,387,360 walker units), and gets further before it: its
+      ## unroll 4 is decided in 86.0M (was 141.4M). Unroll 5 (the default
+      ## `maxLoopUnwind`) is decided, `sxSat` and trusted, at 1,188,988,028
+      ## units (354 s on c, podman), 19% past this default; the cap is kept,
+      ## not raised to fit one walk.
     tailWalkCappedChecks*: int = 5
       ## RFC-0016 W3-z R9. The work units the whole-run gate's tail walk
       ## (`verifyTailDefined`, one per label `sxSat` and per replay candidate)

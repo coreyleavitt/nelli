@@ -1403,6 +1403,32 @@ const renderAsChoicesVersion* = "12"
   ##   binary never raises. A user routine whose text on disk ends before
   ##   its position, or defines its name but not starting there
   ##   (`textDisagrees`), now declines `feCheckOption`. No key bytes change.
+  ## - RFC-0016 int6 D1 (458->460; 459 is reserved on another branch): a
+  ##   command (`f x`) is a call in expression position too (`parseExpr`),
+  ##   as it always was in statement position, and the call-shape
+  ##   recognisers (`isMarkerCall`, the `addr` and `low`/`high` shapes, the
+  ##   `for` iterator shapes, `calleeReturnsVar`) read both kinds. Semantic
+  ##   analysis keeps the kind the source spelled: Nim 2.2.10's `filterIt`
+  ##   ends in `move result`, and every path through it declined with
+  ##   `feUnsupportedExprKind`, so no hit was clean and a `seq[seq[int]]`
+  ##   parameter's walk enumerated every unwound path (past 900 s). No key
+  ##   bytes change.
+  ## - RFC-0016 int6 D1b (460->464; 461-463 are reserved on other branches):
+  ##   `walkRLimit` charges each own-context solver a fixed
+  ##   `walkerContextUnits` (25,000) beside its Z3 units and term visits: the
+  ##   context, solver, check overhead and teardown no count saw, measured at
+  ##   6.56 ms a query. A k-unroll of small queries (the k9cg FilterIt probe)
+  ##   was charged about a quarter of its wall, so the budget did not bound
+  ##   it and the walk ran to the stall backstop; it now ends on the budget
+  ##   (`ckWalkWork`, `beBudgetExhaustedPrune`). A walk the budget cut
+  ##   before is cut sooner, so verdicts move. No key bytes change.
+  ## - RFC-0016 int6 D1d (464->466; 465 is reserved on another branch): a
+  ##   pruning check that a model kept from an earlier SAT search satisfies
+  ##   is SAT without a search (`refuteStatus`), `mergeMemberships` returns a
+  ##   query with no membership literal at once, and `walkerContextUnits` is
+  ##   re-measured at 20,000. A walk the budget cut before spends less and
+  ##   may now decide (the k9cg FilterIt shape's unroll 4: 141.4M units to
+  ##   86.0M), so verdicts move. No key bytes change.
 
 const symexWalkerVersion* = "468"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own

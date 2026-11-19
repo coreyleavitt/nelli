@@ -235,10 +235,14 @@ proc n41ClosureProcParam(n: int) =
       let f = proc(g: proc(x: int): int {.nimcall.}): int = n
       symexTarget("n41_closure_proc_param")
 
+var n41Sink: int
+  ## RFC-0016 INT-86: `discard p.tp` is not loaded (walker 447 walks
+  ## nothing for it), so the read stores a part of the value to stay live.
+
 proc n41HeapReadBlock() =
   let p = n41MkHeap()
   if p != nil:
-    discard p.tp
+    n41Sink = p.tp[0]
     symexTarget("n41_heap_read_block")
 
 suite "symex round-6 N41 -- compound-value sort derivation: classified decline, not a whole-run crash":

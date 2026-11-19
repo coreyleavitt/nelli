@@ -253,34 +253,41 @@ type
     next: ref N43BadHeap
     m: int
 
+var n43IntSink: int
+var n43OwnSink: Atomic[bool]
+  ## RFC-0016 INT-86: `discard p.next.field` is not loaded (walker 447 walks
+  ## nothing for it: with both refs non-nil each label below is a
+  ## native-confirmed sxSat), so each read stores its value, or a
+  ## container's length, in a global to stay a live dereference.
+
 proc n43HeapGoodBlock(p: ref N43Outer) =
   if p != nil:
     if p.next != nil:
-      discard p.next.good
+      n43IntSink = p.next.good
       symexTarget("n43_heap_good")
 
 proc n43HeapTableKeyBlock(p: ref N43Outer) =
   if p != nil:
     if p.next != nil:
-      discard p.next.tableKeyBad
+      n43IntSink = p.next.tableKeyBad.len
       symexTarget("n43_heap_table_key")
 
 proc n43HeapTableValBlock(p: ref N43Outer) =
   if p != nil:
     if p.next != nil:
-      discard p.next.tableValBad
+      n43IntSink = p.next.tableValBad.len
       symexTarget("n43_heap_table_val")
 
 proc n43HeapSetBlock(p: ref N43Outer) =
   if p != nil:
     if p.next != nil:
-      discard p.next.setBad
+      n43IntSink = p.next.setBad.len
       symexTarget("n43_heap_set")
 
 proc n43HeapOwnershipBlock(p: ref N43Outer) =
   if p != nil:
     if p.next != nil:
-      discard p.next.ownBad
+      n43OwnSink = p.next.ownBad
       symexTarget("n43_heap_ownership")
 
 suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded allocateSym reach)":

@@ -86,9 +86,15 @@ type
     ## this pin on the same `heUnsupportedPointeeRead` fresh-symbol site.
     s: S0Dist
 
+var s0Sink: int
+  ## RFC-0016 INT-86: a discarded read the C compiler does not load is no
+  ## dereference (`discard p.s` walks nothing since walker 447), so the read
+  ## stays live by storing a part of the value. The read is still the
+  ## run's only decline and the target still ignores its value.
+
 proc s0DeadFreshSymbol(p: S0DeadNode, n: int) =
   if p != nil:
-    discard p.s
+    s0Sink = p.s.x
   if n == 5 and n == 6:
     symexTarget("s0_dead_fresh_symbol")
 

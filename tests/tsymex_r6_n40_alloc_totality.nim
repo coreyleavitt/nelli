@@ -119,10 +119,14 @@ proc n40MkBadHeap(): ref BadTableHeap {.symexOpaque.} =
 proc n40MkBadTable(): Table[(int, int), string] {.symexOpaque.} =
   discard
 
+var n40Sink: int
+  ## RFC-0016 INT-86: `discard p.t` is not loaded (walker 447 walks nothing
+  ## for it), so the read stores the table's length to stay live.
+
 proc n40HeapReadBlock() =
   let p = n40MkBadHeap()
   if p != nil:
-    discard p.t
+    n40Sink = p.t.len
     symexTarget("n40_heap_read_block")
 
 proc n40HeapWriteBlock() =

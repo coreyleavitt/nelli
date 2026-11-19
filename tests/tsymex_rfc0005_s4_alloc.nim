@@ -93,10 +93,14 @@ type
 ## The exhibit shape (S0 pin 1's twin): a string field read through a `ref`
 ## is the only degrade; the target is a value-independent contradiction over
 ## a clean `int`.
+var s4Sink: string
+  ## RFC-0016 INT-86/INT-92: a read whose value nothing uses is not loaded
+  ## (`discard p.s`, or `let s = p.s` only discarded, walks nothing), so the
+  ## read stores a part of the value here to stay a live dereference.
+
 proc s4DeadFreshSymbol(p: S4Node, n: int) =
   if p != nil:
-    let s = p.s   # kept: a discarded read is not loaded (RFC-0016 INT-86)
-    discard s
+    s4Sink = p.s.x
   if n == 5 and n == 6:
     symexTarget("s4_dead_fresh_symbol")
 

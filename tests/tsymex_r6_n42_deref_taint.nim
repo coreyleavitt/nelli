@@ -118,6 +118,14 @@ type
     next: ref N42GoodHeap
     m: int
 
+var n42OwnSink: Atomic[bool]
+var n42LenSink: int
+  ## RFC-0016 INT-86: a discarded read the C compiler does not load is no
+  ## dereference (`discard p.next.t` walks nothing since walker 447: with
+  ## both refs non-nil the label behind it is a native-confirmed sxSat), so
+  ## each degrading read below stores its value, or the table's length, in
+  ## a global to stay live.
+
 proc n42OwnBefore(p: ref N42OuterOwn) =
   if p != nil:
     symexTarget("n42_own_before")
@@ -125,7 +133,7 @@ proc n42OwnBefore(p: ref N42OuterOwn) =
 proc n42OwnAfter(p: ref N42OuterOwn) =
   if p != nil:
     if p.next != nil:
-      discard p.next.w
+      n42OwnSink = p.next.w
       symexTarget("n42_own_after")
 
 proc n42TableBefore(p: ref N42OuterTable) =
@@ -135,7 +143,7 @@ proc n42TableBefore(p: ref N42OuterTable) =
 proc n42TableAfter(p: ref N42OuterTable) =
   if p != nil:
     if p.next != nil:
-      discard p.next.t
+      n42LenSink = p.next.t.len
       symexTarget("n42_table_after")
 
 # =============================================================================
@@ -194,7 +202,7 @@ proc n42OwnAfterNested(p: ref N42OuterOwn) =
     if p.next != nil:
       for i in 0 ..< 1:
         block:
-          discard p.next.w
+          n42OwnSink = p.next.w
           symexTarget("n42_own_after_nested")
 
 proc n42TableAfterNested(p: ref N42OuterTable) =
@@ -202,7 +210,7 @@ proc n42TableAfterNested(p: ref N42OuterTable) =
     if p.next != nil:
       for i in 0 ..< 1:
         block:
-          discard p.next.t
+          n42LenSink = p.next.t.len
           symexTarget("n42_table_after_nested")
 
 suite "symex N42 -- itUninterp (ownership) heap-deref read":
@@ -305,7 +313,10 @@ proc n44NonOpaqueTableSink(x: Table[(int, int), string]): bool =
   ## walk arm), which would make a call-argument probe built around one
   ## vacuously pass regardless of whether the ARGUMENT deref itself is what
   ## taints the path. An ordinary (inlined) proc has no such blanket taint.
-  true
+  ## RFC-0016 INT-92: a by-value formal the callee never names is dead once
+  ## the call is inlined, and its actual is not loaded; the body names `x`
+  ## so the argument's read stays live.
+  x.len >= 0
 
 proc n44TableWhileGuard(p: ref N42OuterTable) =
   if p != nil:

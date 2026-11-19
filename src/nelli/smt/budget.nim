@@ -233,9 +233,10 @@ type
       ## not searched, `refuteStatus`; `walkerContextUnits` re-fit at 20,000):
       ## the `FilterIt` walk still ends on this cap, now at 1,000,001,541
       ## units (934,387,360 walker units), and gets further before it: its
-      ## unroll 4 is decided in 86.0M (was 141.4M). Unroll 5 extrapolates to
-      ## about 1.2G, past this default; the cap is kept, not raised to fit
-      ## one walk.
+      ## unroll 4 is decided in 86.0M (was 141.4M). Unroll 5 (the default
+      ## `maxLoopUnwind`) is decided, `sxSat` and trusted, at 1,188,988,028
+      ## units (354 s on c, podman), 19% past this default; the cap is kept,
+      ## not raised to fit one walk.
     tailWalkCappedChecks*: int = 5
       ## RFC-0016 W3-z R9. The work units the whole-run gate's tail walk
       ## (`verifyTailDefined`, one per label `sxSat` and per replay candidate)

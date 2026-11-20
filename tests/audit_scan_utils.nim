@@ -60,7 +60,9 @@ const
     # RFC-0016 INT-34 B3: making and forking paths (region R0's procedures).
     "walk_path.nim",
     # RFC-0016 INT-34 B4: lowering an expression (region R1, `lower`).
-    "lower_expr.nim"]
+    "lower_expr.nim",
+    # RFC-0016 INT-34 B5: solving a path (region R2, `trySolve`).
+    "walk_solve.nim"]
     ## Every file that holds, or has held, code that was `runtime.nim`'s. A
     ## source audit that pins "the walker's sites of kind K" counts K over THIS
     ## set, never over a hand-picked subset: a file move then changes which

@@ -31,7 +31,8 @@ REGIONS = [
     # INT-34 B4: R1 (`lower`/`lowerBool`, the C4 literal lowering) is
     # `lower_expr.nim`'s now, with the R0 run state it reads; `lowerHofCall`
     # (R7) is reached through `lowerExprHooks`.
-    ("R2 solving", "# ---- Path / solve / walk"),
+    # INT-34 B5: R2 (`trySolve`, `pathInfeasible`, the witness, the solver
+    # budget) is `walk_solve.nim`'s now, with the R0 run state it reads.
     # INT-34 B2: the frame types and `WalkCtx` are `walk_types.nim`'s now;
     # R3 starts at the first routine that takes a `WalkCtx`.
     ("R3 frames, WalkCtx", "proc degrade(w: var WalkCtx"),

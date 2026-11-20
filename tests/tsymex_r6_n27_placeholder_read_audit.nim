@@ -147,9 +147,13 @@ const
   ## RFC-0016 INT-34 B4: region R1 (`lower`) moved into `lower_expr.nim` with
   ## its 56 marked lines: runtime.nim 118 -> 62, lower_expr.nim 0 -> 56. The
   ## family total is unchanged.
-  markerPins = [("runtime.nim", 62), ("runtime_strings.nim", 4),
+  ## RFC-0016 INT-34 B5: region R2 (`trySolve`, the witness) moved into
+  ## `walk_solve.nim` with its 24 marked lines: runtime.nim 62 -> 38,
+  ## walk_solve.nim 0 -> 24. The family total is unchanged.
+  markerPins = [("runtime.nim", 38), ("runtime_strings.nim", 4),
                 ("heap_model.nim", 23), ("runtime_heap.nim", 11),
-                ("symval.nim", 2), ("lower_expr.nim", 56)]
+                ("symval.nim", 2), ("lower_expr.nim", 56),
+                ("walk_solve.nim", 24)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"

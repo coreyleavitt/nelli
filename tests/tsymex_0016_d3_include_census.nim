@@ -525,11 +525,13 @@ suite "RFC-0016 D3: the include surface":
     # runtime unit, so the pinned set did not change with the move. INT-34
     # B3: likewise the routines that moved to `walk_path.nim`, and B4 the
     # names that moved to `lower_expr.nim` (`callGuardedNames`,
-    # `entryValueOf`, `storeSeqElem`, ...): the include reaches them through
-    # `runtime.nim`'s import.
+    # `entryValueOf`, `storeSeqElem`, ...), and B5 those that moved to
+    # `walk_solve.nim` (`currentVariantHeaps`, `ptrSelKey`, ...): the include
+    # reaches them through `runtime.nim`'s import.
     let priv = definedNames(rt) + definedNames(readSmt("walk_types.nim")) +
                definedNames(readSmt("walk_path.nim")) +
-               definedNames(readSmt("lower_expr.nim"))
+               definedNames(readSmt("lower_expr.nim")) +
+               definedNames(readSmt("walk_solve.nim"))
     let text = readSmt("runtime_heap.nim")
     let got = referenced(text, priv - definedNames(text))
     var pinned: HashSet[string]
@@ -1242,6 +1244,150 @@ suite "RFC-0016 INT-34 B4: the lower_expr leaf":
       checkpoint n
       check n in ld
     for n in ld:
+      if n in perModuleNames: continue
+      checkpoint n
+      check n notin defs
+
+const
+  ## RFC-0016 INT-34 B5. What `walk_solve.nim` may import: std, `z3`, and the
+  ## leaves below it (the value core, the walk state and types, the path and
+  ## lowering leaves, the heap algebra, the string support and the regex
+  ## parser the point check reads).
+  slvAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
+               "std/algorithm", "std/math", "std/monotimes", "std/strutils",
+               "std/importutils", "std/exitprocs", ## the query-stats summary
+               "z3", "./walk_log", "./types",
+               "./abstraction", "./symval", "./walk_state", "./walk_types",
+               "./walk_path", "./lower_expr", "./regex_parser", "./z3check",
+               "./heap_model", "./string_lower_support", "./runtime_strings",
+               "../thread_state"]
+  ## A sample of what B5 moved out of `runtime.nim`; the test below checks
+  ## every name `walk_solve.nim` defines, this list keeps the intent legible.
+  slvMoved = ["trySolve", "pathInfeasible", "pathRoots", "globalRoots",
+             "extractWitness", "modelPins", "buildHeapSnapshot",
+             "checkCapped", "checkExact", "querySolver", "ptrSelKey",
+             "ptrIdxKey", "ptrKeyKey", "ptrObjKey", "ptrTargetCode",
+             "loopArmInfeasible", "satModels", "walkWorkExhausted",
+             "currentVariantHeaps", "currentClosureCallAxioms"]
+  ## The names `runtime.nim` exported before the move: re-exported by name,
+  ## and no other (the last ten under `-d:symexQueryStats` only).
+  slvPublic = ["currentVariantHeaps", "heapWitnessNominalRegistry",
+              "currentClosureCallAxioms", "extractionErrors",
+              "unknownExnWarnings", "maxWitnessSeqLen", "ptrTargetCode",
+              "ptrAimPrefix", "symexTargetSolveStats", "ownContextUnits",
+              "symexZ3CallCount", "seqLenBoundFacts", "fpIntervalRefutes",
+              "seqRangeFacts", "dropImpliedByteDomains", "deepTermsLeftAlone",
+              "mergeMemberships", "stallBackstopMs", "querySolver",
+              "divRangeFacts", "factsFirstRLimit", "bvOffsetLinks",
+              "bvIntInverseFacts", "bvViewRangeFacts", "cardFreeAbstraction",
+              "recFactsRLimit", "defaultLoopPruneRLimit", "loopPruneRLimit",
+              "symexIfArmsPruned", "symexIfArmsChecked",
+              "symexLoopIterations", "limitWorldRLimit",
+              "SymexQueryStat", "symexQueryStats", "symexQueryStatsPaused",
+              "symexFactsFirstOff", "SymexStepStat", "symexStepStats",
+              "symexPerturbConsts", "symexQueryStatsSummary",
+              "symexQueryStatsTotals", "symexEqsSplits"]
+  ## Threadvars `resetWalkSolveState` leaves alone: the thread's running
+  ## totals and the counters a suite resets itself, the linked Z3's decl
+  ## kinds (probed once per thread), and the stall deadline
+  ## `beginStallDeadline` arms per walk.
+  slvNotPerRun = ["symexTargetSolveStats", "ownContextUnits",
+                 "symexZ3CallCount", "seqCapDeclKinds", "fpIntervalDeclKinds",
+                 "byteDomainKinds", "deepTermsLeftAlone",
+                 "theoryFreeNeedsSimple", "stallDeadline", "eqsSplitCaps",
+                 "intDivDeclKinds", "int2bvDeclKind", "eqDeclKind",
+                 "bvExtDeclKinds", "symexIfArmsPruned", "symexIfArmsChecked",
+                 "symexLoopIterations"]
+  ## The `-d:symexQueryStats` threadvars (in a `when`): never reset by the
+  ## engine, released under the same `when`.
+  slvQueryStats = ["symexQueryStats", "symexQueryStatsPaused",
+                  "symexFactsFirstOff", "symexStepStats",
+                  "symexPerturbConsts", "perturbSerial", "symexEqsSplits"]
+
+suite "RFC-0016 INT-34 B5: the walk_solve leaf":
+  let ws = readSmt("walk_solve.nim")
+
+  test "walk_solve.nim imports only the allowed leaves":
+    let seen = importsOf(ws)
+    checkpoint $seen
+    for s in seen: check s in slvAllowed
+    check "./lower_expr" in seen and "./walk_types" in seen
+
+  test "every threadvar of walk_solve.nim is reset by resetWalkSolveState or named":
+    let at = ws.find("proc resetWalkSolveState*(")
+    check at >= 0
+    let resetBody = ws[at .. ^1]
+    var tvs: seq[string]
+    for l in ws.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    check tvs.len == 37   # 4 from R0, 33 from R2 (the query stats sit in `when`s)
+    for n in tvs:
+      checkpoint n
+      if n in slvNotPerRun:
+        check not resetBody.contains("\n  " & n & " = ")
+      else:
+        check resetBody.contains("\n  " & n & " = ")
+
+  test "every threadvar of walk_solve.nim is released when its thread exits":
+    let at = ws.find("proc releaseThreadState()")
+    check at >= 0
+    let body = ws[at .. ^1]
+    check ws.contains("\nregisterThreadStateRelease(releaseThreadState)")
+    var n = 0
+    for l in ws.splitLines:
+      if l.strip.startsWith("var ") and "{.threadvar.}" in l:
+        let name = leadIdent(l.strip[4 .. ^1])
+        checkpoint name
+        check body.contains(name)
+        inc n
+    check n == 37 + slvQueryStats.len
+    let qs = body.find("when defined(symexQueryStats):")
+    check qs >= 0
+    for name in slvQueryStats:
+      checkpoint name
+      check body[qs .. ^1].contains(name)
+
+  test "resetSymexRunState calls resetWalkSolveState and no longer resets its threadvars":
+    let rt = readSmt("runtime.nim")
+    let at = rt.find("proc resetSymexRunState(")
+    check at >= 0
+    let e = rt.find("\n  ctx\n", at)
+    check e > at
+    let body = rt[at .. e]
+    check body.contains("\n  resetWalkSolveState(settings)")
+    for l in ws.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        let n = leadIdent(l[4 .. ^1])
+        checkpoint n
+        check not body.contains("\n  " & n & " = ")
+
+  test "walk_solve names no runtime.nim symbol, and needs no hook":
+    let priv = definedNames(readSmt("runtime.nim"))
+    let named = referenced(ws, priv - definedNames(ws) - boundHere(ws))
+    checkpoint $named
+    check named.len == 0
+    # R2 calls nothing above it: no typed hook table (`d3_hooks` pins it)
+    check not codeOf(ws).contains("Hooks* = object")
+
+  test "runtime.nim imports walk_solve, re-exports names not the module, and defines none of its names":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("\nimport ./walk_solve")
+    check not rt.contains("\nexport walk_solve\n")
+    check not rt.contains("\nexport walk_solve except")
+    var exported, want: HashSet[string]
+    for l in codeOf(rt).splitLines:
+      for w in l.split({' ', ','}):
+        if w.startsWith("walk_solve."): exported.incl w["walk_solve.".len .. ^1]
+    for n in slvPublic: want.incl n
+    checkpoint $exported
+    check exported == want
+    let defs = definedNames(rt)
+    let wd = definedNames(ws)
+    for n in slvMoved:
+      checkpoint n
+      check n in wd
+    for n in wd:
       if n in perModuleNames: continue
       checkpoint n
       check n notin defs

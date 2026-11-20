@@ -114,7 +114,8 @@ suite "S8ba (3): every string / seq length is at most high(int)":
   test "the fact is Nim's: len is an int":
     ## Pinned against the source: `nimLenFacts` states `high(int64)`, and
     ## only in step 1c (its terms reach the shared context there only).
-    const src = staticRead("../src/nelli/smt/runtime.nim")
+    ## RFC-0016 INT-34 B5: both moved to `walk_solve.nim` with `checkCapped`.
+    const src = staticRead("../src/nelli/smt/walk_solve.nim")
     check "cstring($high(int64))" in src
     check "seqRangeFacts(ctx, roots) & nimLenFacts(ctx, lens)" in src
 

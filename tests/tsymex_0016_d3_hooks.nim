@@ -6,7 +6,7 @@
 ## `LowerHooks` and not filled fails here, not as a nil call mid-walk.
 import std/unittest
 import nelli/smt/runtime
-import nelli/smt/[walk_state, walk_path, lower_expr]   ## R2-3: the leaves are no longer re-exported by the facade
+import nelli/smt/[walk_state, walk_path, lower_expr, walk_solve]   ## R2-3: the leaves are no longer re-exported by the facade
 
 suite "RFC-0016 D3c-2: lowerHooks":
   test "every hook is filled at module init":
@@ -41,3 +41,11 @@ suite "RFC-0016 D3c-2: lowerHooks":
       check not f.isNil
       inc n
     check n == 1   # lowerHofCall; a second must be named here
+
+  test "walk_solve declares no hook table":
+    # INT-34 B5. Region R2 (`trySolve`, `pathInfeasible`, the witness) calls
+    # nothing above it, so `walk_solve` has no typed hooks to fill. A hook
+    # added there is declared as `walkSolveHooks` (the `PathHooks` pattern)
+    # and replaces this test with the fill check above.
+    check not declared(walkSolveHooks)
+    check not declared(WalkSolveHooks)

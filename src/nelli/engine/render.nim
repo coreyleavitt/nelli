@@ -80,6 +80,26 @@ func droppedLine(n: int): string =
     $n & " symex findings were dropped (recorded outside any engine " &
       "frame, e.g. on a thread the property started)\n"
 
+func droppedDbLine(n: int): string =
+  ## Wiring audit C-3. The line every renderer shows for
+  ## `Report.droppedSymexDbErrors`; empty when it is zero.
+  if n == 0: ""
+  elif n == 1:
+    "1 symex DB error was dropped (made on a thread the property started, " &
+      "outside any engine frame)\n"
+  else:
+    $n & " symex DB errors were dropped (made on a thread the property " &
+      "started, outside any engine frame)\n"
+
+func dbErrorLines(errs: seq[string]): string =
+  ## Wiring audit C-4. One `db_error=` line per entry of `Report.dbErrors`.
+  for e in errs: result &= "db_error=" & e & "\n"
+
+func hintSeverityText(sev: SymexErrorSeverity): string =
+  ## Wiring audit C-6. A plain hint shows as it always did; any other
+  ## severity is named after the kind.
+  if sev == sevHint: "" else: " (" & $sev & ")"
+
 func taintText(t: Taint): string =
   ## `{}` / `{scSpurious}` / `{scSpurious, scIncomplete}`, as Nim prints a set.
   $t
@@ -147,7 +167,7 @@ proc symexFindingLines(f: SymexFinding): seq[string] =
     result.add "  annotation violation " & $av.kind & " {." & $av.pragma &
                ".} " & av.callee & " at " & av.site & ": " & av.msg
   for h in f.hints:
-    result.add "  hint " & $h.kind & ": " & h.msg
+    result.add "  hint " & $h.kind & hintSeverityText(h.severity) & ": " & h.msg
   for u in f.undefined:   # RFC-0016 W3-z R5 (U6)
     result.add "  undefined " & u.kind & " at " & u.site &
                " witness=" & $u.witnessChoices.len & " choices"
@@ -219,9 +239,11 @@ proc repro*[T](r: Report[T]): string =
                 " p90=" & s.p90.formatFloat(ffDecimal, 3) &
                 " p99=" & s.p99.formatFloat(ffDecimal, 3) &
                 " max=" & s.mx.formatFloat(ffDecimal, 3) & "\n"
+  result &= dbErrorLines(r.dbErrors)   # wiring audit C-4
   if r.symexFindings.len > 0:
     result &= symexSection(r.symexFindings)   # RFC-0005 S11
   result &= droppedLine(r.droppedSymexFindings)
+  result &= droppedDbLine(r.droppedSymexDbErrors)
 
 proc xmlEscape(s: string): string =
   result = newStringOfCap(s.len)
@@ -379,6 +401,8 @@ proc renderJson[T](r: Report[T]): string =
     result &= "]"
   if r.droppedSymexFindings != 0:   # RFC-0016 INT-36 (R5-07)
     result &= ",\"droppedSymexFindings\":" & $r.droppedSymexFindings
+  if r.droppedSymexDbErrors != 0:   # wiring audit C-3
+    result &= ",\"droppedSymexDbErrors\":" & $r.droppedSymexDbErrors
   result &= "}"
 
 proc renderJunit[T](r: Report[T], testName: string,
@@ -400,11 +424,14 @@ proc renderJunit[T](r: Report[T], testName: string,
     result &= ">"
     result &= xmlEscape(body)
     result &= "</failure>\n"
-  if r.symexFindings.len > 0 or r.droppedSymexFindings != 0:
+  if r.symexFindings.len > 0 or r.droppedSymexFindings != 0 or
+     r.droppedSymexDbErrors != 0 or r.dbErrors.len > 0:
     # RFC-0005 S11: JUnit's own slot for captured output; the same text the
     # `[symex]` section of `ofText` carries, and its dropped-findings line.
-    let body = (if r.symexFindings.len > 0: symexSection(r.symexFindings)
-                else: "") & droppedLine(r.droppedSymexFindings)
+    let body = dbErrorLines(r.dbErrors) &
+               (if r.symexFindings.len > 0: symexSection(r.symexFindings)
+                else: "") & droppedLine(r.droppedSymexFindings) &
+               droppedDbLine(r.droppedSymexDbErrors)
     result &= "    <system-out>" & xmlEscape(body) & "</system-out>\n"
   result &= "  </testcase>\n"
   result &= "</testsuite>\n"
@@ -432,6 +459,14 @@ proc renderGithub[T](r: Report[T], testName: string): string =
     result &= "\n::warning title=symex findings dropped::" &
               ghEscape(testName & " — " &
                        droppedLine(r.droppedSymexFindings).strip)
+  if r.droppedSymexDbErrors != 0:   # wiring audit C-3
+    result &= "\n::warning title=symex db errors dropped::" &
+              ghEscape(testName & " — " &
+                       droppedDbLine(r.droppedSymexDbErrors).strip)
+  # Wiring audit C-4: each symex cache error the run made.
+  for e in r.dbErrors:
+    result &= "\n::warning title=symex db error::" &
+              ghEscape(testName & " — " & e)
   # RFC-0005 S11: one more workflow command per symex fact worth a reader's
   # attention, after the report's own line. An annotation violation is the
   # user's code carrying a false promise -- an `::error`. A verdict that is
@@ -473,10 +508,30 @@ proc renderGithub[T](r: Report[T], testName: string): string =
                          "in the host")
     # RFC-0005 W1: a hint is a `::notice` of its own, so a replay that crashed
     # or did not run says so, with its message, where the CI reader looks.
+    # Wiring audit C-6: a hint of warning severity or worse is a `::warning`.
     for h in f.hints:
-      result &= "\n::notice title=symex hint::" &
+      result &= "\n::" & (if h.severity == sevHint: "notice" else: "warning") &
+                " title=symex hint::" &
                 ghEscape(testName & " — " & f.targetDesc & " " & $h.kind &
                          ": " & h.msg)
+    # Wiring audit C-5: the undefined behaviours the run reached, and the
+    # raises it reached on the way that did not decide the verdict.
+    for u in f.undefined:
+      result &= "\n::warning title=symex undefined behaviour::" &
+                ghEscape(testName & " — " & f.targetDesc & " reached " &
+                         u.kind & " at " & u.site & " (witness " &
+                         $u.witnessChoices.len & " choices)")
+    for d in f.diagnostics:
+      result &= "\n::" & (if d.witnessUnsafe: "warning" else: "notice") &
+                " title=symex also raised::" &
+                ghEscape(testName & " — " & f.targetDesc & " also raises " &
+                         d.raisedTypeId &
+                         (if d.isDefect: " (defect)" else: "") &
+                         (if d.raisedMsg.len > 0: ": " & d.raisedMsg else: "") &
+                         (if d.witnessUnsafe:
+                            "; its witness ends or hangs the process " &
+                            "running it (witnessUnsafe)"
+                          else: ""))
 
 proc renderReport*[T](r: Report[T], format = ofText,
                       testName = "property"): string =

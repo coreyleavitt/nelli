@@ -2242,6 +2242,7 @@ task test, "Run the test suite":
             "tsymex_0016_int36_collector",
             "tsymex_0016_int36_report",
             "tsymex_0016_int37_probes",
+            "tsymex_0016_wiring_render",
             "tsymex_0016_int38_notes",
             "tsymex_0016_int30_refcfiber",
             "tsymex_rfc0005_r1_keyflags",

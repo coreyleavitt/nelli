@@ -222,14 +222,52 @@ var unownedDbErrors {.threadvar.}: seq[string]
   ## (a standalone `saveSymexWitness`, say). No report reads them: they are
   ## the caller's, through `consumeSymexDbErrors`.
 
+let mainThreadId = getThreadId()
+  ## The thread that initialised this module: the process's main thread. A
+  ## standalone symex call there, outside any run, is the caller's to
+  ## consume; on any other thread no one is expected to (see
+  ## `recordSymexDbError`).
+
+var droppedDbErrs: Atomic[int]
+  ## RFC-0016 INT-36's design for DB errors (wiring audit C-3). One count for
+  ## the process: the errors made with no engine frame open, on a thread that
+  ## is not the main thread. A run reads the count's change
+  ## (`Report.droppedSymexDbErrors`).
+
+proc droppedSymexDbErrors*(): int =
+  ## How many symex DB errors `recordSymexDbError` made off any run's
+  ## thread (no engine frame open, and not the main thread), in this process.
+  ## A run's change in it is on its report
+  ## (`Report.droppedSymexDbErrors`) and every renderer.
+  droppedDbErrs.load()
+
 proc recordSymexDbError*(msg: string) =
   ## Phase 14 C2, RFC-0016 INT-34 (0005 review R2-10). Records an error a
   ## symex cache read or write hit. Inside a run (an engine frame is open on
   ## this thread) it is that run's, and its report shows it
   ## (`EngineFrame.dbErrors`); outside any run it is held for the caller
   ## (`consumeSymexDbErrors`).
+  ##
+  ## The thread's list dies with the thread, so an error no one will consume
+  ## is also counted (`droppedSymexDbErrors`). "Unowned and not consumed" is
+  ## decided as INT-36 decides it for findings, at the call, not later: no
+  ## frame on this thread, and this is a thread other than the main one (a
+  ## thread the property started; a worker has no caller reading its list).
+  ## A standalone call on the main thread is the caller's and is not
+  ## counted. A worker that does consume its own list still shows in the
+  ## count: the count only over-reports, never loses an error.
   if engineStack.len > 0: engineStack[^1].dbErrors.add msg
-  else: unownedDbErrors.add msg
+  else:
+    unownedDbErrors.add msg
+    if getThreadId() != mainThreadId: droppedDbErrs.atomicInc()
+
+proc popEngineFrameTakingDbErrors*(): seq[string] =
+  ## Pops the top frame and returns the symex DB errors it holds (they also
+  ## reach the enclosing frame, as `popEngineFrame` merges them). For a
+  ## caller whose own report must show errors made before an inner run
+  ## opens its frame (`symexForAll`'s layer 1).
+  result = engineStack[^1].dbErrors
+  popEngineFrame()
 
 proc consumeSymexDbErrors*(): seq[string] =
   ## The symex DB errors made on this thread outside any run since the last

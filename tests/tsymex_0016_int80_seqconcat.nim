@@ -286,7 +286,7 @@ template unitsOf(fn: typed; outSt: var SymexStatusKind): int =
   unitsIn(log)
 
 const idom = sampled([0, 1, 2, 3, 4, 5, -42, 42, -7])
-let cell = cellKey(axTypeClass, "seq")
+let cell = cellKey(axTypeClass, "sequence")
 template exact(hitP, neverP: untyped) =
   check pinExact(hitP, cell, domain = idom).status == sxSat
   check pinExact(neverP, cell, domain = idom).status == sxUnsat

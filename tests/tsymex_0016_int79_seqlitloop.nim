@@ -204,7 +204,7 @@ proc mk4Never(k: int) =
   if t[2 * k] == 5 and k != 5: symexTarget("hit")
 
 const idom = sampled([0, 1, 2, 3, 4, 5, -42, 42, -7])
-let cell = cellKey(axTypeClass, "seq")
+let cell = cellKey(axTypeClass, "sequence")
 let mgCell = cellKey(axStdlibBody, "tables.mgetOrPut")
 template exact(hitP, neverP: untyped) =
   check pinExact(hitP, cell, domain = idom).status == sxSat

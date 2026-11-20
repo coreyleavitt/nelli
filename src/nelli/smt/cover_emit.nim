@@ -11,7 +11,7 @@ import ./dsl
 import ../engine/types as engineTypes
 from ../engine/frame import recordSymexFinding, FindingOrigin
 import ./witness_render
-import ./symex_cache
+import ./symex_codec   ## RFC-0016 INT-34 C1: the `finding*` projections
 import ./entry_parse
 import ./witness_fidelity
 import ./replay_footprint

@@ -34,8 +34,10 @@
 ## forms, and the re-exports. The implementation lives in `nelli/smt/`:
 ##
 ##   * `witness_render`   -- a witness as a `seq[ChoiceNode]`
-##   * `symex_cache`      -- the DB record codecs (soundness, gaps, notes,
-##                           witness / verdict / raised entries)
+##   * `symex_codec`      -- the DB record encodings (soundness, gaps, notes,
+##                           raised defect-ness), no I/O
+##   * `symex_cache`      -- the DB records' keys and their save / load
+##                           (witness / verdict / raised / notes entries)
 ##   * `witness_emit`     -- the typed witness reader emitters
 ##   * `witness_fidelity` -- how faithful a rebuilt witness is; the splat
 ##   * `replay_footprint` -- replay eligibility and the footprint scan
@@ -840,6 +842,7 @@ when defined(nelliVmAliasAudit):
   import ./smt/vm_alias_guard
   import ./smt/witness_render {.all.}
   import ./smt/symex_cache {.all.}
+  import ./smt/symex_codec {.all.}
   import ./smt/witness_emit {.all.}
   import ./smt/replay_footprint {.all.}
   import ./smt/routine_table {.all.}
@@ -858,7 +861,7 @@ when defined(nelliVmAliasAudit):
   # modules now. They are audited here, by the same mechanism and under their
   # own file tag, so a move out of this file never takes code out of the audit.
   const symexSmtDir = currentSourcePath().parentDir / "smt"
-  const symexMovedFiles = ["witness_render.nim", "symex_cache.nim", "witness_emit.nim", "replay_footprint.nim", "routine_table.nim", "witness_fidelity.nim", "heldset.nim", "replay_emit.nim", "replay_settle.nim", "proc_lift.nim", "run_replayed.nim", "entry_parse.nim", "cover_emit.nim", "find_emit.nim", "findall_emit.nim"]
+  const symexMovedFiles = ["witness_render.nim", "symex_cache.nim", "symex_codec.nim", "witness_emit.nim", "replay_footprint.nim", "routine_table.nim", "witness_fidelity.nim", "heldset.nim", "replay_emit.nim", "replay_settle.nim", "proc_lift.nim", "run_replayed.nim", "entry_parse.nim", "cover_emit.nim", "find_emit.nim", "findall_emit.nim"]
 
   template auditMoved(fname: string) =
     const movedPath = symexSmtDir / fname
@@ -867,6 +870,7 @@ when defined(nelliVmAliasAudit):
 
   auditMoved "witness_render.nim"
   auditMoved "symex_cache.nim"
+  auditMoved "symex_codec.nim"
   auditMoved "witness_emit.nim"
   auditMoved "replay_footprint.nim"
   auditMoved "routine_table.nim"

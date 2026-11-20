@@ -2236,6 +2236,7 @@ task test, "Run the test suite":
             "tsymex_0016_int31_libkey",
             "tsymex_0016_int33_flipsolve",
             "tsymex_0016_int34_cleanups",
+            "tsymex_0016_int34_codec",
             "tsymex_0016_int34_dberrors",
             "tsymex_0016_int35_exitgroups",
             "tsymex_0016_int36_collector",

@@ -15,6 +15,7 @@ import ./witness_render
 import ./witness_emit
 import ./run_replayed
 import ./symex_cache
+import ./symex_codec   ## RFC-0016 INT-34 C1: the `finding*` projections
 
 import ./entry_parse
 

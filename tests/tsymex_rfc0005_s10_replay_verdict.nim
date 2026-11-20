@@ -471,7 +471,7 @@ suite "RFC-0005 S10 (e) -- the opt-out: SymexSettings.replay = false":
 const symexSrcPath = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
                      "symex.nim"
 
-const symexImplFiles = ["witness_render.nim", "symex_cache.nim", "witness_emit.nim", "replay_footprint.nim", "routine_table.nim", "witness_fidelity.nim", "heldset.nim", "replay_emit.nim", "replay_settle.nim", "proc_lift.nim", "run_replayed.nim", "entry_parse.nim", "cover_emit.nim", "find_emit.nim", "findall_emit.nim"]
+const symexImplFiles = ["witness_render.nim", "symex_cache.nim", "symex_codec.nim", "witness_emit.nim", "replay_footprint.nim", "routine_table.nim", "witness_fidelity.nim", "heldset.nim", "replay_emit.nim", "replay_settle.nim", "proc_lift.nim", "run_replayed.nim", "entry_parse.nim", "cover_emit.nim", "find_emit.nim", "findall_emit.nim"]
   ## RFC-0016 D6: `symex.nim` is the facade; the codegen the pins below are
   ## about lives in these `smt/` modules. The pins read all of them.
 

@@ -60,6 +60,7 @@
 #   -t SECS    per-test timeout (default 1200)
 #   -B BUDGET  stop starting new tests after this many seconds (default 5400);
 #              the core always runs first, the unstarted tail is listed
+#              (NOTRUN <test>; also NOTRUNCORE <test> for a core test)
 # Env:   NELLI_NIM_FLAGS  host flags (--cc, --path, --cincludes), as the other
 #        host scripts take them; the ASan flags are appended here.
 #        NELLI_HOST=1 runs without podman (CI). ASAN_OPTIONS is set here.
@@ -170,6 +171,9 @@ done
   awk '$1 != "0" {print "FAIL " $3}' "$outlog"
   awk '{print "SAN " $0}' "$outlog.san"
   for t in "${notrun[@]}"; do echo "NOTRUN $t"; done
+  # A core test the budget left unstarted is a gate failure (the nightly reads
+  # these lines); an unstarted rotating test is only listed.
+  for t in "${notrun[@]}"; do [ -z "${is_core[$t]:-}" ] || echo "NOTRUNCORE $t"; done
 } > "$outlog.summary"
 cat "$outlog.summary" >&2
 exit 0

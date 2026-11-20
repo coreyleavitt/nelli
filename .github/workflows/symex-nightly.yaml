@@ -570,6 +570,10 @@ jobs:
           # any sanitizer report, any failing or hung test, and any core test that did not run
           awk '$1 != "0" { n=$3; sub(/^.*\//,"",n); sub(/\.nim$/,"",n); printf "asan\t%s\tasan slice: rc=%s\n", n, $1 }' out/slice.log > findings/findings-asan.tsv
           awk '{ n=$1; sub(/^.*\//,"",n); sub(/\.nim$/,"",n); printf "asan\t%s\tsanitizer report: %s\n", n, $2 }' out/slice.log.san >> findings/findings-asan.tsv
+          # a core test the time budget left unstarted appears only in the
+          # summary (NOTRUNCORE), not in slice.log: a skipped core test is no
+          # clean ASan result
+          awk '$1 == "NOTRUNCORE" { printf "asan\t%s\tcore test did not run (asan slice budget)\n", $2 }' out/slice.log.summary >> findings/findings-asan.tsv
           [ ! -s findings/findings-asan.tsv ]
 
       - name: Upload the slice record

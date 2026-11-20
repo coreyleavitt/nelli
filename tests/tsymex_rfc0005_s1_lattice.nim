@@ -133,12 +133,11 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
         if before notin IdentChars and after notin IdentChars: return true
         at = src.find(name, at + 1)
     var src = ""
-    for f in ["runtime.nim", "runtime_heap.nim", "dsl_parser.nim",
-              "definedness.nim",
-              "walk_types.nim",    # RFC-0016 INT-34 B2: the walker's types
-              "walk_path.nim",     # RFC-0016 INT-34 B3: the fork constructors
-              "walk_ctx.nim",      # RFC-0016 INT-34 B6a: the walk context's verbs
-              "walk_expr.nim"]:    # RFC-0016 INT-34 B6b: the drains and halts
+    ## The whole walker (`runtimeFamilyFiles`), plus the two producers that
+    ## live outside it: the parser and the definedness table.
+    var files: seq[string] = @["dsl_parser.nim", "definedness.nim"]
+    for f in runtimeFamilyFiles: files.add f
+    for f in files:
       let path = currentSourcePath().parentDir.parentDir / "src" / "nelli" / "smt" / f
       if fileExists(path):
         for line in readFile(path).splitLines():

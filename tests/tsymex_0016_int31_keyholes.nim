@@ -23,6 +23,10 @@ import nelli
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/errorkind
+import nelli/smt/[types, dsl]
+import nelli/db
+from nelli/smt/symex_cache import replayedUnknown
+import nelli/engine/types as engineTypes
 from nelli/smt/admission import cellKey, axConstruct
 from nelli/smt/replayproc import replayForks
 from ./s8cu_helpers import pinNever, show, named
@@ -138,3 +142,30 @@ suite "INT-31: a push inside fn":
         stale = true
     check not stale
     pinNever(cell, not stale, "a cached claim about a pushed body")
+
+suite "INT-31: an unknown reached through a replay of an open body":
+
+  test "is not stored; one the key can see, or no replay made, is":
+    let open = SymexProgram(body: mkBlock(@[]), implOpen: "importc int31Set")
+    let closed = SymexProgram(body: mkBlock(@[]))
+    let refuted = @[FindingHint(kind: feReplayRefuted, severity: sevHint,
+                                msg: "r")]
+    var errors: seq[string]
+    let db = inMemoryDatabase()
+    let t = tAssertionViolation()
+    # An unknown a replay refuted, against a body the key cannot see.
+    check not saveSymexVerdictImpl(db, open, t, defaultSymexSettings(),
+      sfUnknown, Soundness(runTaint: {scIncomplete}), errors, @[], refuted)
+    check loadSymexVerdictImpl(db, open, t, defaultSymexSettings(),
+                               errors).isNone
+    # The same unknown where the key sees every body: stored.
+    check saveSymexVerdictImpl(db, closed, t, defaultSymexSettings(),
+      sfUnknown, Soundness(runTaint: {scIncomplete}), errors, @[], refuted)
+    # An unknown no replay shaped, on the open program: stored.
+    check saveSymexVerdictImpl(db, open, t, defaultSymexSettings(),
+      sfUnknown, Soundness(runTaint: {scIncomplete}), errors, @[], @[])
+    check errors.len == 0
+    pinNever(cell, replayedUnknown(open, refuted) and
+                   not replayedUnknown(closed, refuted) and
+                   not replayedUnknown(open, @[]),
+      "an unknown a replay decided against a body the key cannot see is not cached")

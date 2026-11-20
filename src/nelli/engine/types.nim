@@ -285,6 +285,12 @@ type
       ## its thread (a thread the property started), so on no report. Every
       ## renderer shows it when non-zero. Process-wide, so a run concurrent
       ## with this one on another thread counts here too.
+    droppedSymexDbErrors*: int
+      ## Wiring audit C-3. How far the process's count of symex DB errors made
+      ## off any run's thread (`droppedSymexDbErrors()`) moved while this run
+      ## ran: errors a thread the property started made, which die with that
+      ## thread. Every renderer shows it when non-zero. Process-wide, as
+      ## `droppedSymexFindings` is.
     crash*: Option[CrashInfo]
       ## RFC-fuzzer-nextgen U0: typed crash identity when the falsifying
       ## example was a caught property `Defect` (failed `doAssert`,

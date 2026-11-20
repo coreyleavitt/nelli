@@ -88,6 +88,22 @@ const coverageScoreLabel* = "__coverage__"
 
 
 
+proc failOnSymexDbErrors*[T](r: var Report[T]; strict: bool) =
+  ## Wiring audit C-2. `Settings.strictDb` ends a run whose report carries a
+  ## symex cache error as it does one with a primary, corpus or save error:
+  ## a report with outcome `otFalsified` and message `DB: ...`. A run that
+  ## already failed keeps its own verdict (the errors stay on `dbErrors`).
+  if strict and r.dbErrors.len > 0 and r.outcome == otPassed:
+    r.outcome = otFalsified
+    r.message = "DB: symex: " & r.dbErrors[0]
+
+proc adoptLayer1DbErrors*[T](r: var Report[T]; errs: seq[string];
+                             strict: bool) =
+  ## Wiring audit C-1. The symex cache errors `symexForAll`'s layer 1 made,
+  ## before the run's own frame was open, are on this run's report, first.
+  r.dbErrors = errs & r.dbErrors
+  failOnSymexDbErrors(r, strict)
+
 proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
                                       s: Strategy[T], prop: proc(x: T),
                                       settings: Settings,
@@ -109,6 +125,7 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
   pushEngineFrame()
   defer: popEngineFrame()   # review R3 (E3): findings reach the parent
   let droppedBefore = droppedSymexFindings()   # RFC-0016 INT-36 (R5-07)
+  let droppedDbBefore = droppedSymexDbErrors()   # wiring audit C-3
   let originalProp = prop
   let deadline = settings.deadline
   let hasDeadline = deadline.inNanoseconds > 0
@@ -189,7 +206,13 @@ proc runForAllPipelineWithPhases*[T](db: ExampleDatabase, dbEnabled: bool,
   # RFC-0016 INT-34 (R2-10): the symex DB errors this run made, on whichever
   # report the pipeline built (passed, failed or cut short).
   result.dbErrors.add engineStack[^1].dbErrors
+  # Wiring audit C-2: `strictDb` ends a run on a symex cache error as it does
+  # on a primary, corpus or save one: a report, outcome `otFalsified`, message
+  # `DB: ...`. A run that already failed keeps its own verdict (the errors
+  # are on `dbErrors` all the same).
+  failOnSymexDbErrors(result, settings.strictDb)
   result.droppedSymexFindings = droppedSymexFindings() - droppedBefore
+  result.droppedSymexDbErrors = droppedSymexDbErrors() - droppedDbBefore
   if settings.coverageGuided:
     # U1: the frontier (not a raw scalar re-read) is now the single
     # source of truth for the run's cumulative distinct-edge count too.

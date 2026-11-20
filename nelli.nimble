@@ -654,7 +654,7 @@ task test, "Run the test suite":
             "tfuzzcovshm", "tfuzzcovreset", "tfuzzcmplog", "tfuzzcmplogshm",
             "tfuzzcmplogprocess", "tfuzzcmplogshmleak", "tfuzzshmhold",
             "tfuzzworkerspawnfailshm",
-            "tfuzzdbfunnel", "tfuzzembedguard",
+            "tfuzzdbfunnel", "tfuzzdberrors", "tfuzzembedguard",
             "tdbcorpuslog", "tdbcleanupsweep",
             # Track G — concolic bridge + cmp-correspondence.
             "tfuzzconcolicbridge", "tfuzzconcolicbridge_real",
@@ -2242,6 +2242,8 @@ task test, "Run the test suite":
             "tsymex_0016_int36_collector",
             "tsymex_0016_int36_report",
             "tsymex_0016_int37_probes",
+            "tsymex_0016_wiring_render",
+            "tsymex_0016_wiring_cover",
             "tsymex_0016_int38_notes",
             "tsymex_0016_int30_refcfiber",
             "tsymex_rfc0005_r1_keyflags",

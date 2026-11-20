@@ -598,6 +598,21 @@ type
       ## They are parse-time facts, so they appear once the bridge has run
       ## once (it runs when the frontier stalls). RFC-0016 K8a reads this as
       ## its second findings source.
+    dbErrors*: seq[string]
+      ## Wiring audit C-9. The `DbError`s the campaign's database use raised
+      ## (corpus load and save, and the orchestrator's `requestSave`,
+      ## `requestRemove` and `requestSaveSecondary` funnel), one entry each,
+      ## in order, as `Report.dbErrors` reports a `forAll` run's. A failing
+      ## database ends no campaign: the entry is lost to the disk, not to the
+      ## run.
+    droppedSymexFindings*: int
+      ## Wiring audit C-9; `Report.droppedSymexFindings`. How far the
+      ## process's count of dropped symex findings moved during the campaign
+      ## (a property that calls `assertCoveredBy` on a thread with no engine
+      ## frame).
+    droppedSymexDbErrors*: int
+      ## Wiring audit C-9; `Report.droppedSymexDbErrors`. The same for symex
+      ## cache errors made off any run's thread.
     stats*: CampaignStats
       ## RFC-fuzzer-nextgen S5 (a+b): the read-only campaign observability
       ## surface — see `CampaignStats`'s own doc for the full field list and
@@ -1195,6 +1210,10 @@ type
       ## `ConcolicBridgeResult.flip` in here via `foldFlipResult`, and every
       ## admission decision via `recordAdmitOutcome`, at those same two call
       ## sites. Read back via `concolicYield*` for `CampaignStats.concolicYield`.
+    dbErrors: seq[string]
+      ## Wiring audit C-9. The `DbError`s the funnel (`requestSave`,
+      ## `requestRemove`, `requestSaveSecondary`) and the campaign's corpus
+      ## calls caught, read back via `dbErrors*` for `FuzzReport.dbErrors`.
     annotationViolations: seq[AnnotationViolation]
       ## RFC-0016 K8-0 (INT-33). Every distinct false-annotation claim any
       ## `concolicBridge` call reported (`ConcolicFlipResult.annotationViolations`),
@@ -1645,19 +1664,35 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
 # `newOrchestrator`) makes all three of these silent no-ops — a caller that
 # never opts in sees no behavior change.
 
+proc dbErrors*[T](o: Orchestrator[T]): seq[string] =
+  ## Wiring audit C-9. The `DbError`s this orchestrator's funnel and its
+  ## campaign's corpus calls caught, oldest first (`FuzzReport.dbErrors`).
+  o.dbErrors
+
+template guardDb[T](o: Orchestrator[T]; what: string; body: untyped) =
+  ## Runs a database call; a `DbError` is recorded on `o` (named by `what`),
+  ## never raised, so a failing backend cannot end a campaign or a job.
+  try: body
+  except DbError as e: o.dbErrors.add what & ": " & e.msg
+
 proc requestSave*[T](o: Orchestrator[T]; testId: string; choices: ChoiceSeq;
                      maxEntries = 16) =
   ## A shrink job's `.bin` write, funneled through the orchestrator's one
   ## `db` handle instead of the caller constructing (or reaching for) its
-  ## own `ExampleDatabase` on the shared directory.
-  if o.db.saveImpl != nil: o.db.save(testId, choices, maxEntries)
+  ## own `ExampleDatabase` on the shared directory. A `DbError` is recorded
+  ## (`dbErrors`), not raised.
+  if o.db.saveImpl != nil:
+    guardDb(o, "save"): o.db.save(testId, choices, maxEntries)
 
 proc requestRemove*[T](o: Orchestrator[T]; testId: string; choices: ChoiceSeq) =
-  if o.db.removeImpl != nil: o.db.remove(testId, choices)
+  if o.db.removeImpl != nil:
+    guardDb(o, "remove"): o.db.remove(testId, choices)
 
 proc requestSaveSecondary*[T](o: Orchestrator[T]; testId: string;
                               entries: openArray[ScoredEntry]; maxEntries = 16) =
-  if o.db.saveSecondaryImpl != nil: o.db.saveSecondary(testId, entries, maxEntries)
+  if o.db.saveSecondaryImpl != nil:
+    guardDb(o, "saveSecondary"):
+      o.db.saveSecondary(testId, entries, maxEntries)
 
 proc hasDb*[T](o: Orchestrator[T]): bool =
   ## Whether this orchestrator was constructed with a real `db` (vs. the
@@ -2153,6 +2188,8 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       concolicMaxBranchAttempts: resolvedAssist.maxBranchAttempts),
     spawnFreshWorker = (if isolated: spawnFreshWorker else: nil),
     concolicBridge = assist.bridge)
+  let droppedBefore = droppedSymexFindings()     # wiring audit C-9
+  let droppedDbBefore = droppedSymexDbErrors()
   var rng = initSplitMix64(settings.seed)
   # R4 (code review): gate corpus load/save on their OWN closure fields, not
   # `saveImpl` — a hand-built `ExampleDatabase` can populate `saveImpl` /
@@ -2198,7 +2235,10 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # `primary` — `primary` is the regression-replay channel `dbReusePhase`
     # prunes on pass/reject, which is the wrong lifecycle for coverage seeds
     # that keep earning their keep even once they stop crashing.
-    for choices in settings.database.loadCorpus(testId):
+    var resumed: seq[seq[ChoiceNode]]
+    guardDb(orchestrator, "loadCorpus"):
+      resumed = settings.database.loadCorpus(testId)
+    for choices in resumed:
       let cap = captureIR(s, choices)
       if cap.ok: addSeed(corpus, cap.choices, cap.spans)
       else: inc result.droppedSeeds   # F7: same, for DB-resumed seeds
@@ -2207,7 +2247,10 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     # fold in; saves go to the new key only, so the legacy file simply goes
     # stale rather than being rewritten forever.
     if frontier.targetId.len == 0 and settings.persistKey.len > 0:
-      for choices in settings.database.loadCorpus(settings.persistKey & "#"):
+      var legacy: seq[seq[ChoiceNode]]
+      guardDb(orchestrator, "loadCorpus"):
+        legacy = settings.database.loadCorpus(settings.persistKey & "#")
+      for choices in legacy:
         let cap = captureIR(s, choices)
         if cap.ok: addSeed(corpus, cap.choices, cap.spans)
         else: inc result.droppedSeeds
@@ -2375,7 +2418,9 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       add(corpus, cap.choices, cap.spans, obs.coverage, obs.runResult.durationNs, cmpLog)
       report.corpus.irEntries.add cap.choices
       inc provenanceCounts[provenance]
-      if saveCorpusActive: settings.database.saveCorpus(testId, cap.choices, corpusLimit)
+      if saveCorpusActive:
+        guardDb(orchestrator, "saveCorpus"):
+          settings.database.saveCorpus(testId, cap.choices, corpusLimit)
 
   proc recordCrashIfInteresting(choices: seq[ChoiceNode]; obs: Observation[T];
                                 report: var FuzzReport): bool =
@@ -2451,7 +2496,9 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
               elif energies[a] > energies[b]: 1
               else: 0)
             for i in order:
-              settings.database.saveCorpus(testId, corpus[i].choices, corpusLimit)
+              guardDb(orchestrator, "saveCorpus"):
+                settings.database.saveCorpus(testId, corpus[i].choices,
+                                             corpusLimit)
     # RFC-fuzzer-nextgen S1: energy is recomputed fresh from the frontier's
     # LIVE stats every tick, not maintained incrementally — a slot's rarity
     # denominator (`totalAdmitted`) moves every admit, so a cached energy
@@ -2587,6 +2634,9 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # see `CampaignStats`'s doc for the full per-field sourcing.
   let elapsedDur = getMonoTime() - started
   result.annotationViolations = orchestrator.annotationViolations
+  result.dbErrors = orchestrator.dbErrors   # wiring audit C-9
+  result.droppedSymexFindings = droppedSymexFindings() - droppedBefore
+  result.droppedSymexDbErrors = droppedSymexDbErrors() - droppedDbBefore
   result.undefinedFindings = orchestrator.undefinedFindings
   result.stats = CampaignStats(
     execs: iter,

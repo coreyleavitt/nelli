@@ -293,8 +293,14 @@ macro symexForAll*(s: typed, fn: typed,
 
   result = quote do:
     block:
-      let findings = symexFindAllWitnesses(`fn`, `db`, `symexSettings`,
-                                            `excludeTargets`)
+      # Wiring audit C-1: layer 1 runs in a frame of its own, so its cache
+      # errors are this run's (not the enclosing run's, not unowned).
+      pushEngineFrame()
+      var layer1Errs: seq[string]
+      let findings =
+        try: symexFindAllWitnesses(`fn`, `db`, `symexSettings`,
+                                   `excludeTargets`)
+        finally: layer1Errs = popEngineFrameTakingDbErrors()
       var seeds: seq[seq[ChoiceNode]] = @[]
       for f in findings:
         # RFC-0005 S11 (§8.1 "the seed filter"). A seed is only an input --
@@ -313,6 +319,7 @@ macro symexForAll*(s: typed, fn: typed,
       # the seed phase recorded on this run (already on `report`). Nothing
       # from another call on the thread.
       report.symexFindings = findings & report.symexFindings
+      adoptLayer1DbErrors(report, layer1Errs, `forAllSettings`.strictDb)
       report
 
 

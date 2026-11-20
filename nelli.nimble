@@ -654,7 +654,7 @@ task test, "Run the test suite":
             "tfuzzcovshm", "tfuzzcovreset", "tfuzzcmplog", "tfuzzcmplogshm",
             "tfuzzcmplogprocess", "tfuzzcmplogshmleak", "tfuzzshmhold",
             "tfuzzworkerspawnfailshm",
-            "tfuzzdbfunnel", "tfuzzembedguard",
+            "tfuzzdbfunnel", "tfuzzdberrors", "tfuzzembedguard",
             "tdbcorpuslog", "tdbcleanupsweep",
             # Track G — concolic bridge + cmp-correspondence.
             "tfuzzconcolicbridge", "tfuzzconcolicbridge_real",

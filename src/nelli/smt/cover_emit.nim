@@ -24,6 +24,12 @@ type
     ## thread-local sink that leaked into later callers).
     findings*: seq[SymexFinding]
 
+func defectIdOf*(raisedTypeId: string): string =
+  ## Wiring audit C-8. `SymexFinding.defectTypeId` for a raise `assertCoveredBy`
+  ## reached: the type id when it is a `Defect` (the rule `allRaiseFindings`
+  ## uses on the public result), else empty.
+  if raisedTypeId.endsWith("Defect"): raisedTypeId else: ""
+
 proc coverageOutcome*(origin: FindingOrigin; f: SymexFinding;
                      failure: string): SymexFinding {.discardable.} =
   ## Review R1-10. The end of a single-target `assertCoveredBy`: its finding,
@@ -239,6 +245,12 @@ proc assertCoveredByImpl*(self: NimNode; fn: NimNode; target: SymexTarget; testF
   proc claimArm(witField: NimNode; status: NimNode;
                 sameFnOk: bool): NimNode =
     let unsafeCovers = newLit(sameFnOk)
+    # Wiring audit C-8. A raised finding names the defect it reaches, as
+    # `symexFindAllWitnesses`' does; `allRaiseFindings` decides "defect" the
+    # same way (the public result has no exact flag).
+    let defectId =
+      if sameFnOk: newLit("")
+      else: newCall(bindSym"defectIdOf", newDotExpr(rId, ident"raisedTypeId"))
     quote do:
       let `witId` = `witField`
       let trustedClaim = `trustedSym`(`rId`)
@@ -298,7 +310,8 @@ proc assertCoveredByImpl*(self: NimNode; fn: NimNode; target: SymexTarget; testF
         annotationViolations: `rId`.annotationViolations,
         hints: `hintsSym`(`rId`.errors),                 ## RFC-0005 W1
         diagnostics: `diagsSym`(`rId`.diagnostics),
-        undefined: `undefSym`(`rId`.undefined))
+        undefined: `undefSym`(`rId`.undefined),
+        defectTypeId: `defectId`)
       `failureId` = failure
   let satArm = claimArm(newDotExpr(rId, ident"witness"), bindSym"sfSat", true)
   # Phase 16 D1a: defect targets (tAssertionViolation, tIndexError,

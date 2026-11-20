@@ -31144,7 +31144,7 @@ proc parseEntryImpl*(fn: NimNode, apiName: string, maxInst: int): ParseResult =
   ## `saveSymexVerdict`, `loadSymexVerdict`, `symexFindAllWitnesses`).
   ##
   ## The FOURTH step of that ritual — destructuring the result into
-  ## `paramsExpr`/`bodyExpr`/`procsExpr` (+ `rebuildTargetNode`) — is shared
+  ## `paramsExpr`/`bodyExpr`/`procsExpr` (+ `targetLit`) — is shared
   ## by only FIVE of those six (`symexFindAllWitnesses` consumes `parsed`
   ## directly), so it stays per-consumer and is deliberately NOT folded in
   ## here. `symexFind`/`assertCoveredBy` also route through this proc (as of

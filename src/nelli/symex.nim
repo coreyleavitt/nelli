@@ -611,22 +611,15 @@ macro assertCoveredBy*(fn: typed,
 # These macros parse the typed SUT to a SymexProgram (so the IR hash
 # in the cache key reflects the same IR the walker will see), then
 # delegate to the runtime impl. The pure (testable) part of the key
-# derivation lives in nelli/smt/canonicalize.
-
-proc rebuildTargetNode(target: SymexTarget): NimNode =
-  ## Macro-time fresh constructor call for `target`. Splicing a
-  ## `static SymexTarget` of a non-stkLabel kind directly via
-  ## `quote do` triggers Nim to materialise an nnkObjConstr that
-  ## names every field — invalid for variants. Rebuilding via the
-  ## `t*` constructors is always well-formed.
-  case target.kind
-  of stkLabel:              newCall(bindSym"tLabel", newLit(target.label))
-  of stkAssertionViolation: newCall(bindSym"tAssertionViolation")
-  of stkIndexError:         newCall(bindSym"tIndexError")
-  of stkFieldDefect:        newCall(bindSym"tFieldDefect")
-  of stkRaisedExn:          newCall(bindSym"tRaisedExn", newLit(target.typeFilter))
-  of stkNilAccess:          newCall(bindSym"tNilAccess")   ## Phase 15 R5
-  of stkUndefined:          newCall(bindSym"tUndefined", newLit(target.ubKinds))
+# derivation lives in nelli/smt/canonicalize; the records' encodings in
+# nelli/smt/symex_codec.
+#
+# Review R1-11: each parses through `entryParse`, as every walking entry
+# parses, so the key is the one `symexFindAllWitnesses` writes; no settings
+# warning (no walk here). The target is spelled with `targetLit`, the one
+# spelling every entry macro uses (RFC-0016 INT-34 C1: `rebuildTargetNode`
+# spelled the four payload-less kinds as their `t*()` constructor calls
+# instead of `SymexTarget(kind: ...)`; the two build the same value).
 
 macro symexCacheKeyForFn*(fn: typed,
                            target: static SymexTarget,
@@ -643,14 +636,12 @@ macro symexCacheKeyForFn*(fn: typed,
   ## suffix participation contract. NOT intended for production
   ## consumers — they should use `saveSymexWitness` /
   ## `loadSymexWitnesses` which encapsulate the suffix.
-  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
-  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
   let e = entryParse(fn, "symexCacheKeyForFn", settings,
     newCall(bindSym"symexCacheKeyForFn", fn, targetLit(target), newLit(settings)),
     warn = false)
   if e.again != nil: return e.again
   let progExpr = e.prog
-  let targetExpr = rebuildTargetNode(target)
+  let targetExpr = targetLit(target)
   result = quote do:
     block:
       let prog = `progExpr`
@@ -659,6 +650,55 @@ macro symexCacheKeyForFn*(fn: typed,
                     nimVersion       = NimVersion,
                     walkerVersion    = symexWalkerVersion,
                     renderingVersion = renderAsChoicesVersion)
+
+proc dbMacroSkeleton(apiName: string; self, impl: NimNode;
+                     db, fn: NimNode; target: SymexTarget;
+                     settings: SymexSettings; args: openArray[NimNode];
+                     tail: openArray[NimNode] = []; value: bool): NimNode =
+  ## RFC-0016 INT-34 C1. The one body of the four DB macro forms
+  ## (`saveSymexWitness`, `loadSymexWitnesses`, `saveSymexVerdict`,
+  ## `loadSymexVerdict`). The macro `self` is called as
+  ## `self(db, fn, target, settings, args..., tail...)`; its expansion calls
+  ## `impl(db, prog, target, settings, args..., dbErrors, tail...)` on the
+  ## program `fn` parses to (`entryParse`, `warn = false`), then records each
+  ## error `impl` appended. `value`: the expansion's value is `impl`'s.
+  ##
+  ## RFC-0005 S8av, RFC-0016 INT-34: the errors are recorded as
+  ## `symexFindAllWitnesses` records its own (`recordSymexDbError`): on the
+  ## running run's `Report.dbErrors`, or, outside any run, for the macro's
+  ## caller (`consumeSymexDbErrors()`), never silently swallowed. A caller
+  ## wanting a locally-scoped `errors` seq calls the `*Impl` proc directly.
+  var again = newCall(self, db, fn, targetLit(target), newLit(settings))
+  for a in args: again.add a
+  for a in tail: again.add a
+  let e = entryParse(fn, apiName, settings, again, warn = false)
+  if e.again != nil: return e.again
+  let progExpr = e.prog
+  let prog = genSym(nskLet, "prog")
+  let dbErrors = genSym(nskVar, "dbErrors")
+  var call = newCall(impl, db, prog, targetLit(target), newLit(settings))
+  for a in args: call.add a
+  call.add dbErrors
+  for a in tail: call.add a
+  let record = bindSym"recordSymexDbError"
+  if value:
+    let res = genSym(nskLet, "res")
+    result = quote do:
+      block:
+        let `prog` = `progExpr`
+        var `dbErrors`: seq[string] = @[]
+        let `res` = `call`
+        for dbErr in `dbErrors`:
+          `record`(dbErr)
+        `res`
+  else:
+    result = quote do:
+      block:
+        let `prog` = `progExpr`
+        var `dbErrors`: seq[string] = @[]
+        `call`
+        for dbErr in `dbErrors`:
+          `record`(dbErr)
 
 macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,
@@ -669,26 +709,9 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
   ## key derived from `fn`'s IR, the target, the witness-relevant
   ## subset of `settings`, and the current Z3/Nim/walker versions.
   ## Non-Sat findings are skipped.
-  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
-  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
-  let e = entryParse(fn, "saveSymexWitness", settings,
-    newCall(bindSym"saveSymexWitness", db, fn, targetLit(target), newLit(settings), finding, maxEntries),
-    warn = false)
-  if e.again != nil: return e.again
-  let progExpr = e.prog
-  let targetExpr = rebuildTargetNode(target)
-  result = quote do:
-    block:
-      let prog = `progExpr`
-      var dbErrors: seq[string] = @[]
-      saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
-                            `finding`, dbErrors, `maxEntries`)
-      # RFC-0005 S8av, RFC-0016 INT-34: recorded as `symexFindAllWitnesses`
-      # records its own (`recordSymexDbError`): on the running run's
-      # `Report.dbErrors`, or, outside any run, for this macro's caller
-      # (`consumeSymexDbErrors()`), never silently swallowed.
-      for dbErr in dbErrors:
-        recordSymexDbError(dbErr)
+  dbMacroSkeleton("saveSymexWitness", bindSym"saveSymexWitness",
+                  bindSym"saveSymexWitnessImpl", db, fn, target, settings,
+                  [finding], [maxEntries], value = false)
 
 macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
                           target: static SymexTarget,
@@ -698,24 +721,9 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
   ## SUT/target/settings/Z3/Nim/walker combination, each with its
   ## stored `Soundness` (`seq[CachedWitness]`, RFC-0005 S11).
   ## Mismatched key → empty seq.
-  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
-  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
-  let e = entryParse(fn, "loadSymexWitnesses", settings,
-    newCall(bindSym"loadSymexWitnesses", db, fn, targetLit(target), newLit(settings)),
-    warn = false)
-  if e.again != nil: return e.again
-  let progExpr = e.prog
-  let targetExpr = rebuildTargetNode(target)
-  result = quote do:
-    block:
-      let prog = `progExpr`
-      var dbErrors: seq[string] = @[]
-      let witnesses = loadSymexWitnessesImpl(`db`, prog, `targetExpr`,
-                                              `settings`, dbErrors)
-      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
-      for dbErr in dbErrors:
-        recordSymexDbError(dbErr)
-      witnesses
+  dbMacroSkeleton("loadSymexWitnesses", bindSym"loadSymexWitnesses",
+                  bindSym"loadSymexWitnessesImpl", db, fn, target, settings,
+                  [], value = true)
 
 # ---- Verdict macro forms (Phase 13 cycle 10) -------------------------------
 #
@@ -738,23 +746,9 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## content-addressed key, with the `soundness` it was decided under
   ## (RFC-0005 S11). No-op for sfSat (use `saveSymexWitness`) and
   ## sfNotApplicable.
-  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
-  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
-  let e = entryParse(fn, "saveSymexVerdict", settings,
-    newCall(bindSym"saveSymexVerdict", db, fn, targetLit(target), newLit(settings), status, soundness),
-    warn = false)
-  if e.again != nil: return e.again
-  let progExpr = e.prog
-  let targetExpr = rebuildTargetNode(target)
-  result = quote do:
-    block:
-      let prog = `progExpr`
-      var dbErrors: seq[string] = @[]
-      saveSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`,
-                            `status`, `soundness`, dbErrors)
-      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
-      for dbErr in dbErrors:
-        recordSymexDbError(dbErr)
+  dbMacroSkeleton("saveSymexVerdict", bindSym"saveSymexVerdict",
+                  bindSym"saveSymexVerdictImpl", db, fn, target, settings,
+                  [status, soundness], value = false)
 
 macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,
@@ -765,24 +759,9 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## (UNSAT-first load-order tie-break). Returns
   ## `Option[CachedVerdict]`: the status, its stored `Soundness`
   ## (RFC-0005 S11) and `gaps` (RFC-0005 S8av).
-  # Review R1-11: `entryParse`, as every walking entry parses, so the key is
-  # the one `symexFindAllWitnesses` writes; no settings warning (no walk here).
-  let e = entryParse(fn, "loadSymexVerdict", settings,
-    newCall(bindSym"loadSymexVerdict", db, fn, targetLit(target), newLit(settings)),
-    warn = false)
-  if e.again != nil: return e.again
-  let progExpr = e.prog
-  let targetExpr = rebuildTargetNode(target)
-  result = quote do:
-    block:
-      let prog = `progExpr`
-      var dbErrors: seq[string] = @[]
-      let verdict = loadSymexVerdictImpl(`db`, prog, `targetExpr`,
-                                          `settings`, dbErrors)
-      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
-      for dbErr in dbErrors:
-        recordSymexDbError(dbErr)
-      verdict
+  dbMacroSkeleton("loadSymexVerdict", bindSym"loadSymexVerdict",
+                  bindSym"loadSymexVerdictImpl", db, fn, target, settings,
+                  [], value = true)
 
 # ---- Layer 1 — symexFindAllWitnesses ---------------------------------------
 #

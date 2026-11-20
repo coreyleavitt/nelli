@@ -92,13 +92,17 @@ proc parseEntryImplWarned*(fn: NimNode, apiName: string,
 
 proc targetLit*(t: SymexTarget): NimNode =
   ## RFC-0005 S8bn. A static `SymexTarget` as an expression, for an entry
-  ## macro's re-expansion (`methodPrelude`).
+  ## macro's re-expansion (`methodPrelude`) and (RFC-0016 INT-34 C1) the
+  ## target the DB macro forms key and persist under.
   case t.kind
   of stkLabel: newCall(bindSym"tLabel", newLit(t.label))
   of stkRaisedExn: newCall(bindSym"tRaisedExn", newLit(t.typeFilter))
   of stkUndefined: newCall(bindSym"tUndefined", newLit(t.ubKinds))
-  else: nnkObjConstr.newTree(bindSym"SymexTarget",
-                             newColonExpr(ident"kind", newLit(t.kind)))
+  of stkAssertionViolation, stkIndexError, stkFieldDefect, stkNilAccess:
+    # RFC-0016 INT-34 C1: every kind named, so a new one (perhaps with a
+    # payload this spelling would drop) is a compile error here.
+    nnkObjConstr.newTree(bindSym"SymexTarget",
+                         newColonExpr(ident"kind", newLit(t.kind)))
 
 type EntryParse* = object
   ## RFC-0005 review R1-11. What an entry macro starts from (`entryParse`).

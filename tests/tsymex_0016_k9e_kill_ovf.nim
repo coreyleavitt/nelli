@@ -13,7 +13,8 @@
 ##                         source, and a width-typed Int operand's two bounds
 ##   forkAssignRangeCheck  an assignment into a `range` local (`*=`: its live
 ##                         raise; an RHS of the range type: no raise)
-##   lowerExpr uNeg        `-x` of a signed BV and of a width-typed Int
+##   lowerExpr uNeg        `-x` of a signed BV, of a width-typed Int, and of a
+##                         promoted (Int-sorted, width-stamped) int16 parameter
 import std/unittest
 import nelli/symex
 import ./s8cu_helpers
@@ -267,3 +268,28 @@ suite "K9e uNeg: -low(T) raises OverflowDefect":
     let r = pinFind(negInt, tRaisedExn("OverflowDefect"), Exact)
     check r.status == sxRaised
     check r.raisedTypeId == "OverflowDefect"
+
+# A signed `intN` parameter bounded by a leading `symexAssume` is promoted to
+# an Int-sorted `svInt` that carries its static width (`ziWidth == 16`), so its
+# negation takes the `ziWidth != 0 and ziSigned` arm of `uNeg`: neither the BV
+# arm nor the plain `-zi` arm, which would never raise for `-low(int16)`.
+proc negPromotedLow(x: int16) =
+  symexAssume(x >= -32768 and x <= 100)
+  let y = -x
+  symexTarget("t")
+  discard y
+
+proc negPromotedOk(x: int16) =
+  symexAssume(x >= -32768 and x <= 100)
+  let y = -x
+  if y == 7: symexTarget("hit")
+  discard y
+
+suite "K9e uNeg: -low(T) of a promoted width-typed svInt":
+  test "-x of a promoted int16 forks OverflowDefect":
+    let r = pinFind(negPromotedLow, tRaisedExn("OverflowDefect"))
+    check r.status == sxRaised
+    check r.raisedTypeId == "OverflowDefect"
+
+  test "-x of a promoted int16 is reachable without a raise":
+    check pinFind(negPromotedOk, tLabel("hit")).status == sxSat

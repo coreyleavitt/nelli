@@ -15,6 +15,7 @@
 ##   (e) structural -- the solver-sink drain list, the closure-sink funnel,
 ##       the error-sink -> run-channel map, and the walker version floor.
 from ./s8cu_helpers import named
+from ./audit_scan_utils import runtimeFamilySources
 import std/[unittest, sequtils, macros, strutils, os, sets]
 import nelli/symex
 import nelli/smt/types
@@ -415,7 +416,10 @@ suite "RFC-0005 S7 (d) -- S9 precondition: without the vetoes, no S7 SUT is a cl
 const smtDir = currentSourcePath.parentDir() / ".." / "src" / "nelli" / "smt"
 
 proc runtimeFiles(): seq[string] =
-  for f in walkFiles(smtDir / "runtime*.nim"): result.add f
+  ## The runtime family (RFC-0016 INT-34 B6a: `degrade` and `closureDegrade`,
+  ## the closure sink's two writers, moved to `walk_ctx.nim`, outside the
+  ## `runtime*.nim` glob).
+  for (_, path) in runtimeFamilySources(): result.add path
 
 proc routineName(line: string): string =
   for kw in ["proc ", "template ", "func ", "iterator ", "macro ", "method "]:

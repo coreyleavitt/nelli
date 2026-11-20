@@ -6,7 +6,7 @@
 ## `LowerHooks` and not filled fails here, not as a nil call mid-walk.
 import std/unittest
 import nelli/smt/runtime
-import nelli/smt/[walk_state, walk_path, lower_expr, walk_solve]   ## R2-3: the leaves are no longer re-exported by the facade
+import nelli/smt/[walk_state, walk_path, lower_expr, walk_solve, walk_ctx]   ## R2-3: the leaves are no longer re-exported by the facade
 
 suite "RFC-0016 D3c-2: lowerHooks":
   test "every hook is filled at module init":
@@ -49,3 +49,10 @@ suite "RFC-0016 D3c-2: lowerHooks":
     # and replaces this test with the fill check above.
     check not declared(walkSolveHooks)
     check not declared(WalkSolveHooks)
+
+  test "walk_ctx declares no hook table":
+    # INT-34 B6a. Region R3 (`degrade`, the frames, `solveTargetHit`, the
+    # pending take and restore) calls nothing above it, so `walk_ctx` has no
+    # typed hooks to fill; as for `walk_solve` above.
+    check not declared(walkCtxHooks)
+    check not declared(WalkCtxHooks)

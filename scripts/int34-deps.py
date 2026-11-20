@@ -33,9 +33,10 @@ REGIONS = [
     # (R7) is reached through `lowerExprHooks`.
     # INT-34 B5: R2 (`trySolve`, `pathInfeasible`, the witness, the solver
     # budget) is `walk_solve.nim`'s now, with the R0 run state it reads.
-    # INT-34 B2: the frame types and `WalkCtx` are `walk_types.nim`'s now;
-    # R3 starts at the first routine that takes a `WalkCtx`.
-    ("R3 frames, WalkCtx", "proc degrade(w: var WalkCtx"),
+    # INT-34 B2: the frame types and `WalkCtx` are `walk_types.nim`'s now.
+    # INT-34 B6a: R3 (`degrade`, `halted`, `exact`, the frames,
+    # `solveTargetHit`, the pending take and restore) is `walk_ctx.nim`'s
+    # now, with the R0 run state it reads.
     ("R4 expression drains", "# Fork-site registry (Phase 15 H1"),
     ("R6 statement arms, walk", 'include "runtime_heap.nim"'),
     ("R7 probes, closure descent", "# ---- Statement exit-taint test hook"),

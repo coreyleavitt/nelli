@@ -17,7 +17,9 @@ import ./audit_scan_utils   ## `runtimeFamilySources`
 const smtDir = currentSourcePath.parentDir() / ".." / "src" / "nelli" / "smt"
 
 proc runtimeFiles(): seq[string] =
-  for f in walkFiles(smtDir / "runtime*.nim"): result.add f
+  ## The runtime family (RFC-0016 INT-34 B6a: `halted`, the one sanctioned
+  ## discard, moved to `walk_ctx.nim`, outside the `runtime*.nim` glob).
+  for (_, path) in runtimeFamilySources(): result.add path
 
 proc codeLines(f: string): seq[string] =
   for raw in readFile(f).splitLines():
@@ -51,12 +53,12 @@ suite "RFC-0016 K7a (a) -- no walk-level degrade is discarded in place":
     check hits.len == 1 and "cap = cap" in hits[0]   ## the one in `halted`
 
   test "the sanctioned halt and continue constructors exist":
-    let src = readFile(smtDir / "runtime.nim")
+    let src = readFile(smtDir / "walk_ctx.nim")   ## INT-34 B6a
     check "Survivors* = object" in readFile(smtDir / "walk_types.nim")   ## INT-34 B2
-    check "proc halted(" in src
-    check "proc surviving(" in src
-    check "proc continued(" in src
-    check "func exact(" in src
+    check "proc halted*(" in src
+    check "proc surviving*(" in src
+    check "proc continued*(" in src
+    check "func exact*(" in src
 
 suite "RFC-0016 K7a (b) -- CapKind: one producing site per member":
 

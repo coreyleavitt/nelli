@@ -526,12 +526,14 @@ suite "RFC-0016 D3: the include surface":
     # B3: likewise the routines that moved to `walk_path.nim`, and B4 the
     # names that moved to `lower_expr.nim` (`callGuardedNames`,
     # `entryValueOf`, `storeSeqElem`, ...), and B5 those that moved to
-    # `walk_solve.nim` (`currentVariantHeaps`, `ptrSelKey`, ...): the include
-    # reaches them through `runtime.nim`'s import.
+    # `walk_solve.nim` (`currentVariantHeaps`, `ptrSelKey`, ...), and B6a
+    # those that moved to `walk_ctx.nim` (`exact`, `heapInputName`, ...): the
+    # include reaches them through `runtime.nim`'s import.
     let priv = definedNames(rt) + definedNames(readSmt("walk_types.nim")) +
                definedNames(readSmt("walk_path.nim")) +
                definedNames(readSmt("lower_expr.nim")) +
-               definedNames(readSmt("walk_solve.nim"))
+               definedNames(readSmt("walk_solve.nim")) +
+               definedNames(readSmt("walk_ctx.nim"))
     let text = readSmt("runtime_heap.nim")
     let got = referenced(text, priv - definedNames(text))
     var pinned: HashSet[string]
@@ -1385,6 +1387,115 @@ suite "RFC-0016 INT-34 B5: the walk_solve leaf":
     let defs = definedNames(rt)
     let wd = definedNames(ws)
     for n in slvMoved:
+      checkpoint n
+      check n in wd
+    for n in wd:
+      if n in perModuleNames: continue
+      checkpoint n
+      check n notin defs
+
+const
+  ## RFC-0016 INT-34 B6a. What `walk_ctx.nim` may import: std, `z3`, and the
+  ## leaves below it (the value core, the walk state and types, the path,
+  ## lowering and solving leaves, the heap algebra and the exit channels).
+  wcxAllowed = ["std/tables", "std/options", "std/hashes", "std/math",
+                "std/strutils", "std/importutils", "z3", "./types",
+                "./symval", "./walk_state", "./walk_types", "./walk_path",
+                "./lower_expr", "./walk_solve", "./heap_model", "./exits",
+                "../thread_state"]
+  ## A sample of what B6a moved out of `runtime.nim`; the test below checks
+  ## every name `walk_ctx.nim` defines, this list keeps the intent legible.
+  wcxMoved = ["degrade", "halted", "exact", "shouldStop", "pushFrame",
+              "popFrame", "initCallFrame", "initLoopFrame", "solveTargetHit",
+              "takePendingLowerEffects", "restorePendingLowerEffects",
+              "decideVerdict", "havocOpaqueWrites", "pruneFactsHold",
+              "currentCallerHeaps", "currentClosureExitPc",
+              "currentClosureCallErrors", "rfc0005RawStatus"]
+  ## The names `runtime.nim` exported before the move: re-exported by name,
+  ## and no other.
+  wcxPublic = ["heapDepthErrors", "newFieldZeroErrors", "currentCallerHeaps",
+               "currentCallerHeapDepth", "currentCallerAllocCounters",
+               "currentCallerLiveRefs", "currentClosureExitHeaps",
+               "currentClosureExitAllocCounters",
+               "currentClosureExitLiveRefs", "currentClosureDidMutateHeap",
+               "currentClosureExitPc", "currentClosureCallErrors",
+               "rfc0005S1CarrierProbe", "rfc0005S1LeakPinProbe",
+               "defaultConcreteBranchRLimit", "taintedSolveRLimit",
+               "classifyTargetSolve", "decideVerdict", "rfc0005RawStatus"]
+
+suite "RFC-0016 INT-34 B6a: the walk_ctx leaf":
+  let wc = readSmt("walk_ctx.nim")
+
+  test "walk_ctx.nim imports only the allowed leaves":
+    let seen = importsOf(wc)
+    checkpoint $seen
+    for s in seen: check s in wcxAllowed
+    check "./walk_solve" in seen and "./walk_types" in seen
+
+  test "every threadvar of walk_ctx.nim is reset by resetWalkCtxState":
+    let at = wc.find("proc resetWalkCtxState*(")
+    check at >= 0
+    let resetBody = wc[at .. ^1]
+    var tvs: seq[string]
+    for l in wc.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    check tvs.len == 13   # 12 from R0, `rfc0005RawStatus` from R3
+    for n in tvs:
+      checkpoint n
+      check resetBody.contains("\n  " & n & " = ")
+
+  test "every threadvar of walk_ctx.nim is released when its thread exits":
+    let at = wc.find("proc releaseThreadState()")
+    check at >= 0
+    let body = wc[at .. ^1]
+    check wc.contains("\nregisterThreadStateRelease(releaseThreadState)")
+    var n = 0
+    for l in wc.splitLines:
+      if l.strip.startsWith("var ") and "{.threadvar.}" in l:
+        let name = leadIdent(l.strip[4 .. ^1])
+        checkpoint name
+        check body.contains(name)
+        inc n
+    check n == 13
+
+  test "resetSymexRunState calls resetWalkCtxState and no longer resets its threadvars":
+    let rt = readSmt("runtime.nim")
+    let at = rt.find("proc resetSymexRunState(")
+    check at >= 0
+    let e = rt.find("\n  ctx\n", at)
+    check e > at
+    let body = rt[at .. e]
+    check body.contains("\n  resetWalkCtxState()")
+    for l in wc.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        let n = leadIdent(l[4 .. ^1])
+        checkpoint n
+        check not body.contains("\n  " & n & " = ")
+
+  test "walk_ctx names no runtime.nim symbol, and needs no hook":
+    let priv = definedNames(readSmt("runtime.nim"))
+    let named = referenced(wc, priv - definedNames(wc) - boundHere(wc))
+    checkpoint $named
+    check named.len == 0
+    # R3 calls nothing above it: no typed hook table (`d3_hooks` pins it)
+    check not codeOf(wc).contains("Hooks* = object")
+
+  test "runtime.nim imports walk_ctx, re-exports names not the module, and defines none of its names":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("\nimport ./walk_ctx")
+    check not rt.contains("\nexport walk_ctx\n")
+    check not rt.contains("\nexport walk_ctx except")
+    var exported, want: HashSet[string]
+    for l in codeOf(rt).splitLines:
+      for w in l.split({' ', ','}):
+        if w.startsWith("walk_ctx."): exported.incl w["walk_ctx.".len .. ^1]
+    for n in wcxPublic: want.incl n
+    checkpoint $exported
+    check exported == want
+    let defs = definedNames(rt)
+    let wd = definedNames(wc)
+    for n in wcxMoved:
       checkpoint n
       check n in wd
     for n in wd:

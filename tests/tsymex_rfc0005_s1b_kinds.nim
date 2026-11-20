@@ -315,8 +315,14 @@ proc hasIdentCall(code, ident: string): bool =
 
 type Site = tuple[file, routine, line: string]
 
+proc walkerFiles(): seq[string] =
+  ## The runtime family (RFC-0016 INT-34 B6a: the funnels `degrade`,
+  ## `asDegrade` and `carriedDegrade` moved to `walk_ctx.nim`, outside the
+  ## `runtime*.nim` glob).
+  for (_, path) in runtimeFamilySources(): result.add path
+
 proc scanSites(ident: string): seq[Site] =
-  for path in walkFiles(smtDir / "runtime*.nim"):
+  for path in walkerFiles():
     var routine = "<top-level>"
     for raw in readFile(path).splitLines():
       let r = routineName(raw)
@@ -342,10 +348,11 @@ suite "RFC-0005 S1b (b) -- structural correspondence: a Degrade token exists onl
     let ss = scanSites("Degrade")
     checkpoint(report(ss))
     check routinesOf(ss) == @[
-      "runtime.nim:asDegrade",                   # the token of a taken lowering queue
-      "runtime.nim:carriedDegrade",              # taint recorded where it arose (S8cn)
-      "runtime.nim:degrade",                     # records into the site's sink
       "runtime_heap.nim:heapArmDegrade",         # records via allocDegrade
+      # RFC-0016 INT-34 B6a: the three funnels moved with region R3
+      "walk_ctx.nim:asDegrade",                  # the token of a taken lowering queue
+      "walk_ctx.nim:carriedDegrade",             # taint recorded where it arose (S8cn)
+      "walk_ctx.nim:degrade",                    # records into the site's sink
     ]
 
   test "the kindless PATH token is gone (every fork site now has a kind)":
@@ -358,7 +365,7 @@ suite "RFC-0005 S1b (b) -- structural correspondence: a Degrade token exists onl
     ## no degrade, and no skip, marks the run without a recorded kind.
     check scanSites("kindlessRunDegrade").len == 0
     var left: seq[string]
-    for path in walkFiles(smtDir / "runtime*.nim"):
+    for path in walkerFiles():
       var ln = 0
       for line in readFile(path).splitLines():
         inc ln

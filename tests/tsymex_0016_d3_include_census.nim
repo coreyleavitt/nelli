@@ -257,12 +257,14 @@ proc boundHere(text: string): HashSet[string] =
 proc viaHooks(text: string): string =
   ## A call through the hook table (`lowerHooks.lower(`) names a field of the
   ## table, not the `runtime.nim` proc of the same name: drop the member name.
-  ## `pathHooks.` (INT-34 B3b, `walk_path`'s own typed table) and
-  ## `lowerExprHooks.` (INT-34 B4, `lower_expr`'s) are the same.
+  ## `pathHooks.` (INT-34 B3b, `walk_path`'s own typed table),
+  ## `lowerExprHooks.` (INT-34 B4, `lower_expr`'s) and `walkExprHooks.`
+  ## (INT-34 B6b, `walk_expr`'s) are the same.
   var i = 0
   while i < text.len:
     var hit = 0
-    for tag in ["lowerHooks.", "pathHooks.", "lowerExprHooks."]:
+    for tag in ["lowerHooks.", "pathHooks.", "lowerExprHooks.",
+                "walkExprHooks."]:
       if text.continuesWith(tag, i): hit = tag.len
     if hit > 0:
       i += hit
@@ -527,13 +529,15 @@ suite "RFC-0016 D3: the include surface":
     # names that moved to `lower_expr.nim` (`callGuardedNames`,
     # `entryValueOf`, `storeSeqElem`, ...), and B5 those that moved to
     # `walk_solve.nim` (`currentVariantHeaps`, `ptrSelKey`, ...), and B6a
-    # those that moved to `walk_ctx.nim` (`exact`, `heapInputName`, ...): the
-    # include reaches them through `runtime.nim`'s import.
+    # those that moved to `walk_ctx.nim` (`exact`, `heapInputName`, ...), and
+    # B6b those that moved to `walk_expr.nim` (`forkDefect`, `liveFrame`,
+    # ...): the include reaches them through `runtime.nim`'s import.
     let priv = definedNames(rt) + definedNames(readSmt("walk_types.nim")) +
                definedNames(readSmt("walk_path.nim")) +
                definedNames(readSmt("lower_expr.nim")) +
                definedNames(readSmt("walk_solve.nim")) +
-               definedNames(readSmt("walk_ctx.nim"))
+               definedNames(readSmt("walk_ctx.nim")) +
+               definedNames(readSmt("walk_expr.nim"))
     let text = readSmt("runtime_heap.nim")
     let got = referenced(text, priv - definedNames(text))
     var pinned: HashSet[string]
@@ -1098,8 +1102,10 @@ suite "RFC-0016 INT-34 B3: the walk_path leaf":
     check rt.count("pathHooks = PathHooks(noteUbAtFork: noteUbAtFork)") == 1
     check not rt.contains("noteUbAtForkHook")
     check not rt.contains("cast[Path]")
-    # the body stays in runtime.nim (R4), with no forward declaration
-    check readSmt("runtime.nim").count("\nproc noteUbAtFork(") == 1
+    # the body is R4's, in `walk_expr.nim` since INT-34 B6b (still above
+    # runtime.nim, which fills the hook with it), with no forward declaration
+    check readSmt("walk_expr.nim").count("\nproc noteUbAtFork*(") == 1
+    check not readSmt("runtime.nim").contains("\nproc noteUbAtFork")
 
   test "runtime.nim imports walk_path, re-exports names not the module, and defines none of its names":
     let rt = readSmt("runtime.nim")
@@ -1496,6 +1502,139 @@ suite "RFC-0016 INT-34 B6a: the walk_ctx leaf":
     let defs = definedNames(rt)
     let wd = definedNames(wc)
     for n in wcxMoved:
+      checkpoint n
+      check n in wd
+    for n in wd:
+      if n in perModuleNames: continue
+      checkpoint n
+      check n notin defs
+
+const
+  ## RFC-0016 INT-34 B6b. What `walk_expr.nim` may import: std, `z3`, and the
+  ## leaves below it (the build profile and the axes, the value core, the
+  ## walk state and types, the path, lowering, solving and context leaves,
+  ## the regex and exception tables, the heap algebra, the string support
+  ## and the exit channels).
+  wexAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
+                "std/algorithm", "std/math", "std/strutils",
+                "std/importutils", "z3", "./buildprofile", "./types",
+                "./admission", "./readonlyaxes", "./arith_regime",
+                "./definedness", "./variant_layout", "./abstraction",
+                "./symval", "./walk_state", "./walk_types", "./walk_path",
+                "./lower_expr", "./walk_solve", "./walk_ctx",
+                "./regex_parser", "./exn_hierarchy", "./nativestack",
+                "./z3check", "./heap_model", "./string_lower_support",
+                "./exits", "./concolictaxonomy", "../thread_state"]
+  ## A sample of what B6b moved out of `runtime.nim`; the test below checks
+  ## every name `walk_expr.nim` defines, this list keeps the intent legible.
+  wexMoved = ["lowerInExpr", "lowerBoolInExpr", "lowerLeafInExpr",
+              "drainPendingLowerEffects", "drainScalarRaiseForks",
+              "drainClosureExitHeap", "crashRaise", "haltUndefined",
+              "haltExcludedDefect", "noteUbAtFork", "raiseSplit",
+              "forkDefect", "depthBail", "concreteBranchOutcome",
+              "mergeJoinPaths", "joinSV", "completeReturn", "haltFrontier",
+              "boundsUnchecked", "seedCallerHeapThreadvars",
+              "lastDrainedClosureExitPc", "closureBodyCallerPc"]
+  ## The names `runtime.nim` exported before the move: re-exported by name,
+  ## and no other.
+  wexPublic = ["seedCallerHeapThreadvars", "typeIdToDefectKind",
+               "concretelyInfeasible", "concreteBranchRLimit",
+               "concreteBranchOutcome"]
+  ## The threadvars that are not per-run: `scratchCapped` is set and cleared
+  ## around each concrete-branch ask, `uninterpDeclKind` caches the linked
+  ## Z3's decl kind for the thread.
+  wexNotPerRun = ["scratchCapped", "uninterpDeclKind"]
+
+suite "RFC-0016 INT-34 B6b: the walk_expr leaf":
+  let we = readSmt("walk_expr.nim")
+
+  test "walk_expr.nim imports only the allowed leaves":
+    let seen = importsOf(we)
+    checkpoint $seen
+    for s in seen: check s in wexAllowed
+    check "./walk_ctx" in seen and "./lower_expr" in seen
+
+  test "every per-run threadvar of walk_expr.nim is reset by resetWalkExprState":
+    let at = we.find("proc resetWalkExprState*(")
+    check at >= 0
+    let resetBody = we[at .. ^1]
+    var tvs: seq[string]
+    for l in we.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    check tvs.len == 7   # 5 from R0, 2 from R4
+    for n in tvs:
+      checkpoint n
+      if n in wexNotPerRun:
+        check not resetBody.contains("\n  " & n & " = ")
+      else:
+        check resetBody.contains("\n  " & n & " = ")
+
+  test "every threadvar of walk_expr.nim is released when its thread exits":
+    let at = we.find("proc releaseThreadState()")
+    check at >= 0
+    let body = we[at .. ^1]
+    check we.contains("\nregisterThreadStateRelease(releaseThreadState)")
+    var n = 0
+    for l in we.splitLines:
+      if l.strip.startsWith("var ") and "{.threadvar.}" in l:
+        let name = leadIdent(l.strip[4 .. ^1])
+        checkpoint name
+        check body.contains(name)
+        inc n
+    check n == 7
+
+  test "resetSymexRunState calls resetWalkExprState and no longer resets its threadvars":
+    let rt = readSmt("runtime.nim")
+    let at = rt.find("proc resetSymexRunState(")
+    check at >= 0
+    let e = rt.find("\n  ctx\n", at)
+    check e > at
+    let body = rt[at .. e]
+    check body.contains("\n  resetWalkExprState()")
+    for l in we.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        let n = leadIdent(l[4 .. ^1])
+        checkpoint n
+        check not body.contains("\n  " & n & " = ")
+
+  test "walk_expr names no runtime.nim symbol but through its hook":
+    let priv = definedNames(readSmt("runtime.nim"))
+    let named = referenced(viaHooks(we),
+                           priv - definedNames(we) - boundHere(we))
+    checkpoint $named
+    check named.len == 0
+
+  test "routeRaise is reached through walk_expr's typed hook":
+    let text = codeOf(we)
+    check text.count("walkExprHooks.routeRaise(") == 8
+    check text.contains("\n  WalkExprHooks* = object")
+    check text.contains("\n    routeRaise*: proc(")
+    check text.contains("\nvar walkExprHooks*: WalkExprHooks")
+    # no bare call of the runtime proc is left in the leaf
+    check text.replace("walkExprHooks.routeRaise(", "").count("routeRaise(") == 0
+    # runtime fills it once beside `lowerExprHooks`, with the proc itself
+    let rt = codeOf(readSmt("runtime.nim"))
+    check rt.count("walkExprHooks = WalkExprHooks(routeRaise: routeRaise)") == 1
+    # the body stays in runtime.nim (R7); R6 calls it before it, so its
+    # forward declaration stays too
+    check readSmt("runtime.nim").count("\nproc routeRaise(") == 2
+
+  test "runtime.nim imports walk_expr, re-exports names not the module, and defines none of its names":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("\nimport ./walk_expr")
+    check not rt.contains("\nexport walk_expr\n")
+    check not rt.contains("\nexport walk_expr except")
+    var exported, want: HashSet[string]
+    for l in codeOf(rt).splitLines:
+      for w in l.split({' ', ','}):
+        if w.startsWith("walk_expr."): exported.incl w["walk_expr.".len .. ^1]
+    for n in wexPublic: want.incl n
+    checkpoint $exported
+    check exported == want
+    let defs = definedNames(rt)
+    let wd = definedNames(we)
+    for n in wexMoved:
       checkpoint n
       check n in wd
     for n in wd:

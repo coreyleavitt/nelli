@@ -153,10 +153,14 @@ const
   ## RFC-0016 INT-34 B6a: region R3 (`degrade`, the frames) moved into
   ## `walk_ctx.nim` with its one marked line: runtime.nim 38 -> 37,
   ## walk_ctx.nim 0 -> 1. The family total is unchanged.
-  markerPins = [("runtime.nim", 37), ("runtime_strings.nim", 4),
+  ## RFC-0016 INT-34 B6b: region R4 (`sameSV`, `joinSV`, the drains) moved
+  ## into `walk_expr.nim` with its 5 marked lines: runtime.nim 37 -> 32,
+  ## walk_expr.nim 0 -> 5. The family total is unchanged.
+  markerPins = [("runtime.nim", 32), ("runtime_strings.nim", 4),
                 ("heap_model.nim", 23), ("runtime_heap.nim", 11),
                 ("symval.nim", 2), ("lower_expr.nim", 56),
-                ("walk_solve.nim", 24), ("walk_ctx.nim", 1)]
+                ("walk_solve.nim", 24), ("walk_ctx.nim", 1),
+                ("walk_expr.nim", 5)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"

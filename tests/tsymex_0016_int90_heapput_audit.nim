@@ -164,13 +164,15 @@ suite "INT-90: one choke point for a path's heap writes":
           where.add s.name & " " & enclosingDecl(lines, i)
     checkpoint $where
     where.sort()   # the scan's file order is the directory's
-    check where == @["runtime.nim proc drainClosureExitHeap",
-                     "runtime.nim proc mergeJoinPaths",
+    check where == @[# RFC-0016 INT-34 B6b: the joins are `walk_expr`'s
+                     "walk_expr.nim proc drainClosureExitHeap",
+                     "walk_expr.nim proc mergeJoinPaths",
                      # RFC-0016 INT-34 B3: the fork copy is `walk_path`'s
                      "walk_path.nim proc deepCopyHeapState"]
     # each carries the paths' counters with the heaps (the desync key)
     for s in srcs:
-      if s.name notin ["runtime.nim", "walk_path.nim"]: continue
+      if s.name notin ["runtime.nim", "walk_path.nim", "walk_expr.nim"]:
+        continue
       let lines = s.code.splitLines
       for i, l in lines:
         if ".heaps = " notin l: continue

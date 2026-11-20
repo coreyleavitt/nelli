@@ -346,6 +346,10 @@ const
                            "nelli" / "smt" / "runtime.nim"
   lowerExprPath         = currentSourcePath.parentDir() / ".." / "src" /
                            "nelli" / "smt" / "lower_expr.nim"   ## RFC-0016 INT-34 B4: `lower`
+  walkCtxPath           = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "walk_ctx.nim"   ## RFC-0016 INT-34 B6a: the context's verbs
+  walkExprPath          = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "walk_expr.nim"   ## RFC-0016 INT-34 B6b: the drains
   runtimeStringsPath    = currentSourcePath.parentDir() / ".." / "src" /
                            "nelli" / "smt" / "runtime_strings.nim"
   runtimeFloatsPath     = currentSourcePath.parentDir() / ".." / "src" /
@@ -376,6 +380,8 @@ let
   # indirectly, through `scannedFiles`.
   runtimeContent           = readFile(runtimePath)
   lowerExprContent         = readFile(lowerExprPath)
+  walkCtxContent           = readFile(walkCtxPath)
+  walkExprContent          = readFile(walkExprPath)
   runtimeStringsContent    = readFile(runtimeStringsPath)
   runtimeFloatsContent     = readFile(runtimeFloatsPath)
   runtimeExceptionsContent = readFile(runtimeExceptionsPath)
@@ -387,6 +393,8 @@ let
   scannedFiles: seq[(string, string)] = @[
     ("runtime.nim", runtimeContent),
     ("lower_expr.nim", lowerExprContent),
+    ("walk_ctx.nim", walkCtxContent),
+    ("walk_expr.nim", walkExprContent),
     ("runtime_strings.nim", runtimeStringsContent),
     ("runtime_floats.nim", runtimeFloatsContent),
     ("runtime_exceptions.nim", runtimeExceptionsContent),
@@ -596,10 +604,13 @@ proc isExemptedLine(fname, trimmed: string): bool =
   ## directly, never through `parseAtomicOperand`; the one `let` that holds a
   ## hoisted operand is the parser's own `__sym_` temporary, which the arm
   ## returns on before this peek.
-  fname == "src/nelli/smt/runtime.nim" and
+  ##
+  ## RFC-0016 INT-34 B6b: `bindsViewWholeShape` is `walk_expr.nim`'s now.
+  (fname == "src/nelli/smt/runtime.nim" and
     (trimmed == "if formal.isVar and stmt.cargs[i].kind == iekVar:" or
-     trimmed == "assignsChar: stmt.avalue.kind == iekStrSetAt)" or
-     trimmed == "if s.lvalue != nil and s.lvalue.kind == iekTupleLit:")
+     trimmed == "assignsChar: stmt.avalue.kind == iekStrSetAt)")) or
+  (fname == "src/nelli/smt/walk_expr.nim" and
+    trimmed == "if s.lvalue != nil and s.lvalue.kind == iekTupleLit:")
 
 proc scanForSubfieldIekShapePeeks(fname, contents: string,
                                    violations: var seq[KindViolation]) =

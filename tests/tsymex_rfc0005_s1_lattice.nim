@@ -137,7 +137,8 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
               "definedness.nim",
               "walk_types.nim",    # RFC-0016 INT-34 B2: the walker's types
               "walk_path.nim",     # RFC-0016 INT-34 B3: the fork constructors
-              "walk_ctx.nim"]:     # RFC-0016 INT-34 B6a: the walk context's verbs
+              "walk_ctx.nim",      # RFC-0016 INT-34 B6a: the walk context's verbs
+              "walk_expr.nim"]:    # RFC-0016 INT-34 B6b: the drains and halts
       let path = currentSourcePath().parentDir.parentDir / "src" / "nelli" / "smt" / f
       if fileExists(path):
         for line in readFile(path).splitLines():
@@ -347,6 +348,11 @@ proc allWriters(field: string): seq[Writer] =
   # region R3.
   let wc = smtDir / "walk_ctx.nim"
   result.add scanWriters(readFile(wc), wc.extractFilename, field)
+  # RFC-0016 INT-34 B6b: the drains and the path join moved to
+  # `walk_expr.nim` with region R4 (no writer among them; scanned so a new
+  # one there is seen).
+  let we = smtDir / "walk_expr.nim"
+  result.add scanWriters(readFile(we), we.extractFilename, field)
 
 proc routinesOf(ws: seq[Writer]): seq[string] =
   var s: HashSet[string]

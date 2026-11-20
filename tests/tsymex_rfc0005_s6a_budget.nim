@@ -433,8 +433,9 @@ const
   smtSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" / "smt"
   ## The walker's files the audited sites live in: `runtime.nim`, and since
   ## RFC-0016 INT-34 B6a `walk_ctx.nim` (the S1 probe's `halted` sites moved
-  ## there with region R3).
-  walkerFiles = ["runtime.nim", "walk_ctx.nim"]
+  ## there with region R3), and since B6b `walk_expr.nim` (`haltFrontier`,
+  ## `capLoopFrontier` and the call-depth bail moved there with region R4).
+  walkerFiles = ["runtime.nim", "walk_ctx.nim", "walk_expr.nim"]
 
 proc walkerSrc(): string =
   for f in walkerFiles: result.add readFile(smtSrc / f) & "\n"

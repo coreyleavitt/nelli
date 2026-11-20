@@ -37,7 +37,11 @@ REGIONS = [
     # INT-34 B6a: R3 (`degrade`, `halted`, `exact`, the frames,
     # `solveTargetHit`, the pending take and restore) is `walk_ctx.nim`'s
     # now, with the R0 run state it reads.
-    ("R4 expression drains", "# Fork-site registry (Phase 15 H1"),
+    # INT-34 B6b: R4 (`lowerInExpr`, `drainPendingLowerEffects`, the raise
+    # forks, `crashRaise`, the halts, `mergeJoinPaths`) is `walk_expr.nim`'s
+    # now, with the R0 run state it reads; `routeRaise` (R7) is reached
+    # through `walkExprHooks`. The forward declarations of R6/R7 routines
+    # R4 held stay at the head of R6.
     ("R6 statement arms, walk", 'include "runtime_heap.nim"'),
     ("R7 probes, closure descent", "# ---- Statement exit-taint test hook"),
     ("R8 drivers", "# ---- Public driver"),

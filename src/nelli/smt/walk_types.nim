@@ -471,6 +471,23 @@ type
       raisedMsg*:     Option[string]
       raisedWitness*: RawWitness
 
+func capSetting*(c: CapKind): string =
+  ## RFC-0016 K7a. The `Settings` knob a cap cut is raised with, shown in the
+  ## recorded message by `degrade`. Total (no `else`): a new `CapKind` member
+  ## is a compile error until it names its setting.
+  case c
+  of ckNone:               ""
+  of ckFrontier:           "maxFrontierSize"
+  of ckHeapDepth:          "maxHeapDepth"
+  of ckCallDepth:          "maxCallDepth/maxRecursionDepth"
+  of ckLoopUnwind,
+     ckLoopUnwindFollow:   "maxLoopUnwind"
+  of ckVariantForks:       "maxVariantConstructorForks"
+  of ckVariantFieldAllocs: "maxVariantConstructorFieldAllocs"
+  of ckTermWalkRead,
+     ckTermWalkWrite:      "termWalkMaxDepth"
+  of ckWalkWork:           "walkRLimit"
+
 type UninitScan* = object
   depth*: int   ## RFC-0005 S8ct. The levels of `uninitAt` open.
   ## One `uninitReadCond` query's memo: whether a term mentions a base, and
@@ -915,10 +932,6 @@ type
     checks*, prunes*: int
 
   WalkCtx* = object
-    capCuts*:   set[CapKind]
-      ## RFC-0016 K7a. The caps this walk cut at, recorded by `degrade`'s
-      ## `cap` argument. Diagnostic only: read by nothing that decides a
-      ## verdict, so no walker bump and no cache key.
     z3*:        Z3Context
     target*:    SymexTarget
     params*:    seq[IRParam]

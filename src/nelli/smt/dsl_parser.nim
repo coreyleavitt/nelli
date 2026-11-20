@@ -1915,21 +1915,27 @@ proc parseCheckPragma(ctx: ParseCtx; n: NimNode): IRStmt =
   ## check scope and its arithmetic frame) as the code generator applies it,
   ## in textual order. nil for a pragma statement this does not model (the
   ## caller's catch-all declines it, as before).
+  ##
+  ## The innermost frame is read field by field into scalars, never bound by
+  ## `let`: in the compile-time VM a `let` of a seq element can alias it
+  ## rather than copy it (`vm_alias_guard`), and this routine mutates that
+  ## frame (`closeRegion`, the `open.add` below).
   if ctx.regionFrames.len == 0: return nil
-  let frame = ctx.regionFrames[^1]
+  let allowed = ctx.regionFrames[^1].allowed
+  let iterMark = ctx.regionFrames[^1].iterMark
   if isPopPragma(n):
-    if not frame.allowed or frame.open.len == 0 or
-       ctx.iterBodies.len > frame.iterMark: return nil
-    let id = frame.open[^1]
+    if not allowed or ctx.regionFrames[^1].open.len == 0 or
+       ctx.iterBodies.len > iterMark: return nil
+    let id = ctx.regionFrames[^1].open[^1]
     ctx.closeRegion()
     return mkLabelledBlock(regionPop & $id, @[])
   if not isCheckPush(n): return nil
-  if ctx.iterBodies.len > frame.iterMark:
+  if ctx.iterBodies.len > iterMark:
     return ctx.declineMarker(feCheckOption, "a check push at line " &
       $n.lineInfoObj.line & " inside an inlined iterator's expansion is " &
       "not modelled (where it lands is not verified natively) -- path " &
       "degraded to sxUnknown")
-  if not frame.allowed: return nil
+  if not allowed: return nil
   var top = if ctx.checkScopes.len > 0: ctx.checkScopes[^1]
             else: buildSemantics.checks * (scopeChecks + {coNan, coInf})
   var ovfOn = ctx.overflowChecked
@@ -2172,9 +2178,10 @@ proc groupSeq(ctx: ParseCtx; stmts: seq[IRStmt]; seen: var seq[int];
         err = "a region's pop was parsed apart from its push"
         return stmts
       let fr = stack.pop()
-      let r = ctx.regionFacts[m.id]
-      let blk = mkRoutineBlock(r.facts, fr.stmts).withCheckScope(
-        r.on * scopeChecks)
+      # Indexed, never bound by `let`: the table's `var` `[]` would alias the
+      # entry in the compile-time VM (`vm_alias_guard`).
+      let blk = mkRoutineBlock(ctx.regionFacts[m.id].facts, fr.stmts).
+        withCheckScope(ctx.regionFacts[m.id].on * scopeChecks)
       if stack.len > 0: stack[^1].stmts.add blk
       else: result.add blk
   if stack.len > 0:

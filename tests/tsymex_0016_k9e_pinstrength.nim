@@ -15,6 +15,14 @@
 ## - once the floor is above zero the run must be complete: one row per
 ##   mutant the header counts, no `timeout` left unrerun (a partial run
 ##   cannot certify a floor);
+## - once the floor is above zero, every `survived` row's id is in the
+##   "## Equivalent mutants" table of docs/rfc-data/0016-k9e.md (a survivor is
+##   closed by a justification or a pin, never left open), and no id in that
+##   table is recorded `killed` (a stale justification);
+## - once the floor is above zero, the TSV's ids are exactly the ids
+##   `python3 scripts/pin-strength-mutants.py list` enumerates for the current
+##   tree, and the header's `mutants:` equals that count (a regenerated mutant
+##   set cannot leave a stale TSV certifying ids that no longer exist);
 ## - every suite the measurement runs exists and is registered in
 ##   `nelli.nimble`, so the list cannot name a suite no CI leg keeps green.
 ##
@@ -22,7 +30,7 @@
 ## figure in the same commit as the TSV. A survivor is a finding (a new pin, or
 ## an equivalent-mutant justification in docs/rfc-data/0016-k9e.md), never a
 ## lowered floor.
-import std/[unittest, os, strutils, tables]
+import std/[unittest, os, strutils, tables, osproc, sets]
 
 const
   root = currentSourcePath().parentDir.parentDir
@@ -30,6 +38,8 @@ const
   floorPath = root / "tests" / "0016-pinstrength.floor"
   suitesPath = root / "tests" / "0016-pinstrength.suites"
   nimblePath = root / "nelli.nimble"
+  docPath = root / "docs" / "rfc-data" / "0016-k9e.md"
+  generatorPath = root / "scripts" / "pin-strength-mutants.py"
   statuses = ["killed", "survived", "timeout", "stillborn", "equivalent", "error"]
 
 proc codeLines(path: string): seq[string] =
@@ -46,12 +56,70 @@ proc headerField(header: string; name: string): string =
 proc figureOf(killed, survived: int): float =
   if killed + survived == 0: 0.0 else: 100.0 * killed.float / float(killed + survived)
 
+proc equivalenceIds(doc: string): HashSet[string] =
+  ## First-column ids of the table under "## Equivalent mutants", up to the
+  ## next "## " heading, backticks stripped.
+  var inSection = false
+  for l in doc.splitLines:
+    if l.startsWith("## "):
+      inSection = l.strip == "## Equivalent mutants"
+      continue
+    if not inSection or not l.startsWith("|"): continue
+    let cell = l.split('|')[1].strip.replace("`", "").strip
+    if cell.len > 0 and cell != "id" and not cell.startsWith("--"):
+      result.incl cell
+
+proc survivorProblems(rows: seq[(string, string)];
+                      equiv: HashSet[string]): seq[string] =
+  ## Unjustified survivors, and justifications the run shows killed.
+  for (id, status) in rows:
+    if status == "survived" and id notin equiv:
+      result.add "survivor without justification: " & id
+    if status == "killed" and id in equiv:
+      result.add "stale justification (killed): " & id
+
+proc generatorProblems(rows: seq[(string, string)];
+                       gen: HashSet[string]): seq[string] =
+  ## The TSV's id set against the generator's, both directions.
+  var tsv = initHashSet[string]()
+  for (id, _) in rows: tsv.incl id
+  for id in tsv - gen: result.add "TSV id the generator no longer lists: " & id
+  for id in gen - tsv: result.add "generator id missing from the TSV: " & id
+
+proc generatorIds(): HashSet[string] =
+  let (o, rc) = execCmdEx("python3 " & quoteShell(generatorPath) & " list " &
+                          quoteShell(root))
+  doAssert rc == 0, "pin-strength-mutants.py list failed: " & o
+  for l in o.splitLines:
+    if l.len > 0: result.incl l.split('\t')[0]
+
+suite "RFC-0016 K9e: survivor and generator checks, on fixtures":
+  let eq = toHashSet(["ma", "mb"])
+  test "a survivor with no justification fails":
+    check survivorProblems(@[("mc", "survived")], eq).len == 1
+  test "a justified survivor passes":
+    check survivorProblems(@[("ma", "survived")], eq).len == 0
+  test "a killed id in the equivalence table fails":
+    check survivorProblems(@[("mb", "killed")], eq).len == 1
+  test "the equivalence table parses backticked and bare ids, only its section":
+    let doc = "## A\n| `mx` | x |\n## Equivalent mutants\n\n| id | site |\n|----|----|\n| `ma` | s |\n| mb | s |\n## B\n| `my` | y |\n"
+    check equivalenceIds(doc) == eq
+  test "a TSV id missing from the generator fails":
+    check generatorProblems(@[("ma", "killed"), ("mz", "killed")],
+                            toHashSet(["ma"])).len == 1
+  test "a generator id missing from the TSV fails":
+    check generatorProblems(@[("ma", "killed")],
+                            toHashSet(["ma", "mq"])).len == 1
+  test "matching sets pass":
+    check generatorProblems(@[("ma", "killed")], toHashSet(["ma"])).len == 0
+
 suite "RFC-0016 K9e: pin strength":
   let floorLines = codeLines(floorPath)
   let floor = parseFloat(floorLines[0])
   var header: seq[string]
   var counts = initCountTable[string]()
   var rows = 0
+  var tsvRows: seq[(string, string)]
   for l in readFile(tsvPath).splitLines:
     if l.len == 0: continue
     if l.startsWith("#"):
@@ -63,6 +131,7 @@ suite "RFC-0016 K9e: pin strength":
     check f[0].len == 11 and f[0][0] == 'm'
     check f[3] in statuses
     counts.inc f[3]
+    tsvRows.add (f[0], f[3])
     inc rows
   let all = header.join(" ")
 
@@ -89,6 +158,17 @@ suite "RFC-0016 K9e: pin strength":
       check rows == parseInt(headerField(all, "mutants"))
       check counts["timeout"] == 0
       check counts["error"] == 0
+
+  test "a floor above zero: every survivor is justified, no justification is stale":
+    if floor > 0.0:
+      check survivorProblems(tsvRows, equivalenceIds(readFile(docPath))) ==
+        newSeq[string]()
+
+  test "a floor above zero: the TSV matches the generator's mutant set":
+    if floor > 0.0:
+      let gen = generatorIds()
+      check generatorProblems(tsvRows, gen) == newSeq[string]()
+      check parseInt(headerField(all, "mutants")) == gen.len
 
   test "every measured suite exists and is registered":
     let nimble = readFile(nimblePath)

@@ -2,57 +2,62 @@
 """RFC-0016 K9e: the mutant generator for the pin-strength measurement.
 
 Enumerates mutation sites in the walker's integer arithmetic and raise arms
-(`src/nelli/smt/runtime.nim`) and applies one mutant to a scratch copy of the
+(the lowering in `src/nelli/smt/lower_expr.nim`, the raise drains in
+`src/nelli/smt/walk_expr.nim`) and applies one mutant to a scratch copy of the
 tree. The measurement (`scripts/pin-strength.sh`) asks, per mutant, whether
 some pin suite of `tests/0016-pinstrength.suites` fails on it.
 
 A mutant is a scope (a named routine, or one arm of one), a rule and a site.
 Its id is a hash of the scope, the rule, the stripped text of the line, that
 text's occurrence number within the scope and the match number within the
-line -- never a line number -- so an edit elsewhere in `runtime.nim` leaves
-every id unchanged, and an edit to a mutated line retires that line's ids
+line -- never a line number or a file -- so an edit elsewhere in a source, or
+a scope moving to another module, leaves every id unchanged, and an edit to a mutated line retires that line's ids
 (and mints new ones) instead of silently pointing them at other code.
 
 Usage:
   pin-strength-mutants.py list  [ROOT]          # TSV: id kind scope line text
-  pin-strength-mutants.py apply ID [ROOT]       # mutate ROOT in place
+  pin-strength-mutants.py apply ID [ROOT]       # mutate ROOT in place; print
+                                                #   the source it edited
   pin-strength-mutants.py show  ID [ROOT]       # print the one-line diff
 
 ROOT defaults to the repository this script lives in. The generator is
-deterministic: the same `runtime.nim` gives the same list in the same order.
+deterministic: the same sources give the same list in the same order. Each
+scope names the one source it lives in; a scope that moves fails the list
+loudly (`scope X not found in F`) until its entry names the new module.
 """
 import hashlib
 import re
 import sys
 from pathlib import Path
 
-RUNTIME = "src/nelli/smt/runtime.nim"
+LOWER = "src/nelli/smt/lower_expr.nim"
+WALK = "src/nelli/smt/walk_expr.nim"
 
-# The scopes: (name, start regex, end regex or None for "the next top-level
-# line"). Every routine here lowers integer arithmetic or a comparison, bounds
+# The scopes: (name, source, start regex, end regex or None for "the next
+# top-level line"). Every routine here lowers integer arithmetic or a comparison, bounds
 # a width, or deposits / drains an arithmetic or range raise.
 SCOPES = [
-    ("truncDivInt", r"^proc truncDivInt\*?\(", None),
-    ("arithInt", r"^proc arithInt\*?\(", None),
-    ("cmpInt", r"^proc cmpInt\*?\(", None),
-    ("cmpBV", r"^template cmpBV\*?\(", None),
-    ("divBV", r"^template divBV\*?\(", None),
-    ("modBV", r"^template modBV\*?\(", None),
-    ("divisorIsZero", r"^proc divisorIsZero\*?\(.*=\s*$", None),
-    ("overflowCond", r"^proc overflowCond\*?\(.*=\s*$", None),
-    ("intBounds", r"^proc intBounds\*?\(.*=\s*$", None),
-    ("overflowCondInt", r"^proc overflowCondInt\*?\(", None),
-    ("divLowByMinusOne", r"^proc divLowByMinusOne\*?\(", None),
-    ("intWindow", r"^proc intWindow\*?\(", None),
-    ("wrapIntToWidth", r"^proc wrapIntToWidth\*?\(", None),
-    ("depositSignedOverflow", r"^proc depositSignedOverflow\*?\(", None),
-    ("lowerArith", r"^proc lowerArith\*?\(", None),
-    ("lowerCmp", r"^proc lowerCmp\*?\(", None),
-    ("lowerConvIntRange", r"^proc lowerConvIntRange\*?\(", None),
-    ("lowerExpr.uNeg", r"^    of uNeg:\s*$", r"^    of uNot:\s*$"),
-    ("drain.DivByZero", r"^genRaiseForkDrain\(drainDivByZeroRaises,", None),
-    ("drain.Overflow", r"^genRaiseForkDrain\(drainOverflowRaises,", None),
-    ("drain.Range", r"^genRaiseForkDrain\(drainRangeRaises,", None),
+    ("truncDivInt", LOWER, r"^proc truncDivInt\*?\(", None),
+    ("arithInt", LOWER, r"^proc arithInt\*?\(", None),
+    ("cmpInt", LOWER, r"^proc cmpInt\*?\(", None),
+    ("cmpBV", LOWER, r"^template cmpBV\*?\(", None),
+    ("divBV", LOWER, r"^template divBV\*?\(", None),
+    ("modBV", LOWER, r"^template modBV\*?\(", None),
+    ("divisorIsZero", LOWER, r"^proc divisorIsZero\*?\(.*=\s*$", None),
+    ("overflowCond", LOWER, r"^proc overflowCond\*?\(.*=\s*$", None),
+    ("intBounds", LOWER, r"^proc intBounds\*?\(.*=\s*$", None),
+    ("overflowCondInt", LOWER, r"^proc overflowCondInt\*?\(", None),
+    ("divLowByMinusOne", LOWER, r"^proc divLowByMinusOne\*?\(", None),
+    ("intWindow", LOWER, r"^proc intWindow\*?\(", None),
+    ("wrapIntToWidth", LOWER, r"^proc wrapIntToWidth\*?\(", None),
+    ("depositSignedOverflow", LOWER, r"^proc depositSignedOverflow\*?\(", None),
+    ("lowerArith", LOWER, r"^proc lowerArith\*?\(", None),
+    ("lowerCmp", LOWER, r"^proc lowerCmp\*?\(", None),
+    ("lowerConvIntRange", LOWER, r"^proc lowerConvIntRange\*?\(", None),
+    ("lowerExpr.uNeg", LOWER, r"^    of uNeg:\s*$", r"^    of uNot:\s*$"),
+    ("drain.DivByZero", WALK, r"^genRaiseForkDrain\(drainDivByZeroRaises,", None),
+    ("drain.Overflow", WALK, r"^genRaiseForkDrain\(drainOverflowRaises,", None),
+    ("drain.Range", WALK, r"^genRaiseForkDrain\(drainRangeRaises,", None),
 ]
 
 # Line rules: (kind, regex, replacement). Applied to the code part of a line
@@ -169,28 +174,26 @@ def code_part(line):
     return "".join(out).rstrip()
 
 
-def find_scopes(lines):
-    found = []
-    for name, start, end in SCOPES:
-        rx = re.compile(start)
-        starts = [i for i, l in enumerate(lines) if rx.search(l)]
-        # A forward declaration has no body: take the last definition.
-        if not starts:
-            raise SystemExit(f"pin-strength-mutants: scope {name} not found in {RUNTIME}")
-        s = starts[-1]
-        e = s + 1
-        if end:
-            erx = re.compile(end)
-            while e < len(lines) and not erx.search(lines[e]):
-                e += 1
-        else:
-            while e < len(lines):
-                l = lines[e]
-                if l and not l[0].isspace() and not l.startswith("#"):
-                    break
-                e += 1
-        found.append((name, s, e))
-    return found
+def find_scope(name, start, end, lines, src):
+    """(first, past-last) line index of scope `name` in the source `src`."""
+    rx = re.compile(start)
+    starts = [i for i, l in enumerate(lines) if rx.search(l)]
+    # A forward declaration has no body: take the last definition.
+    if not starts:
+        raise SystemExit(f"pin-strength-mutants: scope {name} not found in {src}")
+    s = starts[-1]
+    e = s + 1
+    if end:
+        erx = re.compile(end)
+        while e < len(lines) and not erx.search(lines[e]):
+            e += 1
+    else:
+        while e < len(lines):
+            l = lines[e]
+            if l and not l[0].isspace() and not l.startswith("#"):
+                break
+            e += 1
+    return s, e
 
 
 def mutant_id(scope, kind, text, occ, k):
@@ -198,14 +201,19 @@ def mutant_id(scope, kind, text, occ, k):
     return f"m{h}"
 
 
-def enumerate_mutants(lines):
-    """[(id, kind, scope, line_index, {line_index: new_line})] in file order."""
+def enumerate_mutants(sources):
+    """[(id, kind, scope, source, line_index, {line_index: new_line})] in
+    scope order, then line order. `sources` maps a source path (relative to
+    the root) to its lines."""
     out = []
+    src = None
 
     def add(scope, kind, stripped, occ, k, i, edits):
-        out.append((mutant_id(scope, kind, stripped, occ, k), kind, scope, i, edits))
+        out.append((mutant_id(scope, kind, stripped, occ, k), kind, scope, src, i, edits))
 
-    for scope, s, e in find_scopes(lines):
+    for scope, src, start, end in SCOPES:
+        lines = sources[src]
+        s, e = find_scope(scope, start, end, lines, src)
         seen = {}
         for i in range(s, e):
             raw = lines[i]
@@ -268,8 +276,9 @@ def enumerate_mutants(lines):
 
 
 def load(root):
-    p = Path(root) / RUNTIME
-    return p, p.read_text().split("\n")
+    """Each scope's source, read once: {relative path: lines}."""
+    return {src: (Path(root) / src).read_text().split("\n")
+            for src in dict.fromkeys(src for _, src, _, _ in SCOPES)}
 
 
 def main(argv):
@@ -280,28 +289,30 @@ def main(argv):
     default_root = Path(__file__).resolve().parent.parent
     if cmd == "list":
         root = argv[2] if len(argv) > 2 else default_root
-        _, lines = load(root)
-        for mid, kind, scope, i, edits in enumerate_mutants(lines):
-            print(f"{mid}\t{kind}\t{scope}\t{i + 1}\t{lines[i].strip()[:100]}")
+        sources = load(root)
+        for mid, kind, scope, src, i, edits in enumerate_mutants(sources):
+            print(f"{mid}\t{kind}\t{scope}\t{i + 1}\t{sources[src][i].strip()[:100]}")
         return 0
     if len(argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
     want = argv[2]
     root = argv[3] if len(argv) > 3 else default_root
-    path, lines = load(root)
-    for mid, kind, scope, i, edits in enumerate_mutants(lines):
+    sources = load(root)
+    for mid, kind, scope, src, i, edits in enumerate_mutants(sources):
         if mid == want:
+            lines = sources[src]
             if cmd == "show":
-                print(f"{RUNTIME}:{i + 1} [{scope}] {kind}")
+                print(f"{src}:{i + 1} [{scope}] {kind}")
                 for j in sorted(edits):
                     print(f"- {lines[j].strip()}\n+ {edits[j].strip()}")
                 return 0
             for j, new in edits.items():
                 lines[j] = new
-            path.write_text("\n".join(lines))
+            (Path(root) / src).write_text("\n".join(lines))
+            print(src)
             return 0
-    print(f"pin-strength-mutants: no mutant {want} in {path}", file=sys.stderr)
+    print(f"pin-strength-mutants: no mutant {want} under {root}", file=sys.stderr)
     return 1
 
 

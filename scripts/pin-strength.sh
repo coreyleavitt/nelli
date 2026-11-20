@@ -2,7 +2,8 @@
 # RFC-0016 K9e: the pin-strength measurement.
 #
 # For each mutant `scripts/pin-strength-mutants.py` enumerates over the
-# walker's arithmetic and raise arms (`src/nelli/smt/runtime.nim`), build a
+# walker's arithmetic and raise arms (`src/nelli/smt/lower_expr.nim` and the
+# raise drains of `src/nelli/smt/walk_expr.nim`), build a
 # scratch copy of TREE with that one mutant applied and run the committed pin
 # suites (`tests/0016-pinstrength.suites`) against it with
 # `scripts/dt-bounded.sh`, in order, stopping at the first that fails:
@@ -108,15 +109,16 @@ runsuites() {
 }
 
 one() {
-  local id="$1" kind="$2" scope="$3" line="$4" dir t0 res
+  local id="$1" kind="$2" scope="$3" line="$4" dir t0 res src
   dir="$out/work/$id"
   t0=$(date +%s)
   mkcopy "$dir"
-  if ! python3 "$dir/scripts/pin-strength-mutants.py" apply "$id" "$dir" >/dev/null; then
+  # `apply` prints the source it edited, relative to the copy's root.
+  if ! src="$(python3 "$dir/scripts/pin-strength-mutants.py" apply "$id" "$dir")" || [ -z "$src" ]; then
     printf '%s\t%s\t%s:%s\t%s\t%s\t%s\t%s\n' "$id" "$kind" "$scope" "$line" "error" "-" "-" "0" >> "$out/results.tsv"
     return
   fi
-  if cmp -s "$dir/src/nelli/smt/runtime.nim" "$tree/src/nelli/smt/runtime.nim"; then
+  if cmp -s "$dir/$src" "$tree/$src"; then
     res="equivalent - -"
   else
     res="$(runsuites "$dir" "$id")"

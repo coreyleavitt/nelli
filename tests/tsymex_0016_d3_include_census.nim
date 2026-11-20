@@ -257,11 +257,14 @@ proc boundHere(text: string): HashSet[string] =
 proc viaHooks(text: string): string =
   ## A call through the hook table (`lowerHooks.lower(`) names a field of the
   ## table, not the `runtime.nim` proc of the same name: drop the member name.
-  const tag = "lowerHooks."
+  ## `pathHooks.` (INT-34 B3b, `walk_path`'s own typed table) is the same.
   var i = 0
   while i < text.len:
-    if text.continuesWith(tag, i):
-      i += tag.len
+    var hit = 0
+    for tag in ["lowerHooks.", "pathHooks."]:
+      if text.continuesWith(tag, i): hit = tag.len
+    if hit > 0:
+      i += hit
       while i < text.len and text[i] in IdentChars: inc i
     else:
       result.add text[i]
@@ -722,8 +725,7 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
       if f notin ["runtime.nim", "walk_state.nim"]:
         callers.add codeOf(readFile(p))   # a comment is not a caller
     for h in ["lower", "lowerClosureCall",
-              "currentFrameId", "registerCapCell", "depositStrIndexOob",
-              "noteUbAtFork"]:   ## INT-34 B3: called by walk_path's forks
+              "currentFrameId", "registerCapCell", "depositStrIndexOob"]:
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
       # a field no module outside runtime.nim calls is dead: delete it
@@ -1068,10 +1070,22 @@ suite "RFC-0016 INT-34 B3: the walk_path leaf":
     checkpoint $named
     check named.len == 0
 
-  test "noteUbAtFork is reached through the hook, its empty test inline":
+  test "noteUbAtFork is reached through walk_path's typed hook, its empty test inline":
     let text = codeOf(readSmt("walk_path.nim"))
-    check text.count("lowerHooks.noteUbAtFork(") == 2
+    check text.count("pathHooks.noteUbAtFork(") == 2
+    check text.count("lowerHooks.") == 0
     check text.count("if newUb != {}:") == 2
+    # the typed hook is declared in walk_path, and walk_state holds no copy
+    check text.contains("\ntype PathHooks* = object")
+    check text.contains("\n  noteUbAtFork*: proc(")
+    check text.contains("\nvar pathHooks*: PathHooks")
+    check not codeOf(readSmt("walk_state.nim")).contains("noteUbAtFork")
+    # runtime fills it once beside `lowerHooks`, with the proc itself: no
+    # adapter and no pointer cast
+    let rt = codeOf(readSmt("runtime.nim"))
+    check rt.count("pathHooks = PathHooks(noteUbAtFork: noteUbAtFork)") == 1
+    check not rt.contains("noteUbAtForkHook")
+    check not rt.contains("cast[Path]")
     # the body stays in runtime.nim (R4), with no forward declaration
     check readSmt("runtime.nim").count("\nproc noteUbAtFork(") == 1
 

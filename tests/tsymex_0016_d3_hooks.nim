@@ -6,7 +6,7 @@
 ## `LowerHooks` and not filled fails here, not as a nil call mid-walk.
 import std/unittest
 import nelli/smt/runtime
-import nelli/smt/[walk_state]   ## R2-3: the leaves are no longer re-exported by the facade
+import nelli/smt/[walk_state, walk_path]   ## R2-3: the leaves are no longer re-exported by the facade
 
 suite "RFC-0016 D3c-2: lowerHooks":
   test "every hook is filled at module init":
@@ -17,9 +17,18 @@ suite "RFC-0016 D3c-2: lowerHooks":
       inc n
     # The exact inventory: lower, lowerClosureCall, currentFrameId,
     # registerCapCell, depositStrIndexOob, (INT-87, 9e37524b)
-    # depositUndefinedOob and (INT-34 B3) noteUbAtFork, which the fork
-    # templates of the `walk_path` leaf call on the rare path. Each is filled
-    # in `runtime.nim`'s `lowerHooks = LowerHooks(...)`; an eighth must be
-    # named here.
-    check n == 7
+    # depositUndefinedOob (INT-87, 9e37524b). Each is filled in
+    # `runtime.nim`'s `lowerHooks = LowerHooks(...)`; a seventh must be named
+    # here.
+    check n == 6
+
+  test "every walk_path hook is filled at module init":
+    # INT-34 B3b. `walk_path` declares its own typed `PathHooks` (it can name
+    # `Path`, which `walk_state` cannot); the same rule holds: no field nil.
+    var n = 0
+    for name, f in fieldPairs(pathHooks):
+      checkpoint name
+      check not f.isNil
+      inc n
+    check n == 1   # noteUbAtFork; a second must be named here
 

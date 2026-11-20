@@ -15055,13 +15055,6 @@ proc noteUbAtFork(parentTaint: Taint; child: Path; newUb: set[UbKind]) =
       why & " (beSolverUndef)")
   of sxUnsat, sxRaised: discard
 
-proc noteUbAtForkHook(parentTaint: Taint; child: pointer;
-                      newUb: set[UbKind]) {.nimcall.} =
-  ## RFC-0016 INT-34 B3. `lowerHooks.noteUbAtFork`: `walk_path`'s forks pass
-  ## the child `Path` as a pointer (`walk_state` cannot name the type); it is
-  ## read back straight into the call, never stored.
-  noteUbAtFork(parentTaint, cast[Path](child), newUb)
-
 proc haltUndefined(p: Path, kind: UbKind, cond: Z3Bool, site: string,
                    w: var WalkCtx) =
   ## RFC-0016 W1-d1a (section 9.1 item 2). The undefined side of an op, when
@@ -28551,8 +28544,9 @@ lowerHooks = LowerHooks(
   currentFrameId: currentFrameId,
   registerCapCell: registerCapCell,
   depositStrIndexOob: depositStrIndexOob,
-  depositUndefinedOob: depositUndefinedOob,
-  noteUbAtFork: noteUbAtForkHook)
+  depositUndefinedOob: depositUndefinedOob)
+# RFC-0016 INT-34 B3b: `walk_path`'s own typed hook, filled beside it.
+pathHooks = PathHooks(noteUbAtFork: noteUbAtFork)
 
 # RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
 # default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so

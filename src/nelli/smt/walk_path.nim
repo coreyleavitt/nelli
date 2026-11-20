@@ -24,7 +24,8 @@
 ## `noteUbAtFork`. The fork templates and `taintInPlace` reach it only on the
 ## rare path, when a degrade token puts an undefined behaviour on a path that
 ## did not have it; its body reads the run's target, which `runtime.nim` owns
-## (region R4). It is called through `lowerHooks.noteUbAtFork`, and the empty
+## (region R4). It is called through `pathHooks.noteUbAtFork`, a typed hook this module
+## declares itself (`Path` is nameable here, not in `walk_state`), and the empty
 ## test (`newUb != {}`) stays inline, so the common fork makes no call.
 ##
 ## The templates bind their symbols here: `deepCopyHeapState`, `sameHeapTerm`
@@ -46,6 +47,20 @@ import ./walk_state
 import ./walk_types
 import ./heap_model
 import ./z3check
+
+type PathHooks* = object
+  ## RFC-0016 INT-34 B3b. The one upward verb of this leaf, typed: `Path` is
+  ## nameable here, which `walk_state`'s `LowerHooks` cannot do.
+  noteUbAtFork*: proc(parentTaint: Taint; child: Path;
+                      newUb: set[UbKind]) {.nimcall.}
+    ## A fork (`forkPathTainted`, `taintInPlace`) newly put an undefined
+    ## behaviour on `child`: under `tUndefined` that is the target's hit. It
+    ## reads the run's target, which `runtime.nim` owns. Called only on the
+    ## rare path: the fork tests `newUb != {}` inline first.
+
+var pathHooks*: PathHooks
+  ## Filled once by `runtime.nim` at module init, beside `lowerHooks`; a plain
+  ## global like it (no threadvar, so nothing to reset or release).
 
 # ---- Phase 15 H1: logical-heap fork deep-copy (ADR-0010) --------------------
 # Every fork site that builds a CHILD `Path` from a PARENT must carry the
@@ -145,7 +160,7 @@ template forkPathTainted*(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
     # makes no call; `noteUbAtFork` is reached only when a kind arrives.
     let newUb = tok.ub - parent.undefined
     if newUb != {}:
-      lowerHooks.noteUbAtFork(parent.taint, cast[pointer](child), newUb)
+      pathHooks.noteUbAtFork(parent.taint, child, newUb)
     child
 
 template forkPathMerged*(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
@@ -233,7 +248,7 @@ proc taintInPlace*(p: Path; d: Degrade) =
   p.undefinedViaOnly = p.undefinedViaOnly - d.ub   ## RFC-0016 W3-z R7
   let newUb = d.ub - priorUb   ## INT-34 B1: inline empty test, as `forkPathTainted`
   if newUb != {}:   ## RFC-0016 W3-z R1
-    lowerHooks.noteUbAtFork(priorTaint, cast[pointer](p), newUb)
+    pathHooks.noteUbAtFork(priorTaint, p, newUb)
 
 # ---- Phase 15 H1: exported test hooks ---------------------------------------
 # `Path` is a private `ref object`, so the H1 RED test cannot name it. These two

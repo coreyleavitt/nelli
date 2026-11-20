@@ -344,6 +344,8 @@ const
   # reason, so each path stays its own named const below).
   runtimePath           = currentSourcePath.parentDir() / ".." / "src" /
                            "nelli" / "smt" / "runtime.nim"
+  lowerExprPath         = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "lower_expr.nim"   ## RFC-0016 INT-34 B4: `lower`
   runtimeStringsPath    = currentSourcePath.parentDir() / ".." / "src" /
                            "nelli" / "smt" / "runtime_strings.nim"
   runtimeFloatsPath     = currentSourcePath.parentDir() / ".." / "src" /
@@ -373,6 +375,7 @@ let
   # `include`, R3-2). The other per-fragment consts are consumed only
   # indirectly, through `scannedFiles`.
   runtimeContent           = readFile(runtimePath)
+  lowerExprContent         = readFile(lowerExprPath)
   runtimeStringsContent    = readFile(runtimeStringsPath)
   runtimeFloatsContent     = readFile(runtimeFloatsPath)
   runtimeExceptionsContent = readFile(runtimeExceptionsPath)
@@ -383,6 +386,7 @@ let
 
   scannedFiles: seq[(string, string)] = @[
     ("runtime.nim", runtimeContent),
+    ("lower_expr.nim", lowerExprContent),
     ("runtime_strings.nim", runtimeStringsContent),
     ("runtime_floats.nim", runtimeFloatsContent),
     ("runtime_exceptions.nim", runtimeExceptionsContent),

@@ -18,7 +18,8 @@
 ##     `stampHeapSteps`, `svWithRaw`, the C1 closure PoC.
 ##
 ## R0's threadvars stay in `runtime.nim`, with the procedures that read them
-## (`checkedNow`, `seedCallerHeapThreadvars`, `pendingEnvWriteIx`, ...). This
+## (`seedCallerHeapThreadvars`, ...), or moved below with `lower` into
+## `lower_expr.nim` (`checkedNow`, `pendingEnvWriteIx`; INT-34 B4). This
 ## module owns no threadvar, so it has no reset and no thread-state release.
 ##
 ## `noteUbAtFork`. The fork templates and `taintInPlace` reach it only on the

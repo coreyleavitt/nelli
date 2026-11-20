@@ -18,9 +18,11 @@ const
   smt = currentSourcePath().parentDir() / ".." / "src" / "nelli" / "smt"
 
   ## Reset by an assignment in `resetSymexRunState` itself.
-  direct = ["pendingPtrCompares", "closureEnvWrites", "loweringReadNames",
-            "lastDrainedClosureExitPc", "lowerAsReceiver", "glUnwrittenCtx",
-            "seqConformCounter"]
+  direct = ["lastDrainedClosureExitPc"]
+  ## RFC-0016 INT-34 B4: owned by `lower_expr.nim` with `lower`, and reset
+  ## by an assignment in its `resetLowerExprState`.
+  lowered = ["pendingPtrCompares", "closureEnvWrites", "loweringReadNames",
+             "lowerAsReceiver", "glUnwrittenCtx", "seqConformCounter"]
 
 proc readSmt(f: string): string = readFile(smt / f)
 
@@ -45,6 +47,16 @@ suite "RFC-0016 H1 R1-12: per-run lowering state is reset":
       check rt.contains("{.threadvar.}") and
             rt.contains("var " & n & " {.threadvar.}")
       check resetBody.contains("\n  " & n & " = ")
+
+  test "the six lower_expr.nim threadvars are reset through resetLowerExprState":
+    check resetBody.contains("\n  resetLowerExprState()")
+    let le = readSmt("lower_expr.nim")
+    let leBody = bodyFrom(le, "proc resetLowerExprState*()")
+    for n in lowered:
+      checkpoint n
+      check le.contains("var " & n & "* {.threadvar.}")
+      check not rt.contains("var " & n & " {.threadvar.}")
+      check leBody.contains("\n  " & n & " = ")
 
   test "allocEnumZeroLegal is reset through resetHeapModel":
     check resetBody.contains("\n  resetHeapModel()")

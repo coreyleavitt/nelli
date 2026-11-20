@@ -28,7 +28,9 @@ REGIONS = [
     # readers) are `walk_path.nim`'s now; R0 keeps the run state and the
     # routines that read it. `noteUbAtFork` is reached through `lowerHooks`.
     ("R0 run state", None),
-    ("R1 lower", "# ---- IR-expr → SymVal"),
+    # INT-34 B4: R1 (`lower`/`lowerBool`, the C4 literal lowering) is
+    # `lower_expr.nim`'s now, with the R0 run state it reads; `lowerHofCall`
+    # (R7) is reached through `lowerExprHooks`.
     ("R2 solving", "# ---- Path / solve / walk"),
     # INT-34 B2: the frame types and `WalkCtx` are `walk_types.nim`'s now;
     # R3 starts at the first routine that takes a `WalkCtx`.

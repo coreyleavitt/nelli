@@ -144,9 +144,12 @@ const
   ## RFC-0016 INT-34 B0: `sameSymVal` moved into `symval.nim` with its two
   ## marked svSeq lines: runtime.nim 120 -> 118, symval.nim 0 -> 2. The
   ## family total is unchanged.
-  markerPins = [("runtime.nim", 118), ("runtime_strings.nim", 4),
+  ## RFC-0016 INT-34 B4: region R1 (`lower`) moved into `lower_expr.nim` with
+  ## its 56 marked lines: runtime.nim 118 -> 62, lower_expr.nim 0 -> 56. The
+  ## family total is unchanged.
+  markerPins = [("runtime.nim", 62), ("runtime_strings.nim", 4),
                 ("heap_model.nim", 23), ("runtime_heap.nim", 11),
-                ("symval.nim", 2)]
+                ("symval.nim", 2), ("lower_expr.nim", 56)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"

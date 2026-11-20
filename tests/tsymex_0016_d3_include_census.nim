@@ -257,11 +257,12 @@ proc boundHere(text: string): HashSet[string] =
 proc viaHooks(text: string): string =
   ## A call through the hook table (`lowerHooks.lower(`) names a field of the
   ## table, not the `runtime.nim` proc of the same name: drop the member name.
-  ## `pathHooks.` (INT-34 B3b, `walk_path`'s own typed table) is the same.
+  ## `pathHooks.` (INT-34 B3b, `walk_path`'s own typed table) and
+  ## `lowerExprHooks.` (INT-34 B4, `lower_expr`'s) are the same.
   var i = 0
   while i < text.len:
     var hit = 0
-    for tag in ["lowerHooks.", "pathHooks."]:
+    for tag in ["lowerHooks.", "pathHooks.", "lowerExprHooks."]:
       if text.continuesWith(tag, i): hit = tag.len
     if hit > 0:
       i += hit
@@ -503,7 +504,10 @@ suite "RFC-0016 D3: the include surface":
       checkpoint f
       let m = f[0 ..< f.len - 4]
       check not rt.contains("include \"" & f & "\"")
-      check rt.contains("\nimport ./" & m)
+      # INT-34 B4: `lowerFloatArm` and `lowerExnArm` are called by `lower`
+      # only, so `lower_expr.nim` imports those two, not `runtime.nim`
+      check rt.contains("\nimport ./" & m) or
+            readSmt("lower_expr.nim").contains("\nimport ./" & m)
       let text = readSmt(f)
       check text.contains("\nimport ./symval")
       let named = referenced(viaHooks(text),
@@ -519,9 +523,13 @@ suite "RFC-0016 D3: the include surface":
     # RFC-0016 INT-34 B2: the walker's types moved to `walk_types.nim`, which
     # `runtime.nim` imports; to the include they are still names of the
     # runtime unit, so the pinned set did not change with the move. INT-34
-    # B3: likewise the routines that moved to `walk_path.nim`.
+    # B3: likewise the routines that moved to `walk_path.nim`, and B4 the
+    # names that moved to `lower_expr.nim` (`callGuardedNames`,
+    # `entryValueOf`, `storeSeqElem`, ...): the include reaches them through
+    # `runtime.nim`'s import.
     let priv = definedNames(rt) + definedNames(readSmt("walk_types.nim")) +
-               definedNames(readSmt("walk_path.nim"))
+               definedNames(readSmt("walk_path.nim")) +
+               definedNames(readSmt("lower_expr.nim"))
     let text = readSmt("runtime_heap.nim")
     let got = referenced(text, priv - definedNames(text))
     var pinned: HashSet[string]
@@ -1107,6 +1115,133 @@ suite "RFC-0016 INT-34 B3: the walk_path leaf":
       checkpoint n
       check n in wp
     for n in wp:
+      if n in perModuleNames: continue
+      checkpoint n
+      check n notin defs
+
+const
+  ## RFC-0016 INT-34 B4. What `lower_expr.nim` may import: std, `z3`, and the
+  ## leaves below it (the value core, the walk state and types, the path
+  ## leaf, the heap algebra, and the lowering arms that were includes).
+  leAllowed = ["std/tables", "std/options", "std/typetraits", "std/sets",
+               "std/hashes", "std/algorithm", "std/math", "std/strutils",
+               "z3", "./buildprofile", "./types", "./admission",
+               "./arith_regime", "./definedness", "./variant_layout",
+               "./abstraction", "./symval", "./walk_state", "./walk_types",
+               "./walk_path", "./stdlib_rows", "./runtime_floats",
+               "./runtime_exceptions", "./z3check", "./heap_model",
+               "./string_lower_support", "./runtime_strings",
+               "./runtime_closures", "../thread_state"]
+  ## A sample of what B4 moved out of `runtime.nim`; the test below checks
+  ## every name `lower_expr.nim` defines, this list keeps the intent legible.
+  leMoved = ["lower", "lowerExpr", "lowerBool", "lowerArith", "lowerSeqLit",
+             "lowerTupleLit", "lowerVariantLit", "storeSeqElem",
+             "entryValueOf", "globalInitValue", "degradeStrArm",
+             "checkedNow", "resetArith", "pendingEnvWriteIx",
+             "closureEnvWrites", "arithFrames", "obligationLog"]
+  ## The names `runtime.nim` exported before the move: re-exported by name,
+  ## and no other.
+  lePublic = ["obligationLog", "sliceViewCounter", "variantLitFreshCounter",
+              "variantConstructSymFreshCounter", "walkerWorkUnits",
+              "walkerTermUnits", "walkerContextUnits", "arrayAccessTooWide",
+              "bsCard", "reconcileFloat", "symbolicPositions", "termDepth",
+              "termTooDeep"]
+  ## Threadvars `resetLowerExprState` leaves alone: the thread's running
+  ## work total, and the linked Z3's decl kinds (probed once per thread).
+  leNotPerRun = ["walkerWorkUnits", "uninitArrKinds", "bvIvlDeclKinds"]
+  ## Reset by `resetArith`, which `resetLowerExprState` calls.
+  leViaResetArith = ["arithFrames", "checkScopes"]
+
+suite "RFC-0016 INT-34 B4: the lower_expr leaf":
+  let le = readSmt("lower_expr.nim")
+
+  test "lower_expr.nim imports only the allowed leaves":
+    let seen = importsOf(le)
+    checkpoint $seen
+    for s in seen: check s in leAllowed
+    check "./walk_path" in seen and "./walk_types" in seen
+
+  test "every threadvar of lower_expr.nim is reset by resetLowerExprState or named":
+    let at = le.find("proc resetLowerExprState*(")
+    check at >= 0
+    let resetBody = le[at .. ^1]
+    let ra = le.find("proc resetArith*(")
+    check ra >= 0
+    let arithBody = le[ra .. ^1]
+    check resetBody.contains("\n  resetArith()")
+    var tvs: seq[string]
+    for l in le.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    check tvs.len == 30   # 5 from R0, 25 from R1 (`injectedShape` sits in a `when`)
+    for n in tvs:
+      checkpoint n
+      if n in leNotPerRun:
+        check not resetBody.contains("\n  " & n & " = ")
+      elif n in leViaResetArith:
+        check arithBody.contains("\n  " & n & " = ")
+      else:
+        check resetBody.contains("\n  " & n & " = ") or
+              resetBody.contains("\n  " & n & ".clear()")
+    # the S8ce injection threadvar sits in a `when` block
+    check resetBody.contains("\n    injectedShape = \"\"")
+
+  test "every threadvar of lower_expr.nim is released when its thread exits":
+    let at = le.find("proc releaseThreadState()")
+    check at >= 0
+    let body = le[at .. ^1]
+    check le.contains("\nregisterThreadStateRelease(releaseThreadState)")
+    for l in le.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        let n = leadIdent(l[4 .. ^1])
+        checkpoint n
+        check body.contains(n)
+    check body.contains("releaseToDefault(injectedShape)")
+
+  test "resetSymexRunState calls resetLowerExprState":
+    let rt = readSmt("runtime.nim")
+    let at = rt.find("proc resetSymexRunState(")
+    check at >= 0
+    check rt[at .. ^1].contains("\n  resetLowerExprState()")
+    check not rt.contains("\n  resetArith()")
+
+  test "lower_expr names no runtime.nim symbol":
+    let priv = definedNames(readSmt("runtime.nim"))
+    let named = referenced(viaHooks(le),
+                           priv - definedNames(le) - boundHere(le))
+    checkpoint $named
+    check named.len == 0
+
+  test "lowerHofCall is reached through lower_expr's typed hook":
+    let text = codeOf(le)
+    check text.count("lowerExprHooks.lowerHofCall(") == 1
+    check text.contains("\ntype LowerExprHooks* = object")
+    check text.contains("\n  lowerHofCall*: proc(")
+    check text.contains("\nvar lowerExprHooks*: LowerExprHooks")
+    # runtime fills it once beside `lowerHooks`, with the proc itself
+    let rt = codeOf(readSmt("runtime.nim"))
+    check rt.count("lowerExprHooks = LowerExprHooks(lowerHofCall: lowerHofCall)") == 1
+    # the body stays in runtime.nim (R7), with no forward declaration
+    check readSmt("runtime.nim").count("\nproc lowerHofCall(") == 1
+
+  test "runtime.nim imports lower_expr, re-exports names not the module, and defines none of its names":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("\nimport ./lower_expr")
+    check not rt.contains("\nexport lower_expr\n")
+    check not rt.contains("\nexport lower_expr except")
+    var exported, want: HashSet[string]
+    for l in codeOf(rt).splitLines:
+      for w in l.split({' ', ','}):
+        if w.startsWith("lower_expr."): exported.incl w["lower_expr.".len .. ^1]
+    for n in lePublic: want.incl n
+    checkpoint $exported
+    check exported == want
+    let defs = definedNames(rt)
+    let ld = definedNames(le)
+    for n in leMoved:
+      checkpoint n
+      check n in ld
+    for n in ld:
       if n in perModuleNames: continue
       checkpoint n
       check n notin defs

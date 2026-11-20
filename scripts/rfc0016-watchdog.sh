@@ -151,6 +151,9 @@ LEGS=(
   "symex-nightly cpp|symex-nightly.yaml|gate (cpp)"
   "symex-nightly z3-4.13.4|symex-nightly.yaml|gate (z3-4.13.4)"
   "symex-nightly msvc|symex-nightly.yaml|gate (msvc)"
+  "symex-nightly universe cpp|symex-nightly.yaml|universe (cpp)"
+  "symex-nightly universe z3-4.13.4|symex-nightly.yaml|universe (z3-4.13.4)"
+  "symex-nightly universe msvc|symex-nightly.yaml|universe (msvc)"
   "symex-nightly asan|symex-nightly.yaml|asan"
   "symex-mingw|symex-mingw.yaml|"
   "symex-linux (main)|symex-linux.yaml|"
@@ -272,6 +275,16 @@ TOML
   [ "$(jobs_newest_success "$jobs" 'gate (cpp)')" = "2026-11-18T04:00:00Z" ] || { echo "self-test FAILED: jobs_newest_success"; bad=1; }
   [ -z "$(jobs_newest_success "$jobs" 'gate (msvc)')" ] || { echo "self-test FAILED: a red job counted"; bad=1; }
   [ -z "$(jobs_newest_success "$jobs" 'gate (z3-4.13.4)')" ] || { echo "self-test FAILED: an absent job counted"; bad=1; }
+  # every nightly leg is watched at BOTH its gate and its universe join: a
+  # join that stays red on a leg must not hide behind a green gate
+  local lg
+  for lg in cpp z3-4.13.4 msvc; do
+    local k
+    for k in gate universe; do
+      printf '%s\n' "${LEGS[@]}" | command grep -qF "|symex-nightly.yaml|$k ($lg)" ||
+        { echo "self-test FAILED: LEGS does not watch '$k ($lg)'"; bad=1; }
+    done
+  done
   t 0 "leg: active, fresh success" leg_check L active 2026-11-19T01:00:00Z
   t 0 "leg: success exactly 7 days old" leg_check L active 2026-11-13T00:00:00Z
   t 1 "leg: success 8 days old" leg_check L active 2026-11-12T00:00:00Z

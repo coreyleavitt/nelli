@@ -22,6 +22,16 @@ proc allFiles(axis: AxisScope; keys: seq[string]; row = "linux-c"):
     seq[ExercisedRecord] =
   for f in axisFiles[axis]: result.add rec(axis, keys, row = row, file = f)
 
+proc withOthers(recs: seq[ExercisedRecord]; keep: AxisScope;
+                row = "linux-c"): seq[ExercisedRecord] =
+  ## `recs` plus, for every OTHER axis that has suites, a `skipped` record per
+  ## suite: each ran on the row and exercised nothing, so a full run's "every
+  ## axis has records" check passes and the test judges only `keep`.
+  result = recs
+  for a in AxisScope:
+    if a == keep: continue
+    for f in axisFiles[a]: result.add rec(a, @[], "skipped", row, f)
+
 suite "K8b axes: the fragments and the denominator":
   test "every fragment names an exact row of its axis, once":
     let p = snippetProblems()
@@ -244,28 +254,60 @@ suite "K8b axes: the floor and K1's join":
     var floor = floorNow
     for a in AxisScope: floor[a].exercised = 0
     floor[axMagic].exercised = 2
-    let one = allFiles(axMagic, @["AddI"])
+    let one = withOthers(allFiles(axMagic, @["AddI"]), axMagic)
     let p = axisJoinProblems(one, "linux-c", floor)
     check p.len == 1
     check "magic" in p[0] and "SubI" in p[0]
-    check axisJoinProblems(allFiles(axMagic, @["AddI", "SubI"]), "linux-c",
-                           floor).len == 0
-    # another row's records do not count on this leg
-    check axisJoinProblems(allFiles(axMagic, @["AddI", "SubI"], "msvc"),
-                           "linux-c", floor).len == 0
+    check axisJoinProblems(withOthers(allFiles(axMagic, @["AddI", "SubI"]),
+                                       axMagic), "linux-c", floor).len == 0
+    # another row's records do not count on this leg: the leg has none
+    let other = withOthers(allFiles(axMagic, @["AddI", "SubI"], "msvc"),
+                           axMagic, "msvc")
+    let q = axisJoinProblems(other, "linux-c", floor)
+    var withSuites = 0
+    for a in AxisScope:
+      if axisFiles[a].len > 0: inc withSuites
+    check q.len == withSuites and q.allIt("no cells-exercised" in it)
+    check axisJoinProblems(other, "msvc", floor).len == 0
 
   test "RED: an axis with some of its suites' records fails unless partial":
     var floor = floorNow
     for a in AxisScope: floor[a].exercised = 0
-    let half = @[rec(axMagic, @["AddI"], file = axisFiles[axMagic][0])]
+    let half = withOthers(@[rec(axMagic, @["AddI"], file = axisFiles[axMagic][0])],
+                          axMagic)
     let p = axisJoinProblems(half, "linux-c", floor)
     check p.len == 1 and axisFiles[axMagic][1] in p[0]
     check axisJoinProblems(half, "linux-c", floor, partial = true).len == 0
 
+  test "RED: a full run fails an axis whose suites wrote nothing on the leg":
+    var floor = floorNow
+    for a in AxisScope: floor[a].exercised = 0
+    var recs = withOthers(@[], axMagic)
+    let p = axisJoinProblems(recs, "linux-c", floor)
+    check p.len == 1
+    check "magic" in p[0] and "no cells-exercised records" in p[0]
+    # a narrowed run does not judge it
+    check axisJoinProblems(recs, "linux-c", floor, partial = true).len == 0
+
+  test "RED: a figure above its floor fails on a full run, naming the new floor":
+    var floor = floorNow
+    for a in AxisScope: floor[a].exercised = 0
+    floor[axMagic].exercised = 1
+    let recs = withOthers(allFiles(axMagic, @["AddI", "SubI"]), axMagic)
+    let p = axisJoinProblems(recs, "linux-c", floor)
+    check p.len == 1
+    check "above the floor" in p[0] and "raise the floor to 2" in p[0]
+    check axisJoinProblems(recs, "linux-c", floor, partial = true).len == 0
+    # another row is held at or above the floor only: the same figure passes
+    let other = withOthers(allFiles(axMagic, @["AddI", "SubI"], "msvc"), axMagic,
+                           "msvc")
+    check axisJoinProblems(other, "msvc", floor).len == 0
+
   test "RED: a changed exact-row count must be re-measured":
     var floor = floorNow
     floor[axStdlibBody].total += 1
-    check axisJoinProblems(@[], "", floor).len == 1
+    check axisJoinProblems(withOthers(@[], axMagic), "", floor).anyIt(
+      "re-measure" in it)
 
   test "a skipped build record marks its suite as run and exercises nothing":
     var floor = floorNow
@@ -276,11 +318,12 @@ suite "K8b axes: the floor and K1's join":
     check axisRecordProblems(recs).len == 0
     check axisFigure(recs)[axBuild].exercised == 0
     floor[axBuild].exercised = 1
-    let p = axisJoinProblems(recs, "linux-c", floor)
+    let p = axisJoinProblems(withOthers(recs, axBuild), "linux-c", floor)
     check p.len == 1 and "below the floor" in p[0]
 
   test "RED: a record naming no exact row of its axis fails":
     var floor = floorNow
     for a in AxisScope: floor[a].exercised = 0
     let bad = rec(axMagic, @["NoSuchMagic"])
-    check axisJoinProblems(@[bad], "", floor).anyIt("NoSuchMagic" in it)
+    check axisJoinProblems(@[bad], "", floor, partial = true).anyIt(
+      "NoSuchMagic" in it)

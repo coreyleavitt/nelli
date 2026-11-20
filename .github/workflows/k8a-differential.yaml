@@ -159,6 +159,15 @@ jobs:
           [ ! -s "$out/findings.txt" ] || echo "findings=true" >> "$GITHUB_OUTPUT"
           exit "$rc"
 
+      # RFC-0016: pins/ is NOT joined by any universe job, by design. Its
+      # records are the ones tests/tsymex_0016_k8a_gen.nim ships (one exact
+      # record per `construct:k8a-gen/<Shape>` cell), and that suite is
+      # registered in nelli.nimble, so the nightly sweep writes the same
+      # cells' records on every leg and joins them (symex-nightly `universe`,
+      # all three build rows). This run covers ONE rotated row per night with
+      # a larger program count; its pins are kept for triage next to the
+      # findings they accompany, and would add no cell evidence the nightly
+      # join lacks.
       - name: Upload the disagreement report and pin records
         if: always() && steps.run.outputs.out != ''
         uses: actions/upload-artifact@v4

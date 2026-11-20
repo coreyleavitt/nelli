@@ -271,6 +271,11 @@ jobs:
             | tee "$RUNNER_TEMP/k1lite/k1lite.log"
           exit "${PIPESTATUS[0]}"
 
+      # RFC-0016: the cpp records uploaded below are a fast push-time
+      # pre-check, joined by no job. The linux-cpp row's evidence is joined by
+      # symex-nightly's `universe (cpp)` over the full cpp sweep, which the
+      # watchdog holds to account (rfc0016-watchdog.sh LEGS), so a second
+      # join here would add no evidence the nightly lacks.
       - name: K1-0 pin join, cpp backend (scripts/k1lite.sh -b cpp on the host)
         if: ${{ !cancelled() }}
         shell: bash

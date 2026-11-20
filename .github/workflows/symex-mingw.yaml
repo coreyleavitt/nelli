@@ -411,7 +411,7 @@ jobs:
   # Linux (one cheap runner, the shared setup action) rather than on a second
   # Windows toolchain. Zero records fails.
   universe:
-    needs: corpus
+    needs: [corpus, scan-tail]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -534,6 +534,15 @@ jobs:
           # (>80 min) while taking ~40 s under the MSVC container build. The
           # check stays pinned in the container-run nimble task; see the
           # comment in tests/tsymex_r6_b5_chained.nim.
+          #
+          # RFC-0016: the scan-tail suites write pin records too (eight of the
+          # nine). They are taken out of the corpus by derive-ci-suites.ps1, so
+          # this job is the only place those records can come from. Same
+          # contract as the corpus shards: written here, uploaded below,
+          # joined by the `universe` job.
+          $pinDir = Join-Path $env:RUNNER_TEMP 'pins'
+          New-Item -ItemType Directory -Force $pinDir | Out-Null
+          $env:NELLI_PIN_DIR = $pinDir
           $extra = @()
           if ('${{ matrix.suite }}' -eq 'tsymex_r6_b5_chained') {
             $extra += '-d:symexCiLeanB5'
@@ -543,3 +552,14 @@ jobs:
             --cincludes:C:/z3/include `
             --passL:"-Wl,--stack,8388608" @extra "tests/${{ matrix.suite }}.nim"
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # RFC-0016. A red suite's records still reach the join (always()). A
+      # suite that writes none (one of the nine writes no pins by design)
+      # uploads nothing; warn, as the corpus shards do.
+      - name: Upload the suite's pin records
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: symex-mingw-pins-scan-${{ matrix.suite }}
+          path: ${{ runner.temp }}/pins/
+          if-no-files-found: warn

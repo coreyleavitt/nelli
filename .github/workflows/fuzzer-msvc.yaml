@@ -393,6 +393,13 @@ jobs:
   # zero files FAILS (a renamed prefix must not read as a green leg).
   # Nim picks up each file's sibling .nim.cfg itself (project config is
   # not skipped here).
+  #
+  # RFC-0016: this job writes no pin records (no NELLI_PIN_DIR) and joins no
+  # universe, by design. The msvc row is joined by symex-nightly's
+  # `universe (msvc)` over the msvc-sweep shards' pin records, which the
+  # watchdog holds to account; a push-time join over this glob would cover the
+  # same suites on the same row and add no evidence the nightly lacks. This
+  # job is the push-time compile-and-run gate for MSVC-only defect classes.
   walker:
     name: walker (vcc shard ${{ matrix.shard }})
     needs: shards

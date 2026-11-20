@@ -1280,6 +1280,12 @@ suite "RFC-0016 K8b: the cells-exercised records, K1's second kind":
     check p.len == 1                            # 6 pairs over both rows
     check "raise the floor to 6" in p[0]        # a full run banks a gain
     check exercisedJoinProblems(ex, "", floor, partial = true).len == 0
+    # msvc exercises 3 pairs, under the floor of 4 only on that row; raise the
+    # floor's measure to 2 and msvc (not the measuring row) passes above it
+    floor[faGeneric].covered = 2
+    check exercisedJoinProblems(ex, "msvc", floor).len == 0
+    check exercisedJoinProblems(ex, "linux-c", floor).len == 1  # above, there
+    floor[faGeneric].covered = 4
     let q = exercisedJoinProblems(ex, "linux-c", floor)
     check q.len == 1                            # 3 pairs on linux-c
     check "family:generic" in q[0]

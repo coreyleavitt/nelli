@@ -230,9 +230,10 @@ proc renderFloor*(f: PairFigure): string =
   result = "# RFC-0016 K8b (section 12 item 4): the pairwise figure's floor.\n" &
     "# family<TAB>covered pairs<TAB>pair universe. Measured over the union of\n" &
     "# each family's two suites (tsymex_0016_k8b_<family>_a/_b, familyFiles);\n" &
-    "# K1 judges it. It only rises, and a full run holds it to equality: a\n" &
-    "# figure above its floor fails until the floor is raised. A changed\n" &
-    "# universe size (a dimension changed) must be re-measured.\n"
+    "# K1 judges it. It only rises. Measured on linux-c; a full run on that\n" &
+    "# row holds the figure to its floor (above it fails until the floor is\n" &
+    "# raised); other rows are held only at or above it. A changed universe\n" &
+    "# size (a dimension changed) must be re-measured.\n"
   for fam in FamilyScope:
     result.add scopePrefix[fam] & "\t" & $f[fam].covered & "\t" &
       $f[fam].total & "\n"
@@ -241,7 +242,7 @@ proc floorProblems*(fig, floor: PairFigure; families: set[FamilyScope];
                     ratchet = false): seq[string] =
   ## The ratchet, over the families that ran: a figure below its floor, or a
   ## universe that no longer has the floor's size. With `ratchet` (a full
-  ## run) a figure ABOVE its floor fails too, so a gain is banked: the floor
+  ## run on the measuring row) a figure ABOVE its floor fails too, so a gain is banked: the floor
   ## only rises because a figure that outgrew it cannot pass.
   for fam in families:
     if fig[fam].total != floor[fam].total:
@@ -274,8 +275,9 @@ proc exercisedJoinProblems*(ex: seq[ExercisedRecord]; legRow: string;
   ## `$NELLI_UNIVERSE_PARTIAL`) does not judge such a family. On a full run
   ## every family must have records on the leg's row: a leg whose family
   ## suites wrote nothing fails, naming the family, as `joinUniverse` fails a
-  ## cell no record covers. A full run also holds a figure to its floor
-  ## exactly (`floorProblems` with `ratchet`).
+  ## cell no record covers. Measured on linux-c; a full run on that row (or
+  ## a local run) holds the figure to its floor exactly (`floorProblems` with
+  ## `ratchet`); other rows are held only at or above it.
   result = exercisedProblems(ex)
   var mine: seq[ExercisedRecord]
   for r in ex:
@@ -304,4 +306,4 @@ proc exercisedJoinProblems*(ex: seq[ExercisedRecord]; legRow: string;
         familyFiles[fam].join(", ")
   if whole.card > 0:
     result.add floorProblems(pairwiseFigure(mine), floor, whole,
-                             ratchet = not partial)
+                             ratchet = ratchetsOn(legRow, partial))

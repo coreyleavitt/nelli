@@ -2845,3 +2845,12 @@ proc pinNever*(key: CellKey; holds: bool; native: string) =
   writePinRecord(PinRecord(testFile: appTestFile(),
     entry: "pinNever", cell: key, target: "-", domain: "-",
     verdict: pvDeclined, declineKind: "never", native: native))
+
+const floorMeasuredRow* = "linux-c"
+  ## The row the floors were measured on (the local run's row). A full run on
+  ## it, or a local run (no row), holds a figure to its floor exactly; other
+  ## rows are held only at or above it, since a row may legitimately exercise
+  ## more (the build axis is row-dependent).
+
+func ratchetsOn*(legRow: string; partial: bool): bool =
+  not partial and legRow in ["", floorMeasuredRow]

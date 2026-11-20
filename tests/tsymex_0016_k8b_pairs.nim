@@ -236,6 +236,14 @@ suite "K8b: a family split into halves is judged on their union":
     check p.len == 1
     check "above the floor" in p[0] and "raise the floor to 6" in p[0]
     check exercisedJoinProblems(recs, "linux-c", floor, partial = true).len == 0
+    # a row other than the one the floor was measured on is held at or above
+    # it only: the same figure passes there
+    var am = a
+    var bm = b
+    am.row = "msvc"
+    bm.row = "msvc"
+    let other = withOthers(@[am, bm], faGeneric, "msvc")
+    check exercisedJoinProblems(other, "msvc", floor).len == 0
 
   test "RED: a partial run still judges a family whose halves both ran":
     var floor: PairFigure

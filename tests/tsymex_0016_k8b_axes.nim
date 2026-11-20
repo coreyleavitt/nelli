@@ -298,6 +298,10 @@ suite "K8b axes: the floor and K1's join":
     check p.len == 1
     check "above the floor" in p[0] and "raise the floor to 2" in p[0]
     check axisJoinProblems(recs, "linux-c", floor, partial = true).len == 0
+    # another row is held at or above the floor only: the same figure passes
+    let other = withOthers(allFiles(axMagic, @["AddI", "SubI"], "msvc"), axMagic,
+                           "msvc")
+    check axisJoinProblems(other, "msvc", floor).len == 0
 
   test "RED: a changed exact-row count must be re-measured":
     var floor = floorNow

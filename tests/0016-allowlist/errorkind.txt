@@ -42,7 +42,6 @@ errorkind:heFreshnessCapExceeded	K9c	no pinDecline asserts this kind; K9c finds 
 errorkind:heNewFieldZeroUnsupported	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:hePtrArith	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:hePtrFamily	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
-errorkind:heUnresolvedRef	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heUnsafeCast	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heUnsupportedPointeeRead	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:heUnsupportedVarRef	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
@@ -50,7 +49,6 @@ errorkind:seByteIndexUnsupported	K10d	no producer: errorkind.nim marks it retire
 errorkind:seByteIterUnsupported	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seBytesLengthTooLarge	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:seBytesSymbolicLength	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
-errorkind:seNestedSeqUnsupported	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seParseIntLaxSyntax	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer
 errorkind:seParseIntPreE	K10d	no producer: errorkind.nim marks it retired or reserved, and nothing under src/ emits it; deletion is W-64 (K10d) [no-producer]
 errorkind:seRecursiveValueDepth	K9c	no pinDecline asserts this kind; K9c finds each kind by running its decline assertions, and W-64 (K10d) deletes a kind with no producer

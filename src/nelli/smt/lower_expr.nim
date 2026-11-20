@@ -5267,8 +5267,11 @@ proc lowerExpr*(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
           kind = weInternalWalkerFault),
         freshDegradeName("__seqConcatMismatch"), fresh)
     if not isBackedSeqElemTy(left.seqElemTy):
-      # A seq of an element the model does not back (`seq[seq[T]]`) that
-      # is not a placeholder (an empty literal's): as `iekSeqAdd` declines.
+      # A seq of an element the model does not back (`seq[Table[..]]`; a
+      # `seq[seq[T]]` is backed since S8cp-r) that is not a placeholder (an
+      # empty literal's): as `iekSeqAdd` declines. Reachable through `add` of
+      # an openArray / `&=`, whose parse arm has no `isBackedSeqElemTy` guard
+      # (the `&` operator's has); pinned in `tsymex_0016_int80_seqconcat`.
       let declineMsg = "iekSeqConcat: a seq of " & $left.seqElemTy &
         ", an element type the model does not back (seNestedSeqUnsupported)"
       queueDegrade(seNestedSeqUnsupported, declineMsg)

@@ -13,7 +13,7 @@
 ## are two addresses; a location read at two types declines by name.
 import std/[unittest, strutils]
 import nelli/symex
-from ./s8cu_helpers import pinFind
+import ./s8cu_helpers
 
 type
   PHolder = object
@@ -147,21 +147,10 @@ suite "INT-83: a pointer parameter is modelled, not declined":
     check verdict(pPassTyped) == sxSat
 
   test "a seq of pointers declines by name (its witness is not rendered)":
-    let r = pinFind(pSeq, tLabel("hit"))
-    check r.status == sxUnknown
-    var named = false
-    for e in r.errors:
-      if e.kind == feUnsupportedWitnessType: named = true
-    check named
+    pinDecline(pSeq, cellKey(axTypeClass, "sequence"), feUnsupportedWitnessType)
 
   test "a location read at two types declines by name":
-    let r = pinFind(pPunned, tLabel("hit"))
-    check r.status == sxUnknown
-    var named = false
-    checkpoint $r.errors
-    for e in r.errors:
-      if e.kind == heUnresolvedRef: named = true
-    check named
+    pinDecline(pPunned, cellKey(axTypeClass, "pointer"), heUnresolvedRef)
 
   test "the walker version is at least INT-83's":
     check parseInt(symexWalkerVersion) >= 443

@@ -20,7 +20,7 @@
 ##
 ## Each shape has a `hit` twin native reaches for every `k` in its range and
 ## a `never` twin it reaches for none, pinned exact against native.
-import std/[unittest, strutils, os, sequtils]
+import std/[unittest, strutils, os, sequtils, tables]
 import nelli
 import nelli/symex
 import ./s8cu_helpers
@@ -291,6 +291,21 @@ template exact(hitP, neverP: untyped) =
   check pinExact(hitP, cell, domain = idom).status == sxSat
   check pinExact(neverP, cell, domain = idom).status == sxUnsat
 
+# A seq of an element the model does not back (`seq[Table[..]]`, the shared
+# unbacked carrier): the parser's `&` arm declines it by name, but `add` of an
+# openArray / `&=` builds `iekSeqConcat` with no such guard, so the lowering's
+# own decline is what answers.
+proc u1(k: int) =
+  var a: seq[Table[int, int]] = @[]
+  let b: seq[Table[int, int]] = @[]
+  a &= b
+  if k >= 0: symexTarget("hit")
+proc u2(k: int) =
+  let a: seq[Table[int, int]] = @[]
+  let b: seq[Table[int, int]] = @[]
+  let h = a & b
+  if k >= 0 and h.len == 0: symexTarget("hit")
+
 suite "INT-80":
   test "version floor":
     check parseInt(symexWalkerVersion) >= 441
@@ -342,6 +357,13 @@ suite "INT-80":
     # `seq[seq[T]]` leaf-split; re-pinned against native on integration.
     exact(eN1, eN1Never)
     exact(eN2, eN2Never)
+  test "a seq of an unbacked element declines by name":
+    # `&=` has no parser guard: the lowering's own arm answers.
+    pinDecline(u1, cellKey(axTypeClass, "sequence"), seNestedSeqUnsupported,
+               needle = "iekSeqConcat: a seq of")
+    # `&` is declined at parse, before the lowering sees it.
+    pinDecline(u2, cellKey(axTypeClass, "sequence"), seNestedSeqUnsupported,
+               needle = "seq `&` over a seq of")
   test "self-append doubles: `s.add(s)`, `add(s, s)`, `s &= s`":
     exact(eF1, eF1Never)
     exact(eF2, eF2Never)

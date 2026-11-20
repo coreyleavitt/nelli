@@ -7,10 +7,9 @@
 ## compiler. This test makes it visible, by text scan (the house pattern of
 ## `tsymex_0016_k2a_census.nim`):
 ##
-##   * the include list and its order are exact;
-##   * no `runtime_*.nim` has an `import` (an include compiles inside
-##     `runtime.nim`; once one becomes a module this test is edited in the
-##     slice that makes it so, and not before);
+##   * the include list and its order are exact (empty since RFC-0016
+##     INT-34 B7 made `runtime_heap.nim`, the last include, a module), and no
+##     runtime-family file includes another;
 ##   * per include, the count of runtime-private symbols it references has a
 ##     ceiling that only goes down. A symbol is runtime-private when
 ##     `runtime.nim` defines it at top level (a proc, template, type, const,
@@ -35,16 +34,14 @@ const
   root = currentSourcePath().parentDir() / ".."
   smt = root / "src" / "nelli" / "smt"
 
-  expectedIncludes = ["runtime_heap.nim"]
+  expectedIncludes: seq[string] = @[]   ## INT-34 B7: none is left
 
   ## Includes that became real modules (D3c-3: exceptions, D3c-4: floats,
-  ## D3c-5: closures, D3c-7: strings).
+  ## D3c-5: closures, D3c-7: strings, INT-34 B7: the heap arm).
   movedToModules = ["runtime_exceptions.nim", "runtime_floats.nim",
-                    "runtime_closures.nim", "runtime_strings.nim"]
+                    "runtime_closures.nim", "runtime_strings.nim",
+                    "runtime_heap.nim"]
 
-  ## D3c-8: the exact set of `runtime.nim`-private names the heap include
-  ## (the walker's statement arm) references, sorted. The scan is textual: a
-  ## local that shares a name with a `runtime.nim` symbol (`exact`) is counted.
   ## What slice D3c-6 made real modules below `runtime.nim`: the heap algebra
   ## and the sort-checked Z3 term builders it rests on.
   hmAllowed = ["std/tables", "std/options", "std/sets", "std/strutils",
@@ -60,33 +57,6 @@ const
                      "iteDeclKind", "heapChainKinds",
                      "provKinds",   # RFC-0016 INT-82
                      "madeKinds"]   # RFC-0016 INT-85
-
-  heapPinned = [
-    "AddrCellEntry", "Degrade", "ElemCell", "Path", "PtrLeafAim",
-    "PtrStore", "Survivors", "WalkCtx",
-    "bitsPlace", "callGuardedNames", "cellValue", "coerceIntLit",
-    "crashRaise", "deadElemRefs",
-    "degrade", "discConst", "drainPendingLowerEffects",
-    "drainScalarRaiseForks", "effectiveHeapDepthLimit", "entryValueOf",
-    "exact", "fieldsUnchecked", "forkDefect",
-    "forkPath", "forkPathTainted", "freshnessCapHints", "globalEntryVals",
-    "globalHiddenRoute", "globalInitValue", "guardLiteral", "halted",
-    "heapEpochPrefix", "heapInputName", "heapKeyValTy", "imgReadDef",
-    "inactiveFieldSide", "isConcolicFollowWalk",
-    "liveFrame", "loopArmInfeasible", "lowerInExpr",
-    "lowerLeafInExpr", "maybeForkDefect", "noteTableKey", "overlaps",
-    "pathInfeasible", "programGlobal", "ptrFamilyHints",
-    "ptrFamilyKey", "ptrIdxKey", "ptrKeyKey", "ptrLeafAims",
-    "ptrLeafPathStr", "ptrObjKey", "ptrScalarPointee", "ptrSelKey",
-    "ptrTargetCode", "sameBranchSymCond",
-    "seqStoreArrs", "shouldStop",
-    "stampHeapSteps", "storeSeqElem", "symEq", "tabValAt", "tabValTerms",
-    "taintInPlace", "unwrittenImage",
-    "unwrittenIn", "unwrittenKind", "unwrittenMsg", "unwrittenReadMsg",
-    "unwrittenUb", "writeExactArm", 
-    # enum members (R2-5: the scan now sees them): `GuardLiteral`, `CapKind`
-    # and `DegradeSink` constructors the arm names directly
-    "ckHeapDepth", "dsHeapDepth", "dsNewFieldZero", "glFalse"]
 
   ## The imports `symval.nim` may have: stdlib, `z3`, and the existing leaves.
   symvalAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
@@ -401,7 +371,7 @@ suite "RFC-0016 D3: relImports reads every import form":
 
 suite "RFC-0016 D3: definedNames sees enum members and every declared name":
   # R2-5: the scanner used to record the first name after a column-0 keyword
-  # and nothing else, so `heapPinned` (an "exact set") could not see an enum
+  # and nothing else, so the heap include's exact-set pin could not see an enum
   # member or the second name of `var a, b`.
   test "an inline enum's members are defined names":
     let d = definedNames("type GuardLiteral = enum glOpen, glTrue, glFalse\n")
@@ -455,14 +425,14 @@ suite "RFC-0016 D3: the include surface":
         let a = l.find('"')
         let b = l.find('"', a + 1)
         got.add l[a + 1 ..< b]
-    check got == @expectedIncludes
+    check got == expectedIncludes
 
-  test "no remaining include has an import":
-    for f in expectedIncludes:
-      for l in readSmt(f).splitLines:
-        let t = l.strip()
-        check not (t.startsWith("import ") or t.startsWith("from ") or
-                   t.startsWith("export "))
+  test "no runtime-family file includes another":
+    # INT-34 B7: the last include (`runtime_heap.nim`) is a module now
+    for f in runtimeFamilyFiles:
+      checkpoint f
+      for l in codeOf(readSmt(f)).splitLines:
+        check not l.strip().startsWith("include ")
 
   test "the shared runtime-family list names every runtime*.nim and every leaf":
     ## The source audits read `runtimeFamilyFiles` (tests/audit_scan_utils.nim)
@@ -516,40 +486,6 @@ suite "RFC-0016 D3: the include surface":
                              priv - definedNames(text) - boundHere(text))
       checkpoint $named
       check named.len == 0
-
-  test "the heap include references exactly the pinned runtime.nim names":
-    # D3c-8: the walker arm stays an include (see the header of
-    # `runtime_heap.nim`). Its surface is an EXACT set, not a ceiling: a new
-    # name fails (add it to `heapPinned` only after deciding it belongs), and
-    # a removed one fails too (shrink the list).
-    # RFC-0016 INT-34 B2: the walker's types moved to `walk_types.nim`, which
-    # `runtime.nim` imports; to the include they are still names of the
-    # runtime unit, so the pinned set did not change with the move. INT-34
-    # B3: likewise the routines that moved to `walk_path.nim`, and B4 the
-    # names that moved to `lower_expr.nim` (`callGuardedNames`,
-    # `entryValueOf`, `storeSeqElem`, ...), and B5 those that moved to
-    # `walk_solve.nim` (`currentVariantHeaps`, `ptrSelKey`, ...), and B6a
-    # those that moved to `walk_ctx.nim` (`exact`, `heapInputName`, ...), and
-    # B6b those that moved to `walk_expr.nim` (`forkDefect`, `liveFrame`,
-    # ...): the include reaches them through `runtime.nim`'s import.
-    let priv = definedNames(rt) + definedNames(readSmt("walk_types.nim")) +
-               definedNames(readSmt("walk_path.nim")) +
-               definedNames(readSmt("lower_expr.nim")) +
-               definedNames(readSmt("walk_solve.nim")) +
-               definedNames(readSmt("walk_ctx.nim")) +
-               definedNames(readSmt("walk_expr.nim"))
-    let text = readSmt("runtime_heap.nim")
-    let got = referenced(text, priv - definedNames(text))
-    var pinned: HashSet[string]
-    for n in heapPinned: pinned.incl n
-    check pinned.len == heapPinned.len   # no duplicate in the list
-    let added = got - pinned
-    let gone = pinned - got
-    checkpoint "new names the heap include now references: " & $added
-    checkpoint "pinned names it no longer references (shrink heapPinned): " &
-               $gone
-    check added.len == 0
-    check gone.len == 0
 
   test "no forward declaration of a heap_model or z3check proc is left":
     check not rt.contains("proc allocRefSort*(")
@@ -874,7 +810,7 @@ suite "RFC-0016 D3c-6: the heap_model and z3check leaves":
     check at >= 0
     check rt[at .. ^1].contains("\n  resetHeapModel()")
 
-  test "the heap include keeps the walker arm, not the algebra":
+  test "the heap module keeps the walker arm, not the algebra":
     let hp = readSmt("runtime_heap.nim")
     for n in ["walkHeapArm", "nilDerefFork", "freshRef", "assertFreshness"]:
       check hp.contains("\nproc " & n)
@@ -1638,6 +1574,106 @@ suite "RFC-0016 INT-34 B6b: the walk_expr leaf":
       checkpoint n
       check n in wd
     for n in wd:
+      if n in perModuleNames: continue
+      checkpoint n
+      check n notin defs
+
+
+const
+  ## RFC-0016 INT-34 B7. What `runtime_heap.nim` may import: std, `z3`, and
+  ## the leaves below it (the axes, the value core, the walk state and types,
+  ## the path, lowering, solving, context and expression leaves, the heap
+  ## algebra and the exit channels).
+  rhAllowed = ["std/tables", "std/options", "std/sets", "std/hashes",
+               "std/algorithm", "std/math", "std/strutils", "z3",
+               "./types", "./admission", "./definedness",
+               "./variant_layout", "./abstraction", "./symval",
+               "./walk_state", "./walk_types", "./walk_path",
+               "./lower_expr", "./walk_solve", "./walk_ctx", "./walk_expr",
+               "./z3check", "./heap_model", "./exits", "./concolictaxonomy",
+               "../thread_state"]
+  ## The threadvars B7 moved out of `runtime.nim` with the arm that writes them.
+  rhMoved = ["freshnessCapHints", "ptrFamilyHints"]
+  ## The names `runtime.nim` exported before the move: re-exported by name,
+  ## and no other.
+  rhPublic = ["freshnessCapHints", "ptrFamilyHints", "freshRef",
+              "freshFrameRef", "ptrPreKey", "assertFreshness", "keepStrBuf"]
+
+suite "RFC-0016 INT-34 B7: the runtime_heap module":
+  let rh = readSmt("runtime_heap.nim")
+
+  test "runtime_heap.nim imports only the allowed leaves":
+    let seen = importsOf(rh)
+    checkpoint $seen
+    for s in seen: check s in rhAllowed
+    check "./walk_expr" in seen and "./walk_types" in seen
+
+  test "every threadvar of runtime_heap.nim is reset by resetRuntimeHeapState":
+    let at = rh.find("proc resetRuntimeHeapState*(")
+    check at >= 0
+    let resetBody = rh[at .. ^1]
+    var tvs: seq[string]
+    for l in rh.splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    check tvs == @rhMoved
+    for n in tvs:
+      checkpoint n
+      check resetBody.contains("\n  " & n & " = ")
+
+  test "every threadvar of runtime_heap.nim is released when its thread exits":
+    let at = rh.find("proc releaseThreadState()")
+    check at >= 0
+    let body = rh[at .. ^1]
+    check rh.contains("\nregisterThreadStateRelease(releaseThreadState)")
+    var n = 0
+    for l in rh.splitLines:
+      if l.strip.startsWith("var ") and "{.threadvar.}" in l:
+        let name = leadIdent(l.strip[4 .. ^1])
+        checkpoint name
+        check body.contains(name)
+        inc n
+    check n == 2
+
+  test "resetSymexRunState calls resetRuntimeHeapState and no longer resets its threadvars":
+    let rt = readSmt("runtime.nim")
+    let at = rt.find("proc resetSymexRunState(")
+    check at >= 0
+    let e = rt.find("\n  ctx\n", at)
+    check e > at
+    let body = rt[at .. e]
+    check body.contains("\n  resetRuntimeHeapState()")
+    for n in rhMoved:
+      checkpoint n
+      check not body.contains("\n  " & n & " = ")
+
+  test "runtime_heap calls nothing above it: no hook table":
+    # `scripts/int34-deps.py` found no upward edge (the `routeRaise`,
+    # `crashRaise`, `walk` it could have needed are below it or unused)
+    check not codeOf(rh).contains("Hooks* = object")
+    # no walker routine reached by a pointer instead
+    check not codeOf(rh).contains("cast[ptr WalkCtx]")
+    check not codeOf(rh).contains("currentWalkCtxPtr")
+
+  test "runtime.nim imports runtime_heap, re-exports names not the module, and defines none of its names":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("\nimport ./runtime_heap")
+    check not rt.contains("\nexport runtime_heap\n")
+    check not rt.contains("\nexport runtime_heap except")
+    var exported, want: HashSet[string]
+    for l in codeOf(rt).splitLines:
+      for w in l.split({' ', ','}):
+        if w.startsWith("runtime_heap."):
+          exported.incl w["runtime_heap.".len .. ^1]
+    for n in rhPublic: want.incl n
+    checkpoint $exported
+    check exported == want
+    let defs = definedNames(rt)
+    let hd = definedNames(rh)
+    for n in rhMoved:
+      checkpoint n
+      check n in hd
+    for n in hd:
       if n in perModuleNames: continue
       checkpoint n
       check n notin defs

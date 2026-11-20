@@ -12,7 +12,7 @@
 ##
 ## None of it names `WalkCtx` or `Path`. The walker arm (`walkHeapArm`, the
 ## nil-deref fork, `freshRef`, `assertFreshness`, the per-path `heapCellArrays`)
-## stays in `runtime_heap.nim`, an include of `runtime.nim`, and calls this
+## stays in `runtime_heap.nim`, a module below `runtime.nim`, and calls this
 ## module directly. The type-directed allocator (`allocateSym`, `seqElemAt`
 ## and their closure: `defaultZero`, the variant image, the table zero
 ## builders) and `iteSV` live here too (RFC-0016 review R2-4). That is one file

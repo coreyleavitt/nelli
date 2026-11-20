@@ -110,6 +110,12 @@ export walk_expr.seedCallerHeapThreadvars, walk_expr.typeIdToDefectKind,
        walk_expr.concretelyInfeasible, walk_expr.concreteBranchRLimit,
        walk_expr.concreteBranchOutcome
 # Exactly the names `runtime.nim` exported before the move, as above.
+import ./runtime_heap   ## RFC-0016 INT-34 B7: the heap arm (`walkHeapArm`, the R0 hint sinks it writes)
+export runtime_heap.freshnessCapHints, runtime_heap.ptrFamilyHints,
+       runtime_heap.freshRef, runtime_heap.freshFrameRef,
+       runtime_heap.ptrPreKey, runtime_heap.assertFreshness,
+       runtime_heap.keepStrBuf
+# Exactly the names `runtime.nim` exported before the move, as above.
 import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
 import ./pcre_engine   ## RFC-0005 S8bt: the engine of unanchored calls
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
@@ -166,23 +172,8 @@ proc emitIsLooseBanner() =
 # INT-34 B3). What stays in this region is the run state they do not read,
 # and the routines that do.
 
-var freshnessCapHints* {.threadvar.}: seq[SymexErrorInfo]
-  ## Phase 15 R2. Accumulator for `heFreshnessCapExceeded` (sevHint), emitted
-  ## when a `new T` on a path would push the freshness-assertion count past
-  ## `settings.maxFreshnessAssertions`. Reset at `runSymexImpl` entry; drained
-  ## (dedup'd) into `RawResult.errors` on every verdict branch. A hint never
-  ## changes the verdict (Invariant 7) — exactly the G4 `distinctBijectivityHints`
-  ## idiom. The walker has a `WalkCtx` at the `isNew` arm, but the drain is a
-  ## verdict-time concern shared across paths, so it rides the threadvar sink.
-
-var ptrFamilyHints* {.threadvar.}: seq[SymexErrorInfo]
-  ## Phase 15 R8. Accumulator for `hePtrFamily` (sevHint), emitted whenever an
-  ## UNMANAGED `ptr T` (an `svPtr`, `ptrFamily = true`) is dereffed or written
-  ## through. Lets consumers distinguish an unmanaged-ptr witness from a managed
-  ## `ref T` one (which emits NO such hint). A hint never changes the verdict
-  ## (Invariant 7) — drained (dedup'd) into `RawResult.errors` on every verdict
-  ## branch, exactly the R2 `freshnessCapHints` idiom. Reset at `runSymexImpl`
-  ## entry.
+# `freshnessCapHints` and `ptrFamilyHints` live in ./runtime_heap (RFC-0016
+# INT-34 B7): the heap arm writes them.
 
 # ---- RFC-0005 S8m: sort-checked Z3 term construction ------------------------
 #
@@ -380,7 +371,7 @@ proc noteOpaqueUndefined(w: var WalkCtx; paths: seq[Path];
                          stmt: IRStmt): seq[Path]
   ## RFC-0016 W3-z R3 fwd decl (defined after `routeRaise`).
 
-include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
+# ---- The heap arm (`walkHeapArm`): in ./runtime_heap (RFC-0016 INT-34 B7).
 
 # ---- The statement walkers `walkStmt` dispatches to (RFC-0016 INT-34 B1) -----
 # They call `walk` and `evalCondSynced`, so they sit above the expression
@@ -7980,8 +7971,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   z3ApiFirstError = ""
   resetLowerExprState()   ## RFC-0016 INT-34 B4: lower_expr's run state (arith frames, lowering sinks, global reads)
   resetWalkCtxState()   ## RFC-0016 INT-34 B6a: walk_ctx's run state (the raw status, the heap and closure sinks, the caller and closure-exit heaps)
-  freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
-  ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
+  resetRuntimeHeapState()   ## RFC-0016 INT-34 B7: runtime_heap's run state (the freshness-cap and ptr-family hint sinks)
   resetLoweringSink()                    ## RFC-0016 D3c-1: symval's threadvars (lowering-degrade sink, pending taint and ub)
   resetWalkExprState()   ## RFC-0016 INT-34 B6b: walk_expr's run state (the caller taint, undefined and pc a closure body is walked under, the drained exit facts)
   resetStringSupport()                   ## RFC-0016 D3c-7: the index-split registry
@@ -11051,7 +11041,7 @@ walkExprHooks = WalkExprHooks(routeRaise: routeRaise)
 
 proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
   releaseToDefault(cstringWitnessBufs,   # RFC-0016 INT-87
-    freshnessCapHints, ptrFamilyHints, z3ApiErrorCount, z3ApiFirstError,
+    z3ApiErrorCount, z3ApiFirstError,
     currentClosureCallAxiomStrs, paramBoundaryAbort, ptrAims)
 
 registerThreadStateRelease(releaseThreadState)

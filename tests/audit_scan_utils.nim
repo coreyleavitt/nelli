@@ -45,7 +45,8 @@ const
   smtSrcDir* = currentSourcePath().parentDir() / ".." / "src" / "nelli" / "smt"
 
   runtimeFamilyFiles* = [
-    # The walker proper, and the file still textually included into it.
+    # The walker proper, and its heap arm (an include until RFC-0016 INT-34
+    # B7 made it a module).
     "runtime.nim", "runtime_heap.nim",
     # Includes that became real modules (RFC-0016 D3c-3, -4, -5, -7).
     "runtime_exceptions.nim", "runtime_floats.nim", "runtime_closures.nim",

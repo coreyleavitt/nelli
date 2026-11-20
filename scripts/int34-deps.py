@@ -42,7 +42,10 @@ REGIONS = [
     # now, with the R0 run state it reads; `routeRaise` (R7) is reached
     # through `walkExprHooks`. The forward declarations of R6/R7 routines
     # R4 held stay at the head of R6.
-    ("R6 statement arms, walk", 'include "runtime_heap.nim"'),
+    # INT-34 B7: the heap arm (`walkHeapArm`), an include at R6's head until
+    # then, is `runtime_heap.nim`'s, a module below this one, with the R0
+    # hint sinks it writes. It had no upward edge.
+    ("R6 statement arms, walk", "# ---- The heap arm (`walkHeapArm`): in ./runtime_heap"),
     ("R7 probes, closure descent", "# ---- Statement exit-taint test hook"),
     ("R8 drivers", "# ---- Public driver"),
     ("R9 witness reads, hooks", "# ---- Raw → typed witness"),

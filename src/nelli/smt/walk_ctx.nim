@@ -202,9 +202,11 @@ proc degrade*(w: var WalkCtx; kind: SymexErrorKind; msg: string;
   ## PARSE-time anchor pass it instead -- `isUnsupported`/`isUnsafeCast`
   ## (`siteAnchored(marker)`) and the missing-callee arm (`calleeKeyed`) --
   ## so the parse record and its reach record join on the same anchor.
-  let info = SymexErrorInfo(kind: kind, severity: severity(kind), msg: msg,
+  ## RFC-0016 K7a: a cap cut names its setting in the recorded message, so
+  ## two caps sharing one error kind still tell the user which knob to raise.
+  let shown = if cap == ckNone: msg else: msg & " (cap: " & capSetting(cap) & ")"
+  let info = SymexErrorInfo(kind: kind, severity: severity(kind), msg: shown,
                             scope: scope)
-  if cap != ckNone: w.capCuts.incl cap     ## RFC-0016 K7a
   case sink
   of dsWalk:
     w.walkDegradeErrors.add info

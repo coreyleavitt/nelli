@@ -208,6 +208,26 @@ suite "RFC-0016 K7a (c) -- a cut run is never trusted":
     for e in r.errors:
       check "walk work cap" notin e.msg
 
+  test "a cap halt's error names the setting to raise":
+    ## Both caps record `beBudgetExhaustedPrune`; the message is what tells
+    ## the user which knob to raise.
+    let rf = symexFind(k7aPruneDead, tLabel("k7a_prune_dead"), frontierOne)
+    var fNamed, fWrong = false
+    for e in rf.errors:
+      if e.kind == beBudgetExhaustedPrune:
+        if "(cap: maxFrontierSize)" in e.msg: fNamed = true
+        if "(cap: walkRLimit)" in e.msg: fWrong = true
+    check fNamed
+    check not fWrong
+    let rw = symexFind(k7aWork, tLabel("k7a_work"), workTiny)
+    var wNamed, wWrong = false
+    for e in rw.errors:
+      if e.kind == beBudgetExhaustedPrune:
+        if "(cap: walkRLimit)" in e.msg: wNamed = true
+        if "(cap: maxFrontierSize)" in e.msg: wWrong = true
+    check wNamed
+    check not wWrong
+
   test "RED: pinCap fails when the run was not cut by that cap":
     expect PinFailure:
       pinCap(k7aLoopDead, "ckFrontier", tLabel("k7a_loop_dead"))

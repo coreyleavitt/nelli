@@ -309,3 +309,8 @@ suite "symex N40 -- walker version pin":
 
   test "walker version floor >= 104 (N40: allocateSym is total; classified allocation failures degrade in-band)":
     check parseInt(symexWalkerVersion) >= 104
+
+  test "walker version floor >= 458 (INT-6 R2-08: a heap write drains its allocation taint onto its own path)":
+    ## N40-4 above is that change's behaviour: the unsupported-KEY decline of
+    ## a heap write reports its own kind, not `weInternalWalkerFault`.
+    check parseInt(symexWalkerVersion) >= 458

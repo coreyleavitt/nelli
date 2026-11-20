@@ -431,14 +431,11 @@ suite "RFC-0005 S6a (c) -- the maxCallDepth / variant-ctor bail substitutes":
 
 const
   smtSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" / "smt"
-  ## The walker's files the audited sites live in: `runtime.nim`, and since
-  ## RFC-0016 INT-34 B6a `walk_ctx.nim` (the S1 probe's `halted` sites moved
-  ## there with region R3), and since B6b `walk_expr.nim` (`haltFrontier`,
-  ## `capLoopFrontier` and the call-depth bail moved there with region R4).
-  walkerFiles = ["runtime.nim", "walk_ctx.nim", "walk_expr.nim"]
 
 proc walkerSrc(): string =
-  for f in walkerFiles: result.add readFile(smtSrc / f) & "\n"
+  ## Every file of the walker (`runtimeFamilyFiles`), never a hand-picked
+  ## subset: INT-34 split the runtime, and a subset skips the sites that moved.
+  for f in runtimeFamilyFiles: result.add readFile(smtSrc / f) & "\n"
 
 proc degradeSites(src: string; k: SymexErrorKind): seq[string] =
   ## Every non-comment line of `src` that calls `degrade(<k>,` or (RFC-0005
@@ -492,6 +489,10 @@ suite "RFC-0005 S6a (d) -- structural: the audited emission sites":
         checkpoint($k & ": " & t)
         check "w.halted(" in t     ## RFC-0016 K7a: `halted` IS the discard
     check omitted >= 1
+    ## The scan sees the walker's other modules: `runtime_heap.nim`'s depth
+    ## halt is a dcOmitted site outside `runtime.nim`/`walk_ctx`/`walk_expr`.
+    check classOf(heDepthExhausted) == dcOmitted
+    check degradeSites(src, heDepthExhausted).len >= 1
 
 suite "RFC-0005 S6a -- walker version pin":
 

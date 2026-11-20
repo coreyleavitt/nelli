@@ -50,6 +50,19 @@ import nelli/smt/canonicalize
 import audit_scan_utils
 import ./s8cu_helpers
 
+proc withFamilyFiles(listed: seq[(string, string)]): seq[(string, string)] =
+  ## `listed`, plus every other file of the walker (`runtimeFamilyFiles`):
+  ## INT-34 cut `walk_solve.nim`, `walk_path.nim`, `walk_types.nim`,
+  ## `heap_model.nim` and the rest out of `runtime.nim`, and a hand-listed set
+  ## skipped them.
+  result = listed
+  for (label, path) in runtimeFamilySources():
+    let base = label.rsplit('/', 1)[1]
+    var named = false
+    for (n, _) in listed:
+      if n == base: named = true
+    if not named: result.add (base, readFile(path))
+
 # ============================================================================
 # PART 1 — CHARACTERIZATION
 # ============================================================================
@@ -385,7 +398,7 @@ let
   abstractionContent       = readFile(abstractionPath)
   canonicalizeContent      = readFile(canonicalizePath)
 
-  scannedFiles: seq[(string, string)] = @[
+  scannedFiles: seq[(string, string)] = withFamilyFiles(@[
     ("runtime.nim", runtimeContent),
     ("lower_expr.nim", lowerExprContent),
     ("walk_ctx.nim", walkCtxContent),
@@ -396,7 +409,7 @@ let
     ("runtime_closures.nim", runtimeClosuresContent),
     ("runtime_heap.nim", runtimeHeapContent),
     ("abstraction.nim", abstractionContent),
-    ("canonicalize.nim", canonicalizeContent)]
+    ("canonicalize.nim", canonicalizeContent)])
     ## R4-1: the single source of truth for "what this audit scans",
     ## replacing the three previously-parallel lists (staticRead consts,
     ## per-file `scanForSubfieldIekShapePeeks` calls, and the name-only

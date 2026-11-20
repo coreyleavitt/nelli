@@ -2859,7 +2859,7 @@ home = "K9d-10 (`wip/k9d10`)"
 source = "K9d-10 pinFind conversion"
 evidence = "red at 0692c8e0 (before e8b48a20): each reproducer target `sxUnknown` with `feUnsupportedParamType`, and `tsymex_0016_k2c_typeclass` pinned the same decline for `ppointer` and `pptrobj`; green after the fix, `tsymex_0016_int83_pointerparam` 19 OK on c and cpp, every definite verdict pinned natively by pinFind over the `pointer` domain; `k2c_typeclass` re-pinned (`ppointer`, `pptrobj` exact sxSat by pinFind; the type-class row admits `pointer` at `tcClassify`), `p6_nillit` re-pinned (the pointer nil arm exact, pinExact); `k9d_pinfind`, `h_verification`, `int82_paramfresh` green on c"
 aliases = []
-cells = []
+cells = ["typeclass:pointer", "typeclass:sequence"]
 pins = ["tsymex_0016_int83_pointerparam", "tsymex_0016_k2c_typeclass_a", "tsymex_0016_k2c_typeclass_b", "tsymex_0016_k2c_typeclass_c", "tsymex_0016_p6_nillit"]
 
 [[row]]
@@ -3019,5 +3019,5 @@ home = "int6 integration (`wip/int6b`)"
 source = "int6 merge of INT-65 and INT-83 (`tsymex_0016_int65_ptrnil`)"
 evidence = "red at 30ccbeae (the new suite on the int6 tip): `lCrossType` (int and float locals as pointers), `lVsPtrParam` (a `ptr float` parameter's pointer equal to an int local's), `lVsRef` (a float local's address equal to a `new int`'s) and `lFirstFieldNotApart` (`pointer(addr o.a) != pointer(addr o)`) were trusted `sxSat` whose witnesses do not hit natively; `lSecondFieldIsNot` was one too before the field offsets; `int65_ptrnil`'s CrossSort the same. Green at 84441eda (c, dt-bounded 900): `tsymex_0016_int93_localaddr` 8/8 (every definite verdict pinned by pinFind: same-type, cross-type and `let`-held locals unsat; `ptr float`, `ptr int` (as pointer and typed) and `pointer` parameters against a local unsat; a local against `new` unsat; two fields, the second field against the object, a field read twice, two tuple fields, mixed-type fields and a field against another local unsat; the first field at the object's address sat; `addr x == addr x` sat as pointer and typed; array elements decline `feUnsupportedExprKind`); `int65_ptrnil` 10/10 (CrossSort `pinExact` unsat); `int83_pointerparam` 19/19; `int88_crossptralias` 8/8; CR2 12/12 (455); `universe` 106/106; `d3_include_census` 51/51; `rfc0005_s7_closure` 37/37; `s8ckr_threadstate_audit` 2/2. `int90_crosssortheap` run alone: rc=137 at the 900 s bound (916 s wall) with 12 OK and 0 failed, as at 30ccbeae (not a regression; its runtime is open)"
 aliases = []
-cells = []
+cells = ["typeclass:pointer"]
 pins = ["tsymex_0016_int93_localaddr", "tsymex_0016_int65_ptrnil"]

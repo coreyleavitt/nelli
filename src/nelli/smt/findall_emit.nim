@@ -310,7 +310,7 @@ proc symexFindAllWitnessesImpl*(self: NimNode; fn: NimNode; db: NimNode; symexSe
               of sxUnsat, sxUnknown:
                 verdictSaved = saveSymexVerdictImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
                                       f.status, f.soundness, `dbErrorsId`,
-                                      f.gaps)   ## RFC-0005 S8av
+                                      f.gaps, f.hints)   ## RFC-0005 S8av, C-7
               of sxRaised:
                 # Phase 16 D1a. The defect fork is now unconditional;
                 # `routeRaise` populates `raisedWitness`. Carry it as

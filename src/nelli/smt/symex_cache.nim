@@ -162,6 +162,20 @@ func replayedUnkeyed*(prog: SymexProgram; s: Soundness): bool =
   prog.implOpen.len > 0 and
     (s.replay in {rsConfirmed, rsUnconfirmed} or s.witnessUnsafe)
 
+func replayedUnknown*(prog: SymexProgram; hints: seq[FindingHint]): bool =
+  ## Wiring audit C-7, INT-31's rule for an `sfUnknown`. A run that ends
+  ## `sxUnknown` after its replays refuted, crashed, timed out or declined a
+  ## candidate says so in its hints; that outcome is a fact about the bodies
+  ## the replay ran, as a confirmed claim is (`replayedUnkeyed`). Where the
+  ## key cannot see one of them (`implOpen`), the stored unknown would be
+  ## served after the body changed, hiding the witness a fresh run finds:
+  ## not stored, and the next run replays again.
+  if prog.implOpen.len == 0: return false
+  for h in hints:
+    if h.kind in {feReplayRefuted, feReplayCrashed, feReplayTimedOut,
+                  feReplayDeclined}:
+      return true
+
 proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
                            target: SymexTarget, settings: SymexSettings,
                            finding: SymexFinding,
@@ -244,8 +258,11 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
                             status: SymexFindingStatus,
                             soundness: Soundness,
                             errors: var seq[string],
-                            gaps: seq[FindingGap] = @[]): bool {.discardable.} =
-  ## Review R5 (D4a): true only when it wrote the entry.
+                            gaps: seq[FindingGap] = @[],
+                            hints: seq[FindingHint] = @[]): bool {.discardable.} =
+  ## Review R5 (D4a): true only when it wrote the entry. `hints` (wiring audit
+  ## C-7) are the run's, read for `replayedUnknown` only; they are not stored
+  ## here (`saveSymexNotesImpl` stores them).
   ## Phase 13 cycle 3. Persist a non-SAT verdict (sfUnsat /
   ## sfUnknown) under the content-addressed key with the
   ## appropriate suffix. The stored value is the sentinel empty
@@ -291,6 +308,8 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   # Review R1-07: read off the `soundness` the verdict was decided under, so a
   # save after other work on this thread still reads its own run's.
   if status == sfUnknown and soundness.runDependence != {}:
+    return false
+  if status == sfUnknown and replayedUnknown(prog, hints):   # INT-31
     return false
   if not metaReady(db, "saveSymexVerdictImpl", errors): return false
   let key = symexCacheKey(prog, target, settings,

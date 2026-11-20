@@ -11,6 +11,14 @@
 ## an error made outside any run stays with its caller (`consumeSymexDbErrors`).
 import std/unittest
 import nelli
+from nelli/smt/admission import cellKey, axConstruct
+import ./s8cu_helpers
+
+var held = true   # cleared by any test of this file that fails
+
+template trackFailure() =
+  teardown:
+    if testStatusIMPL != TestStatus.OK: held = false
 
 proc quiet(): Settings =
   Settings(maxExamples: 1, seed: 1, flakyRetries: 0, maxShrinks: 1,
@@ -27,6 +35,7 @@ proc runRecording(tag: string): seq[string] =
   r.dbErrors
 
 suite "INT-34: a symex DB error is on the report of the run that made it":
+  trackFailure()
 
   test "an error made outside any run is not on the next run's report":
     discard consumeSymexDbErrors()
@@ -69,3 +78,10 @@ suite "INT-34: a symex DB error is on the report of the run that made it":
     check runRecording("first") == @["first"]
     check runRecording("second") == @["second"]
     check consumeSymexDbErrors().len == 0
+
+  test "the run-scoped error contract holds":
+    pinNever(cellKey(axConstruct, "report/dberrors/run-scoped"), held,
+      "a symex DB error is on the report of the run that made it: one made " &
+      "outside any run is never on the next run's, a nested run reports its " &
+      "own errors and its enclosing run both, and runs on two threads keep " &
+      "theirs apart")

@@ -141,8 +141,26 @@ const
   ## those guards and the unbacked-element decline reads the left length
   ## (`lenL`), the left data array's context (`zctx`), and builds the result
   ## from `right.seqLen` (three): a placeholder never reaches them.
-  markerPins = [("runtime.nim", 120), ("runtime_strings.nim", 4),
-                ("heap_model.nim", 23), ("runtime_heap.nim", 11)]
+  ## RFC-0016 INT-34 B0: `sameSymVal` moved into `symval.nim` with its two
+  ## marked svSeq lines: runtime.nim 120 -> 118, symval.nim 0 -> 2. The
+  ## family total is unchanged.
+  ## RFC-0016 INT-34 B4: region R1 (`lower`) moved into `lower_expr.nim` with
+  ## its 56 marked lines: runtime.nim 118 -> 62, lower_expr.nim 0 -> 56. The
+  ## family total is unchanged.
+  ## RFC-0016 INT-34 B5: region R2 (`trySolve`, the witness) moved into
+  ## `walk_solve.nim` with its 24 marked lines: runtime.nim 62 -> 38,
+  ## walk_solve.nim 0 -> 24. The family total is unchanged.
+  ## RFC-0016 INT-34 B6a: region R3 (`degrade`, the frames) moved into
+  ## `walk_ctx.nim` with its one marked line: runtime.nim 38 -> 37,
+  ## walk_ctx.nim 0 -> 1. The family total is unchanged.
+  ## RFC-0016 INT-34 B6b: region R4 (`sameSV`, `joinSV`, the drains) moved
+  ## into `walk_expr.nim` with its 5 marked lines: runtime.nim 37 -> 32,
+  ## walk_expr.nim 0 -> 5. The family total is unchanged.
+  markerPins = [("runtime.nim", 32), ("runtime_strings.nim", 4),
+                ("heap_model.nim", 23), ("runtime_heap.nim", 11),
+                ("symval.nim", 2), ("lower_expr.nim", 56),
+                ("walk_solve.nim", 24), ("walk_ctx.nim", 1),
+                ("walk_expr.nim", 5)]
 
   targetFields = ["seqLen", "seqDataRaw", "isUnsupportedFieldPlaceholder"]
   auditMarker = "# [placeholder-audited]"

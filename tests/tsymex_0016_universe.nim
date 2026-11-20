@@ -17,8 +17,9 @@
 ## The error-kind and cap-kind sets are "Not axes" (section 8.1): they are
 ## coverage derivations, not `CellKey` scopes, so their keys are rendered here
 ## (`errorkind:`, `capkind:`) and live only in the ledger and the allowlists.
-## `CapKind` is private to `runtime.nim`, so its members are read from the
-## declaration, as `tsymex_0016_k7a_survivors` does.
+## `CapKind` is not exported past the runtime unit (it is `walk_types.nim`'s
+## since RFC-0016 INT-34 B2), so its members are read from the declaration,
+## as `tsymex_0016_k7a_survivors` does.
 ##
 ## The join. A cell is CLASSIFIED when a pin record evidences it:
 ##   * a `CellKey` cell: a record with that cell and an `exact`/`raised`/
@@ -114,6 +115,7 @@ const
   testsDir = root / "tests"
   fixtureDir = root / "tests" / "0016-fixtures" / "universe-pins"
   runtimePath = root / "src" / "nelli" / "smt" / "runtime.nim"
+  walkTypesPath = root / "src" / "nelli" / "smt" / "walk_types.nim"   ## INT-34 B2
   scopes = ["magic", "build", "errorkind", "capkind", "typeclass", "typeop", "pragma", "stdlib",
             "defined"]
   publicEntries = ["symexFind", "symexFindAllWitnesses", "symexForAll",
@@ -138,12 +140,15 @@ func stateOf(admitted: bool; intent: Intent): string =
   if admitted: "modelled" elif intent == iNever: "never" else: "declined"
 
 proc capMembers(): seq[string] =
-  ## The `CapKind` members other than `ckNone`, from the declaration.
+  ## The `CapKind` members other than `ckNone`, from the declaration (in
+  ## `walk_types.nim` since RFC-0016 INT-34 B2; `runtime.nim` is read too, so
+  ## a move back does not hide it).
   var inEnum = false
-  for raw in readFile(runtimePath).splitLines():
+  for raw in (readFile(walkTypesPath) & "\n" & readFile(runtimePath)).splitLines():
     let t = raw.strip()
     if t.len == 0 or t.startsWith("#"): continue
-    if t.startsWith("CapKind = enum"): inEnum = true; continue
+    if t.startsWith("CapKind = enum") or t.startsWith("CapKind* = enum"):
+      inEnum = true; continue
     if inEnum:
       let word = t.split({' ', '\t'})[0]
       if not word.startsWith("ck"): break

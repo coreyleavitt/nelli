@@ -6,7 +6,8 @@
 ## `LowerHooks` and not filled fails here, not as a nil call mid-walk.
 import std/unittest
 import nelli/smt/runtime
-import nelli/smt/[walk_state]   ## R2-3: the leaves are no longer re-exported by the facade
+import nelli/smt/[walk_state, walk_path, lower_expr, walk_solve, walk_ctx,
+                 walk_expr]   ## R2-3: the leaves are no longer re-exported by the facade
 
 suite "RFC-0016 D3c-2: lowerHooks":
   test "every hook is filled at module init":
@@ -16,8 +17,55 @@ suite "RFC-0016 D3c-2: lowerHooks":
       check not f.isNil
       inc n
     # The exact inventory: lower, lowerClosureCall, currentFrameId,
-    # registerCapCell, depositStrIndexOob and (INT-87, 9e37524b)
-    # depositUndefinedOob. The sixth is filled in `runtime.nim`'s
-    # `lowerHooks = LowerHooks(...)`; a seventh must be named here.
+    # registerCapCell, depositStrIndexOob, (INT-87, 9e37524b)
+    # depositUndefinedOob (INT-87, 9e37524b). Each is filled in
+    # `runtime.nim`'s `lowerHooks = LowerHooks(...)`; a seventh must be named
+    # here.
     check n == 6
 
+  test "every walk_path hook is filled at module init":
+    # INT-34 B3b. `walk_path` declares its own typed `PathHooks` (it can name
+    # `Path`, which `walk_state` cannot); the same rule holds: no field nil.
+    var n = 0
+    for name, f in fieldPairs(pathHooks):
+      checkpoint name
+      check not f.isNil
+      inc n
+    check n == 1   # noteUbAtFork; a second must be named here
+
+  test "every lower_expr hook is filled at module init":
+    # INT-34 B4. `lower_expr` declares its own typed `LowerExprHooks`, the
+    # `PathHooks` pattern; the same rule holds: no field nil.
+    var n = 0
+    for name, f in fieldPairs(lowerExprHooks):
+      checkpoint name
+      check not f.isNil
+      inc n
+    check n == 1   # lowerHofCall; a second must be named here
+
+  test "walk_solve declares no hook table":
+    # INT-34 B5. Region R2 (`trySolve`, `pathInfeasible`, the witness) calls
+    # nothing above it, so `walk_solve` has no typed hooks to fill. A hook
+    # added there is declared as `walkSolveHooks` (the `PathHooks` pattern)
+    # and replaces this test with the fill check above.
+    check not declared(walkSolveHooks)
+    check not declared(WalkSolveHooks)
+
+  test "walk_ctx declares no hook table":
+    # INT-34 B6a. Region R3 (`degrade`, the frames, `solveTargetHit`, the
+    # pending take and restore) calls nothing above it, so `walk_ctx` has no
+    # typed hooks to fill; as for `walk_solve` above.
+    check not declared(walkCtxHooks)
+    check not declared(WalkCtxHooks)
+
+  test "every walk_expr hook is filled at module init":
+    # INT-34 B6b. Region R4 (`lowerInExpr`, the drains, the raise forks)
+    # calls one routine above it, `routeRaise` (it walks `finally` bodies),
+    # through `walk_expr`'s own typed `WalkExprHooks`, the `PathHooks`
+    # pattern; the same rule holds: no field nil.
+    var n = 0
+    for name, f in fieldPairs(walkExprHooks):
+      checkpoint name
+      check not f.isNil
+      inc n
+    check n == 1   # routeRaise; a second must be named here

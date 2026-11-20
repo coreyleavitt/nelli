@@ -15,6 +15,7 @@
 ##   (e) structural -- the solver-sink drain list, the closure-sink funnel,
 ##       the error-sink -> run-channel map, and the walker version floor.
 from ./s8cu_helpers import named
+from ./audit_scan_utils import runtimeFamilySources
 import std/[unittest, sequtils, macros, strutils, os, sets]
 import nelli/symex
 import nelli/smt/types
@@ -415,7 +416,10 @@ suite "RFC-0005 S7 (d) -- S9 precondition: without the vetoes, no S7 SUT is a cl
 const smtDir = currentSourcePath.parentDir() / ".." / "src" / "nelli" / "smt"
 
 proc runtimeFiles(): seq[string] =
-  for f in walkFiles(smtDir / "runtime*.nim"): result.add f
+  ## The runtime family (RFC-0016 INT-34 B6a: `degrade` and `closureDegrade`,
+  ## the closure sink's two writers, moved to `walk_ctx.nim`, outside the
+  ## `runtime*.nim` glob).
+  for (_, path) in runtimeFamilySources(): result.add path
 
 proc routineName(line: string): string =
   for kw in ["proc ", "template ", "func ", "iterator ", "macro ", "method "]:
@@ -492,9 +496,12 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## the query reaches, that an allocation of the run is no object of the
     ## entry state. True of every real execution (the entry state predates
     ## the walk), so it prunes no real input.
+    ##
+    ## RFC-0016 INT-34 B5: the four routines moved, whole, to `walk_solve.nim`.
+    let solveSrc = smtDir / "walk_solve.nim"
     var drained: seq[string]
     for routine in ["pathRoots", "globalRoots"]:
-      for t in routineBody(smtDir / "runtime.nim", routine):
+      for t in routineBody(solveSrc, routine):
         if t.startsWith("for c in ") and t.endsWith(":"):
           drained.add t["for c in ".len ..< t.len - 1]
     check drained == @["path.pc", "path.defectSurvivorPc",
@@ -504,10 +511,10 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
                        "indexSplitRoots(currentContext(), reach)",
                        "refProvenanceRoots(currentContext(), reach)"]
     check "roots.add globalRoots(roots)" in
-      routineBody(smtDir / "runtime.nim", "pathRoots")
+      routineBody(solveSrc, "pathRoots")
     for caller in ["trySolve", "loopArmInfeasible"]:
       var callsRoots = false
-      for t in routineBody(smtDir / "runtime.nim", caller):
+      for t in routineBody(solveSrc, caller):
         check not (t.startsWith("for c in ") and t.endsWith(":"))
         if "pathRoots(path" in t: callsRoots = true
       check callsRoots

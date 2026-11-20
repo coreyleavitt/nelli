@@ -60,7 +60,7 @@
 ##     (`spliceCellStore`), so it is no exception to the rule either;
 ##   * an opaque call's havoc already desynced (`heapEpochPrefix`); it is an
 ##     `hwStore` now as well.
-import std/[unittest, os, strutils]
+import std/[unittest, os, strutils, algorithm]
 import audit_scan_utils
 
 proc smtSources(): seq[tuple[name, code: string]] =
@@ -163,12 +163,16 @@ suite "INT-90: one choke point for a path's heap writes":
         if k >= 0:
           where.add s.name & " " & enclosingDecl(lines, i)
     checkpoint $where
-    check where == @["runtime.nim proc deepCopyHeapState",
-                     "runtime.nim proc drainClosureExitHeap",
-                     "runtime.nim proc mergeJoinPaths"]
+    where.sort()   # the scan's file order is the directory's
+    check where == @[# RFC-0016 INT-34 B6b: the joins are `walk_expr`'s
+                     "walk_expr.nim proc drainClosureExitHeap",
+                     "walk_expr.nim proc mergeJoinPaths",
+                     # RFC-0016 INT-34 B3: the fork copy is `walk_path`'s
+                     "walk_path.nim proc deepCopyHeapState"]
     # each carries the paths' counters with the heaps (the desync key)
     for s in srcs:
-      if s.name != "runtime.nim": continue
+      if s.name notin ["runtime.nim", "walk_path.nim", "walk_expr.nim"]:
+        continue
       let lines = s.code.splitLines
       for i, l in lines:
         if ".heaps = " notin l: continue
@@ -196,8 +200,10 @@ suite "INT-90: one choke point for a path's heap writes":
         checkpoint enclosingDecl(lines, i)
         check "allocCounters: " in body
     checkpoint $where
-    check where == @["runtime.nim template forkPathTaintPrimitive",
-                     "runtime.nim proc applyClosureGround"]
+    where.sort()   # the scan's file order is the directory's
+    check where == @["runtime.nim proc applyClosureGround",
+                     # RFC-0016 INT-34 B3: the fork primitive is `walk_path`'s
+                     "walk_path.nim template forkPathTaintPrimitive"]
 
   test "heapPut is the template over heapPutIn, defined once":
     var defs = 0

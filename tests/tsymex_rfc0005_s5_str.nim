@@ -421,12 +421,12 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
 
   test "structural: degradeStrArm allocates only through freshDegradeName and never asserts its init facts":
     const rtSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
-                  "smt" / "runtime.nim"
+                  "smt" / "lower_expr.nim"   ## RFC-0016 INT-34 B4: with `lower`
     var inBody = false
     var body = ""
     var freshUses: seq[string]
     for raw in readFile(rtSrc).splitLines():
-      if raw.startsWith("proc degradeStrArm("):
+      if raw.startsWith("proc degradeStrArm*("):
         inBody = true
         continue
       if inBody and raw.len > 0 and not raw.startsWith(" "):

@@ -1,40 +1,53 @@
-# runtime_heap.nim -- Cluster R: the heap walker arm, an include of runtime.nim
-#
-# THIS FILE IS NOT A STANDALONE MODULE, BY DESIGN (RFC-0016 review D3c-8). It
-# is textually included into runtime.nim via `include "runtime_heap.nim"` and
-# inherits runtime.nim's imports and top-level names; do NOT add `import`
-# statements here.
-#
-# Why it stays an include: it is the walker's own statement arm
-# (`isDeref` / `isNew` / `isDerefWrite`). It reads and writes the fields of
-# `WalkCtx` directly and forks paths through the `forkPath` template, which
-# cannot be called through a hook; a hook on the per-statement path would add
-# an indirect call for no boundary gain. Every other include of runtime.nim
-# became a module (D3c-3 .. D3c-7); this is the one that cannot, yet.
-#
-# Its imported surface is pinned as an EXACT set of runtime.nim-private names
-# by `heapPinned` in tests/tsymex_0016_d3_include_census.nim (a new name fails,
-# a removed one fails: shrink the list). The load-bearing names:
-#   walker core:   WalkCtx, Path, Degrade, forkPath, forkPathTainted, degrade,
-#                  shouldStop, halted, pathInfeasible, loopArmInfeasible,
-#                  liveFrame, isConcolicFollowWalk
-#   expression:    lowerInExpr, lowerLeafInExpr, drainPendingLowerEffects,
-#                  drainScalarRaiseForks
-#   values:        allocateSym, iteSV, sameSymVal, entryValueOf, seqElemAt,
-#                  storeSeqElem, seqArrs, seqStoreArrs, taintInPlace
-#   raise:         crashRaise
-# The rest are the per-run tables and cell helpers the arm shares with the
-# value model and the walker (see the list in the census).
-#
-# Follow-up, not done here: moving `WalkCtx`, `Path`, `forkPath`, `degrade` and
-# `shouldStop` into a `walker_core.nim` leaf would let this file become a
-# module (it is also what extracting the walk log I/O wants).
-#
+## RFC-0016 INT-34 B7. The heap walker arm (Cluster R): a leaf cut out of
+## `runtime.nim`, which it was `include`d into until this slice.
+##
+## The arm the statement walker dispatches `isDeref`, `isNew` and
+## `isDerefWrite` to (`walkHeapArm`), with the pointer targets, the address,
+## element and field cells and their readers and writers. It reads and writes
+## `WalkCtx` and `Path` (./walk_types) directly, forks through `forkPath`
+## (./walk_path), lowers through ./lower_expr and ./walk_expr, and calls
+## nothing above it: `scripts/int34-deps.py` found no upward edge, so this
+## module has no hook object.
+##
+## With it, the R0 run state only the arm writes: the freshness-cap and
+## ptr-family hint sinks (`freshnessCapHints`, `ptrFamilyHints`), which the
+## verdict drains in `runtime.nim` read through this module's export, and
+## `resetRuntimeHeapState` (called by `resetSymexRunState`) resets.
+##
+## Every routine `runtime.nim` calls is exported; `runtime.nim` re-exports by
+## name only what it exported before the cut.
+
+import std/tables
+import std/options
+import std/sets
+import std/hashes
+import std/algorithm
+import std/math
+import std/strutils
+import z3
+
+import ./types
+import ./admission
+import ./definedness
+import ./variant_layout as vl
+import ./abstraction
+import ./symval
+import ./walk_state
+import ./walk_types
+import ./walk_path
+import ./lower_expr
+import ./walk_solve
+import ./walk_ctx
+import ./walk_expr
+import ./z3check
+import ./heap_model
+import ./exits
+import ./concolictaxonomy
+
 # RFC-0016 review D3c-6: the heap ALGEBRA (ref sorts, heap keys, the leaf
 # split, `heapSelect`, the cells, `svCellWf`, `heapChainDepth`, ...) is the
-# real module `heap_model.nim`, imported by runtime.nim; this file reaches it
-# by name. What stays here is the walker arm, everything that names `WalkCtx`
-# or `Path`:
+# real module `heap_model.nim`; this module reaches it by name. What is here
+# is the walker arm, everything that names `WalkCtx` or `Path`:
 #     freshRef, assertFreshness, pcImpliesNonNil, heapCellArrays, heapCellZero,
 #     heapStepOf, heapDepthExhausted, nilDerefFork
 #   `walkHeapArm(stmt, paths, w)` -- the `walk()` dispatch arm for
@@ -43,10 +56,25 @@
 #   element cell readers/writers it calls.
 # `isIndex` is left inline in `walk()` because it handles multiple container
 # theories and cannot be cleanly attributed to the heap cluster alone.
-# `buildHeapSnapshot` stays in runtime.nim (called from extractWitness before
-# the heap include point).
-# Placement in runtime.nim: between `walkBlock` and `walk`'s body
-# (after `walk`'s forward-decl and before `walk`'s body).
+# `buildHeapSnapshot` is ./walk_solve's (witness extraction calls it).
+
+var freshnessCapHints* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 R2. Accumulator for `heFreshnessCapExceeded` (sevHint), emitted
+  ## when a `new T` on a path would push the freshness-assertion count past
+  ## `settings.maxFreshnessAssertions`. Reset at `runSymexImpl` entry; drained
+  ## (dedup'd) into `RawResult.errors` on every verdict branch. A hint never
+  ## changes the verdict (Invariant 7) — exactly the G4 `distinctBijectivityHints`
+  ## idiom. The walker has a `WalkCtx` at the `isNew` arm, but the drain is a
+  ## verdict-time concern shared across paths, so it rides the threadvar sink.
+
+var ptrFamilyHints* {.threadvar.}: seq[SymexErrorInfo]
+  ## Phase 15 R8. Accumulator for `hePtrFamily` (sevHint), emitted whenever an
+  ## UNMANAGED `ptr T` (an `svPtr`, `ptrFamily = true`) is dereffed or written
+  ## through. Lets consumers distinguish an unmanaged-ptr witness from a managed
+  ## `ref T` one (which emits NO such hint). A hint never changes the verdict
+  ## (Invariant 7) — drained (dedup'd) into `RawResult.errors` on every verdict
+  ## branch, exactly the R2 `freshnessCapHints` idiom. Reset at `runSymexImpl`
+  ## entry.
 
 proc freshRef*(ctx: Z3Context, refSort: RawZ3Sort, typeId: string,
                path: Path): Z3AnyAst =
@@ -759,7 +787,7 @@ proc objectCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                            ty.fields[i]):
       heapPut(p, c.key, c.arr, hwStore)
 
-proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
+proc addrCellValue*(ctx: Z3Context; p: Path; ty: IRType;
                    refAst: Z3AnyAst): SymVal =
   ## RFC-0005 S8ax. The value of the address cell at `refAst` on `p`.
   ## RFC-0005 S8be: a case object's, from its field-split heaps.
@@ -783,7 +811,7 @@ func keepStrBuf*(stored, v: SymVal): SymVal =
   if result.kind == svString and v.kind == svString:
     result.strBuf = v.strBuf
 
-proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+proc addrCellStore*(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                    v: SymVal): SymVal =
   ## RFC-0005 S8ax. Store `v` into the address cell at `refAst` on `p` (a
   ## path the caller just forked) and return the cell's value read back:
@@ -820,7 +848,7 @@ proc arrayLocIx(ix: SymVal; n: int): Option[int] =
   except CatchableError: discard
   none(int)
 
-proc locGet(v: SymVal; path: seq[string]; ixs: seq[SymVal];
+proc locGet*(v: SymVal; path: seq[string]; ixs: seq[SymVal];
             k = 0; j = 0): Option[SymVal] =
   ## RFC-0005 S8bs. The part of `v` at `path` (`AddrCellEntry`): a field of
   ## an object or tuple, a plain or arm field of a case object, an element
@@ -867,7 +895,7 @@ proc locGet(v: SymVal; path: seq[string]; ixs: seq[SymVal];
   else: discard
   none(SymVal)
 
-proc locSet(v: SymVal; path: seq[string]; ixs: seq[SymVal]; x: SymVal;
+proc locSet*(v: SymVal; path: seq[string]; ixs: seq[SymVal]; x: SymVal;
             k = 0; j = 0): Option[SymVal] =
   ## RFC-0005 S8bs. `v` with its part at `path` (`locGet`) replaced by `x`.
   if k >= path.len: return some(x)
@@ -925,7 +953,7 @@ proc locSet(v: SymVal; path: seq[string]; ixs: seq[SymVal]; x: SymVal;
   else: discard
   none(SymVal)
 
-proc addrEntryValue(ctx: Z3Context; p: Path; c: AddrCellEntry;
+proc addrEntryValue*(ctx: Z3Context; p: Path; c: AddrCellEntry;
                     refAst: Z3AnyAst): Option[SymVal] =
   ## RFC-0005 S8bs. The value of `c`'s location on `p`: its cell's
   ## (`addrCellValue`), or, for a `bound` entry, the part of it at its path.
@@ -933,7 +961,7 @@ proc addrEntryValue(ctx: Z3Context; p: Path; c: AddrCellEntry;
   if c.path.len == 0: return some(whole)
   locGet(whole, c.path, c.ixs)
 
-proc addrEntryStore(ctx: Z3Context; p: Path; c: AddrCellEntry;
+proc addrEntryStore*(ctx: Z3Context; p: Path; c: AddrCellEntry;
                     refAst: Z3AnyAst; x: SymVal): Option[SymVal] =
   ## RFC-0005 S8bs. `addrCellStore` for `c`'s location: a `bound` entry's
   ## part is stored into the whole value its cell holds.
@@ -1081,7 +1109,7 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     child.env = env2
     result.add drainPendingLowerEffects(child)
 
-proc foldedBool(ctx: Z3Context; b: Z3Bool): Option[bool] =
+proc foldedBool*(ctx: Z3Context; b: Z3Bool): Option[bool] =
   ## RFC-0005 S8ca. `b` simplified, when that is `true` or `false`.
   let s = simplify(b)
   case Z3_get_bool_value(ctx.raw, s.raw)
@@ -1175,7 +1203,7 @@ proc armFieldTags(v: SymVal; field: string): seq[int] =
       for t, names in ax.armFieldNames:
         if field in names: result.add t
 
-proc armFieldValue(v: SymVal; field: string; tags: seq[int]): SymVal =
+proc armFieldValue*(v: SymVal; field: string; tags: seq[int]): SymVal =
   ## RFC-0005 S8bo. Arm field `field` of the case object `v`, declared by
   ## the arms `tags`: the slot of the arm `v`'s discriminator selects (an
   ## `ite` over them; one arm, its slot). RFC-0005 S8cb: of a multi-axis one,
@@ -1206,7 +1234,7 @@ proc armFieldValue(v: SymVal; field: string; tags: seq[int]): SymVal =
   for k in countdown(vals.len - 2, 0):
     result = iteSV(variantDiscEq(disc, int64(vals[k][0])), vals[k][1], result)
 
-proc withArmField(v: SymVal; field: string; tags: seq[int];
+proc withArmField*(v: SymVal; field: string; tags: seq[int];
                   x: SymVal): SymVal =
   ## RFC-0005 S8bo. The case object `v` with arm field `field` set to `x` in
   ## every arm of `tags` (as `lowerVariantFieldSet` writes it). RFC-0005 S8cb:
@@ -1226,7 +1254,7 @@ proc withArmField(v: SymVal; field: string; tags: seq[int];
         let i = result.vArmFieldNames[t].find(field)
         if i >= 0: result.vArmFields[t][i] = x
 
-proc fieldMemorySame(a, b: SymVal; field: string): bool =
+proc fieldMemorySame*(a, b: SymVal; field: string): bool =
   ## RFC-0005 S8cb. A field cell of `field` still names the same memory from
   ## the object `b` to the object `a`: its discriminator is the same term (the
   ## arm's memory is reused), the discriminator of the axis declaring it for a
@@ -3542,7 +3570,7 @@ proc refVariantWholeStore(ctx: Z3Context; p: Path; refSort: RawZ3Sort;
     let cell = heapCellArrays(ctx, p, s.key, refSort, s.ty, s.variantTy)
     for c in heapCellStore(ctx, cell, refAst, parts[i], s.ty): result.add c
 
-proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
+proc walkHeapArm*(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for
   ## `isDeref`, `isNew`, `isDerefWrite`. `heapSelect`/`allocRefSort`/`freshRef`/
   ## `assertFreshness`/`nilDerefFork`/`buildHeapSnapshot` are already named procs
@@ -5064,3 +5092,20 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): Survivors =
     raise newException(ValueError,  # [raise-audited: category-c: documented single-caller dispatch invariant (walk's own case restricts stmt.kind to isDeref/isNew/isDerefWrite before ever calling walkHeapArm)]
       "walkHeapArm: unexpected stmt.kind=" & $stmt.kind &
       " (not isDeref/isNew/isDerefWrite)")
+
+proc resetRuntimeHeapState*() =
+  ## RFC-0016 INT-34 B7. The per-run resets `resetSymexRunState` made for
+  ## this module's threadvars, in their order there.
+  freshnessCapHints = @[]                ## Phase 15 R2: reset cap-hint sink
+  ptrFamilyHints = @[]                   ## Phase 15 R8: reset ptr-family hint sink
+
+# RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
+# default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
+# a thread that exits leaks none of it. A threadvar added to this module
+# is named here, or tsymex_0016_s8ckr_threadstate_audit fails.
+import ../thread_state
+
+proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
+  releaseToDefault(freshnessCapHints, ptrFamilyHints)
+
+registerThreadStateRelease(releaseThreadState)

@@ -17,10 +17,14 @@ import std/[unittest, os, strutils]
 const
   smt = currentSourcePath().parentDir() / ".." / "src" / "nelli" / "smt"
 
-  ## Reset by an assignment in `resetSymexRunState` itself.
-  direct = ["pendingPtrCompares", "closureEnvWrites", "loweringReadNames",
-            "lastDrainedClosureExitPc", "lowerAsReceiver", "glUnwrittenCtx",
-            "seqConformCounter"]
+  ## RFC-0016 INT-34 B6b: owned by `walk_expr.nim` with the drains, and
+  ## reset by an assignment in its `resetWalkExprState` (it was reset by
+  ## `resetSymexRunState` itself before the cut).
+  drained = ["lastDrainedClosureExitPc"]
+  ## RFC-0016 INT-34 B4: owned by `lower_expr.nim` with `lower`, and reset
+  ## by an assignment in its `resetLowerExprState`.
+  lowered = ["pendingPtrCompares", "closureEnvWrites", "loweringReadNames",
+             "lowerAsReceiver", "glUnwrittenCtx", "seqConformCounter"]
 
 proc readSmt(f: string): string = readFile(smt / f)
 
@@ -39,12 +43,25 @@ suite "RFC-0016 H1 R1-12: per-run lowering state is reset":
   let rt = readSmt("runtime.nim")
   let resetBody = bodyFrom(rt, "proc resetSymexRunState(")
 
-  test "the seven runtime.nim threadvars are reset by assignment":
-    for n in direct:
+  test "the walk_expr.nim threadvar is reset through resetWalkExprState":
+    check resetBody.contains("\n  resetWalkExprState()")
+    let we = readSmt("walk_expr.nim")
+    let weBody = bodyFrom(we, "proc resetWalkExprState*()")
+    for n in drained:
       checkpoint n
-      check rt.contains("{.threadvar.}") and
-            rt.contains("var " & n & " {.threadvar.}")
-      check resetBody.contains("\n  " & n & " = ")
+      check we.contains("var " & n & "* {.threadvar.}")
+      check not rt.contains("var " & n & " {.threadvar.}")
+      check weBody.contains("\n  " & n & " = ")
+
+  test "the six lower_expr.nim threadvars are reset through resetLowerExprState":
+    check resetBody.contains("\n  resetLowerExprState()")
+    let le = readSmt("lower_expr.nim")
+    let leBody = bodyFrom(le, "proc resetLowerExprState*()")
+    for n in lowered:
+      checkpoint n
+      check le.contains("var " & n & "* {.threadvar.}")
+      check not rt.contains("var " & n & " {.threadvar.}")
+      check leBody.contains("\n  " & n & " = ")
 
   test "allocEnumZeroLegal is reset through resetHeapModel":
     check resetBody.contains("\n  resetHeapModel()")

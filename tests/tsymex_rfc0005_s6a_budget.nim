@@ -429,8 +429,16 @@ suite "RFC-0005 S6a (c) -- the maxCallDepth / variant-ctor bail substitutes":
 # (d) structural: the site-audit table, pinned against the source
 # =============================================================================
 
-const rtSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
-              "smt" / "runtime.nim"
+const
+  smtSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" / "smt"
+  ## The walker's files the audited sites live in: `runtime.nim`, and since
+  ## RFC-0016 INT-34 B6a `walk_ctx.nim` (the S1 probe's `halted` sites moved
+  ## there with region R3), and since B6b `walk_expr.nim` (`haltFrontier`,
+  ## `capLoopFrontier` and the call-depth bail moved there with region R4).
+  walkerFiles = ["runtime.nim", "walk_ctx.nim", "walk_expr.nim"]
+
+proc walkerSrc(): string =
+  for f in walkerFiles: result.add readFile(smtSrc / f) & "\n"
 
 proc degradeSites(src: string; k: SymexErrorKind): seq[string] =
   ## Every non-comment line of `src` that calls `degrade(<k>,` or (RFC-0005
@@ -448,7 +456,7 @@ suite "RFC-0005 S6a (d) -- structural: the audited emission sites":
   test "site counts per kind match the S6a audit (a new site must re-audit its class)":
     ## STANDING RULE (§3.2): reusing a kind at a new site asserts its class.
     ## This pin makes that assertion a reviewed edit instead of a silent one.
-    let src = readFile(rtSrc)
+    let src = walkerSrc()
     for (k, n) in [(beBudgetExhausted, 2),            # k-unroll, both modes
                    (beBudgetExhaustedAssumedBound, 1),
                    # haltFrontier (walkBlock / capLoopFrontier), and, since
@@ -475,7 +483,7 @@ suite "RFC-0005 S6a (d) -- structural: the audited emission sites":
     ## `pathTaint(dcOmitted) == {}` is sound only where no path survives the
     ## act. A dcOmitted token handed to `forkPathTainted`/`taintInPlace`
     ## would launder the omission into a clean survivor.
-    let src = readFile(rtSrc)
+    let src = walkerSrc()
     var omitted = 0
     for k in SymexErrorKind:
       if classOf(k) != dcOmitted: continue

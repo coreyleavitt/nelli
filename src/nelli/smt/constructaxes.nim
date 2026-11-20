@@ -223,6 +223,18 @@ func constructRows(): seq[ConstructKey] =
     "site adds no second entry to the enclosing report; the more severe, " &
     "then the stronger claim, is kept (INT-36)", iNever, nrByDesign)
   result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["report/dberrors/run-scoped"], none(SymexErrorKind),
+    "a symex DB error is on the report of the run that made it: one made " &
+    "outside any run is never on the next run's, a nested run reports its " &
+    "own errors and its enclosing run both, and runs on two threads keep " &
+    "theirs apart (INT-34)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
+    ["cache/record/codec"], none(SymexErrorKind),
+    "every soundness, gap, hint, diagnostic, undefined kind, verdict and " &
+    "raised sentinel the verdict cache stores round-trips through " &
+    "`symex_codec`'s encoding, and a decode refuses what no encode writes, " &
+    "a malformed record being a miss (INT-34)", iNever, nrByDesign)
+  result.add refusedEach[ConstructSite, ConstructModel]("",
     ["db/secondary/guard"], none(SymexErrorKind),
     "a failing secondary-corpus write is reported in `dbErrors` (and ends a " &
     "`strictDb` run with a report), never raised out of `forAll` (INT-33)",

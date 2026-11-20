@@ -2,15 +2,15 @@
 ##
 ## `SymVal` and its kind tag, `Env`, the `Symex*Error` family, the BV lifting
 ## templates, `bvVar`/`bvRangeConds`, and the lowering-time degrade sink
-## (`lowerDegrade` with the threadvars it writes) used to be the first
+## (`queueDegrade` with the threadvars it writes) used to be the first
 ## thousand lines of `runtime.nim`, which its `include`d files read by
 ## sharing a namespace. They depend on nothing later, so they are a module:
 ## imports are `z3`, `./types`, `./abstraction` and the standard library only.
 ## `runtime.nim` imports and re-exports this module, so importers of
 ## `nelli/smt/runtime` are unchanged.
 ##
-## Threadvars here (`loweringDegradeErrors`, `loweringPendingTaint`,
-## `loweringPendingUb`) are reset by `resetLoweringSink`, which
+## Threadvars here (`loweringDegradeErrors`, the lowering queue `pending`)
+## are reset by `resetLoweringSink`, which
 ## `resetSymexRunState` calls: a threadvar left out of it would leak a prior
 ## run's state into the next (the `tsymex_0016_d3_include_census` scan checks
 ## every threadvar of this file is named there).
@@ -551,54 +551,133 @@ var loweringDegradeErrors* {.threadvar.}: seq[SymexErrorInfo]
   ## `runSymexImpl` entry; drained (dedup'd) into `RawResult.errors` on every
   ## verdict branch — exactly the R9 `heapDepthErrors` idiom.
 
-var loweringPendingUb* {.threadvar.}: set[UbKind]
-  ## RFC-0016 W1-d3. The undefined behaviours the pending lowering decline
-  ## read through, the `loweringPendingTaint` of `Path.undefined`: set and
-  ## saved, restored, drained and reset wherever that is. Non-empty implies
-  ## `loweringPendingTaint != {}` (the producers also taint).
+type
+  PendingDegrade* = object
+    ## RFC-0016 INT-34 (0005 review R2-14). The lowering queue: the path
+    ## taint of the in-band lowering declines queued since it was last
+    ## taken, and the undefined behaviours they read through (RFC-0016
+    ## W1-d3, the `taint` of `Path.undefined`; non-empty implies `taint !=
+    ## {}`, the producers also taint). A value of this type is a copy: the
+    ## queue itself is the private `pending` threadvar, reached only through
+    ## the verbs below.
+    taint*: Taint
+    ub*: set[UbKind]
 
-var loweringPendingTaint* {.threadvar.}: Taint
+  PendingCheckpoint* = object
+    ## RFC-0016 INT-34. The lowering queue and the length of
+    ## `loweringDegradeErrors` at `checkpoint`, for `rollback`.
+    queue: PendingDegrade
+    errors: int
+
+var pending {.threadvar.}: PendingDegrade
   ## RFC-0005 S1 (was RFC-chapulin-hardening SND-3's `loweringDidDegrade:
-  ## bool`, walker v58, ADR-0023). The PENDING path taint of an in-band
-  ## lowering-time degrade: joined (union) by `lowerDegrade` whenever a
-  ## lowering site degrades in-band (returns a fresh unconstrained symbol)
-  ## instead of `raise`-ing -- `pathTaint(classOf(kind))` of the recorded
-  ## kind, so recording and classification share one kind mention. Consumed
-  ## EXCLUSIVELY by `drainPendingLowerEffects` — the single choke-point every
-  ## `lower()`/`lowerBool()` call site in `walk` already drains through —
-  ## which forks the PATH with the pending taint joined in and resets this to
-  ## `{}`. It carries no RUN contribution: that is derived at verdict time
-  ## from the `loweringDegradeErrors` entry `lowerDegrade` recorded alongside
-  ## (RFC-0005 §2.2), so a pending taint that is never drained still forces
-  ## the run coordinate. The PATH half, however, can be lost (see
-  ## `runtime_heap.nim`'s N42 note: a lost `{scSpurious}` would leave a havoc
-  ## value on a clean path), so `stampLoweringPendingLeak` pins this to `{}`
-  ## at walk end (RFC-0005 §2.2 last paragraph).
+  ## bool`, walker v58, ADR-0023); one owner since RFC-0016 INT-34 (it was
+  ## the `loweringPendingTaint`/`loweringPendingUb` pair, read and written
+  ## raw at every site). The PENDING path taint of an in-band lowering-time
+  ## degrade: joined (union) by `queueDegrade` whenever a lowering site
+  ## degrades in-band (returns a fresh unconstrained symbol) instead of
+  ## `raise`-ing -- `pathTaint(classOf(kind))` of the recorded kind, so
+  ## recording and classification share one kind mention. Consumed by
+  ## `takePending` in the drains (`drainPendingLowerEffects` -- the single
+  ## choke-point every `lower()`/`lowerBool()` call site in `walk` already
+  ## drains through -- `lowerLeafInExpr`, `initialWalkPath`), which fork the
+  ## PATH with the taken taint joined in. It carries no RUN contribution:
+  ## that is derived at verdict time from the `loweringDegradeErrors` entry
+  ## `queueDegrade` recorded alongside (RFC-0005 §2.2), so a pending taint
+  ## that is never drained still forces the run coordinate. The PATH half,
+  ## however, can be lost (see `runtime_heap.nim`'s N42 note: a lost
+  ## `{scSpurious}` would leave a havoc value on a clean path), so
+  ## `stampLoweringPendingLeak` pins it empty at walk end (RFC-0005 §2.2
+  ## last paragraph).
+  ##
   ## THE reason a lowering-time degrade must NEVER `raise`: on the C backend
   ## (goto exceptions), a raise deep inside expression lowering that unwinds
   ## through a loop's live `seq[Path]` result is SILENTLY LOST (the
-  ## b7258f7/CR-1c divergence class) — the walk continues with a mis-lowered
+  ## b7258f7/CR-1c divergence class) -- the walk continues with a mis-lowered
   ## guard, producing a false `sxUnsat` (c) vs. the honest `sxUnknown` (cpp,
   ## whose native exceptions propagate cleanly). In-band taint sidesteps the
   ## raise entirely, so both backends agree.
+  ##
+  ## Why a threadvar (0005 review R2-14, kept on purpose by RFC-0016 INT-34):
+  ## `lower` reports a decline on this side channel because it has no path
+  ## to fork and no `WalkCtx` in scope, and its callers below `runtime.nim`
+  ## (`z3check`'s sort checks, `heap_model`'s placeholder reads) cannot name
+  ## the walk's types at all. Moving the queue behind `currentLowerSinks`
+  ## would only trade this threadvar for that one, and put a `walk_state`
+  ## dependency under `z3check`, which sits below it. What R2-14 asked for
+  ## is one owner: every read and write is one of the verbs below, so the
+  ## queue's discipline (a statement sets aside its caller's queue and puts
+  ## it back; a drain takes what it folds onto its path; a speculative
+  ## lowering rolls back) is stated where the queue is.
 
-proc lowerDegrade*(kind: SymexErrorKind; msg: string;
-                  ub: set[UbKind] = {}) =
+proc queueDegrade*(kind: SymexErrorKind; msg: string;
+                   ub: set[UbKind] = {}) =
   ## RFC-0005 S1: the LOWERING-sink sibling of `degrade(w, kind, msg)` (which
   ## lives after `WalkCtx`). For sites with no `w: var WalkCtx`/`Path` in
   ## scope — `lower()` and the pure helpers it calls. Performs both acts from
   ## one kind mention: records the classified `sevError` into
   ## `loweringDegradeErrors` (whose drained entry derives the run coordinate)
-  ## and joins `pathTaint(classOf(kind))` into `loweringPendingTaint` (which
-  ## `drainPendingLowerEffects` turns into the calling path's taint). The
-  ## token is delivered through the drain rather than returned, because the
-  ## caller has no path to fork.
+  ## and queues `pathTaint(classOf(kind))` (which `drainPendingLowerEffects`
+  ## turns into the calling path's taint). The token is delivered through
+  ## the drain rather than returned, because the caller has no path to fork.
+  ## (Was `lowerDegrade`, RFC-0016 INT-34.)
   loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: severity(kind),
                                             msg: msg, scope: walkSite())
     # RFC-0005 S8: a lowering decline is recorded by the walk that reached
     # it -- its reach is the record itself (`dskWalkSite`).
-  loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
-  loweringPendingUb = loweringPendingUb + ub     # RFC-0016 W1-d3
+  pending.taint = pending.taint + pathTaint(classOf(kind))
+  pending.ub = pending.ub + ub     # RFC-0016 W1-d3
+
+proc queueDegrade*(taint: Taint; ub: set[UbKind] = {}) =
+  ## RFC-0016 INT-34. Queue taint whose error is recorded elsewhere: a
+  ## closure-sink decline (`closureDegrade`, recorded in the closure sink)
+  ## and a closure body's exit taint (`applyClosureGround`, recorded by the
+  ## degrades inside the body). Joined onto what is queued, as above.
+  pending.taint = pending.taint + taint
+  pending.ub = pending.ub + ub
+
+proc pendingIsEmpty*(): bool =
+  ## RFC-0016 INT-34. Nothing is queued. Reads the taint, the gate every
+  ## drain has always tested: a queued `ub` rides a queued taint (RFC-0016
+  ## review L9).
+  pending.taint == {}
+
+proc peekPending*(): PendingDegrade =
+  ## RFC-0016 INT-34. What is queued, left queued: for a message, a
+  ## statement's stray (`claimStrayPendingTaint`) and the probes.
+  pending
+
+proc takePending*(): PendingDegrade =
+  ## RFC-0016 INT-34. What is queued, and the queue emptied: a drain folds
+  ## the result onto the path it was queued for.
+  result = pending
+  pending = PendingDegrade()
+
+proc setAsidePending*(): PendingDegrade =
+  ## RFC-0016 INT-34. The queue an enclosing lowering or statement left,
+  ## set aside so what follows starts on an empty queue; `restorePending`
+  ## puts it back. The same act as `takePending`, named for its use: the
+  ## result is not drained, it is the caller's to reinstate.
+  result = pending
+  pending = PendingDegrade()
+
+proc restorePending*(saved: PendingDegrade) =
+  ## RFC-0016 INT-34. Reinstate a queue `setAsidePending` set aside, in
+  ## place of whatever is queued now (take that first to keep it).
+  pending = saved
+
+proc checkpoint*(): PendingCheckpoint =
+  ## RFC-0016 INT-34. The lowering sinks before a speculative lowering
+  ## (`modelPins`): the queue and the recorded declines.
+  PendingCheckpoint(queue: pending, errors: loweringDegradeErrors.len)
+
+proc rollback*(c: PendingCheckpoint): bool {.discardable.} =
+  ## RFC-0016 INT-34. Back to `c`: the declines recorded since are dropped
+  ## and the queue is as it was. True when a decline was dropped.
+  if loweringDegradeErrors.len > c.errors:
+    loweringDegradeErrors.setLen(c.errors)
+    result = true
+  pending = c.queue
 
 var rawKeep {.threadvar.}: seq[Z3AnyAst]
   ## RFC-0016 CRH-07. The terms `keepRaw` owns for the run.
@@ -616,8 +695,7 @@ proc resetLoweringSink*() =
   ## RFC-0016 review D3c-1. The per-run reset of this module's threadvars,
   ## called from `resetSymexRunState` beside the rest of the run state.
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
-  loweringPendingUb = {}
-  loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
+  pending = PendingDegrade()             ## SND-3 (ADR-0023) / RFC-0005 S1: reset the lowering queue
   rawKeep = @[]                          ## RFC-0016 CRH-07
 
 proc truncBV*(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
@@ -649,6 +727,97 @@ proc mkSeqSV*(len: Z3Int; arrs: seq[Z3AnyAst]; elemTy: IRType): SymVal =
   SymVal(kind: svSeq, seqLen: len, seqDataRaw: arrs[0],
          seqDataMore: arrs[1 .. ^1], seqElemTy: seqCellTy(elemTy))
 
+proc sameSymVal*(a, b: SymVal): bool =
+  ## RFC-0005 S9. Representation IDENTITY of two SymVals: the same kind and,
+  ## leaf by leaf, the same Z3 AST handle (Z3 hash-conses, so structurally
+  ## identical terms share one handle). Used to ask whether a closure body
+  ## left a by-reference capture as it found it; `false` is the conservative
+  ## answer (a spurious "written" costs a decline, never soundness), so a
+  ## kind without an arm here, or any shape mismatch, is `false`.
+  if a.kind != b.kind: return false
+  template same(x, y: untyped): bool =
+    cast[pointer](x.raw) == cast[pointer](y.raw)
+  template allSame(xs, ys: seq[SymVal]): bool =
+    block:
+      var ok = xs.len == ys.len
+      if ok:
+        for i in 0 ..< xs.len:
+          if not sameSymVal(xs[i], ys[i]):
+            ok = false
+            break
+      ok
+  case a.kind
+  of svInt:     same(a.zi, b.zi) and a.ziWidth == b.ziWidth
+  of svBool:    same(a.bo, b.bo)
+  of svBV8:     same(a.bv8, b.bv8) and a.signed == b.signed
+  of svBV16:    same(a.bv16, b.bv16) and a.signed == b.signed
+  of svBV32:    same(a.bv32, b.bv32) and a.signed == b.signed
+  of svBV64:    same(a.bv64, b.bv64) and a.signed == b.signed
+  of svFloat32: same(a.fp32, b.fp32)
+  of svFloat64: same(a.fp64, b.fp64)
+  of svString:  same(a.str, b.str)
+  of svTuple:   allSame(a.fields, b.fields)
+  of svArray:   allSame(a.arrElems, b.arrElems)
+  of svSeq:
+    # Handle identity only: nothing is lowered or read as a value, and the
+    # placeholder flag is itself compared, so a placeholder never matches a
+    # backed seq (N27 audit, RFC-0005 S9).
+    same(a.seqLen, b.seqLen) and same(a.seqDataRaw, b.seqDataRaw) and  # [placeholder-audited]
+      a.seqDataMore.len == b.seqDataMore.len and   ## RFC-0005 S8bc
+      (block:
+        var r = true
+        for i in 0 ..< a.seqDataMore.len:
+          if not same(a.seqDataMore[i], b.seqDataMore[i]): r = false
+        r) and
+      a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder  # [placeholder-audited]
+  of svTable:
+    same(a.tabDataRaw, b.tabDataRaw) and
+      a.tabDataMore.len == b.tabDataMore.len and
+      (block:
+        var r = true
+        for i in 0 ..< a.tabDataMore.len:
+          if not same(a.tabDataMore[i], b.tabDataMore[i]): r = false
+        r) and
+      same(a.tabPresentRaw, b.tabPresentRaw) and same(a.tabSize, b.tabSize)
+  of svSet:
+    same(a.setMembersRaw, b.setMembersRaw) and same(a.setSize, b.setSize)
+  of svDistinct:
+    same(a.distinctAst, b.distinctAst) and a.distinctBaseSym != nil and
+      b.distinctBaseSym != nil and
+      sameSymVal(a.distinctBaseSym[], b.distinctBaseSym[])
+  of svRef:         same(a.refAst, b.refAst)
+  of svPtr:         same(a.ptrAst, b.ptrAst) and a.ptrFamily == b.ptrFamily
+  of svBitSet:      same(a.bsRaw, b.bsRaw)   ## RFC-0005 S8bq
+  of svUninterpRef: same(a.uninterpAst, b.uninterpAst)
+  of svClosure:
+    a.closureSite == b.closureSite and a.closureEnv != nil and
+      b.closureEnv != nil and sameSymVal(a.closureEnv[], b.closureEnv[])
+  of svVariant:
+    if a.vDisc == nil or b.vDisc == nil or
+       not sameSymVal(a.vDisc[], b.vDisc[]) or
+       not allSame(a.vPlainFields, b.vPlainFields) or
+       a.vArmFields.len != b.vArmFields.len:
+      return false
+    for tag, fs in a.vArmFields.pairs:
+      if not b.vArmFields.hasKey(tag) or not allSame(fs, b.vArmFields[tag]):
+        return false
+    true
+  of svMultiVariant:   ## RFC-0005 S8cb
+    if not allSame(a.mvPlainFields, b.mvPlainFields) or
+       a.mvAxes.len != b.mvAxes.len:
+      return false
+    for xi in 0 ..< a.mvAxes.len:
+      if a.mvAxes[xi].disc == nil or b.mvAxes[xi].disc == nil or
+         not sameSymVal(a.mvAxes[xi].disc[], b.mvAxes[xi].disc[]) or
+         a.mvAxes[xi].armFields.len != b.mvAxes[xi].armFields.len:
+        return false
+      for tag, fs in a.mvAxes[xi].armFields.pairs:
+        if not b.mvAxes[xi].armFields.hasKey(tag) or
+           not allSame(fs, b.mvAxes[xi].armFields[tag]):
+          return false
+    true
+
+
 # RFC-0016 S8ck-r (INF-04): this module's per-thread state goes back to
 # default on `releaseSymexThreadState` (src/nelli/thread_state.nim), so
 # a thread that exits leaks none of it. A threadvar added to this module
@@ -656,7 +825,6 @@ proc mkSeqSV*(len: Z3Int; arrs: seq[Z3AnyAst]; elemTy: IRType): SymVal =
 import ../thread_state
 
 proc releaseThreadState() {.nimcall, gcsafe, raises: [].} =
-  releaseToDefault(loweringDegradeErrors, loweringPendingUb,
-    loweringPendingTaint, rawKeep)
+  releaseToDefault(loweringDegradeErrors, pending, rawKeep)
 
 registerThreadStateRelease(releaseThreadState)

@@ -45,7 +45,8 @@ const
   smtSrcDir* = currentSourcePath().parentDir() / ".." / "src" / "nelli" / "smt"
 
   runtimeFamilyFiles* = [
-    # The walker proper, and the file still textually included into it.
+    # The walker proper, and its heap arm (an include until RFC-0016 INT-34
+    # B7 made it a module).
     "runtime.nim", "runtime_heap.nim",
     # Includes that became real modules (RFC-0016 D3c-3, -4, -5, -7).
     "runtime_exceptions.nim", "runtime_floats.nim", "runtime_closures.nim",
@@ -54,7 +55,20 @@ const
     # -6, -7): the shared value types, the run state, the sort-checked Z3
     # term builders, the heap algebra, and the string lowering support.
     "symval.nim", "walk_state.nim", "z3check.nim", "heap_model.nim",
-    "string_lower_support.nim"]
+    "string_lower_support.nim",
+    # RFC-0016 INT-34 B2: the walker's types (`Path`, the frames, `WalkCtx`).
+    "walk_types.nim",
+    # RFC-0016 INT-34 B3: making and forking paths (region R0's procedures).
+    "walk_path.nim",
+    # RFC-0016 INT-34 B4: lowering an expression (region R1, `lower`).
+    "lower_expr.nim",
+    # RFC-0016 INT-34 B5: solving a path (region R2, `trySolve`).
+    "walk_solve.nim",
+    # RFC-0016 INT-34 B6a: the walk context's verbs (region R3, `degrade`).
+    "walk_ctx.nim",
+    # RFC-0016 INT-34 B6b: lowering inside a statement and the drains
+    # (region R4, `lowerInExpr`).
+    "walk_expr.nim"]
     ## Every file that holds, or has held, code that was `runtime.nim`'s. A
     ## source audit that pins "the walker's sites of kind K" counts K over THIS
     ## set, never over a hand-picked subset: a file move then changes which

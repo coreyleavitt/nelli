@@ -12,11 +12,14 @@ import std/[unittest, os, strutils]
 import nelli/symex
 import nelli/smt/types
 import ./s8cu_helpers
+import ./audit_scan_utils   ## `runtimeFamilySources`
 
 const smtDir = currentSourcePath.parentDir() / ".." / "src" / "nelli" / "smt"
 
 proc runtimeFiles(): seq[string] =
-  for f in walkFiles(smtDir / "runtime*.nim"): result.add f
+  ## The runtime family (RFC-0016 INT-34 B6a: `halted`, the one sanctioned
+  ## discard, moved to `walk_ctx.nim`, outside the `runtime*.nim` glob).
+  for (_, path) in runtimeFamilySources(): result.add path
 
 proc codeLines(f: string): seq[string] =
   for raw in readFile(f).splitLines():
@@ -24,10 +27,15 @@ proc codeLines(f: string): seq[string] =
     if t.len > 0 and not t.startsWith("#"): result.add t
 
 proc capMembers(): seq[string] =
-  ## The `CapKind` members other than `ckNone`, read from its declaration.
+  ## The `CapKind` members other than `ckNone`, read from its declaration
+  ## (in `walk_types.nim` since RFC-0016 INT-34 B2; read over the runtime
+  ## family so a later move does not hide it).
   var inEnum = false
-  for t in codeLines(smtDir / "runtime.nim"):
-    if t.startsWith("CapKind = enum"): inEnum = true; continue
+  var lines: seq[string]
+  for (_, path) in runtimeFamilySources(): lines.add codeLines(path)
+  for t in lines:
+    if t.startsWith("CapKind = enum") or t.startsWith("CapKind* = enum"):
+      inEnum = true; continue
     if inEnum:
       let word = t.split({' ', '\t'})[0]
       if not word.startsWith("ck"): break
@@ -45,12 +53,12 @@ suite "RFC-0016 K7a (a) -- no walk-level degrade is discarded in place":
     check hits.len == 1 and "cap = cap" in hits[0]   ## the one in `halted`
 
   test "the sanctioned halt and continue constructors exist":
-    let src = readFile(smtDir / "runtime.nim")
-    check "Survivors = object" in src
-    check "proc halted(" in src
-    check "proc surviving(" in src
-    check "proc continued(" in src
-    check "func exact(" in src
+    let src = readFile(smtDir / "walk_ctx.nim")   ## INT-34 B6a
+    check "Survivors* = object" in readFile(smtDir / "walk_types.nim")   ## INT-34 B2
+    check "proc halted*(" in src
+    check "proc surviving*(" in src
+    check "proc continued*(" in src
+    check "func exact*(" in src
 
 suite "RFC-0016 K7a (b) -- CapKind: one producing site per member":
 

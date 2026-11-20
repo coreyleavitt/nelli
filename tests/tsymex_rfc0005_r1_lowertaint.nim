@@ -1,9 +1,9 @@
 ## RFC-0005 review R1-04 -- a lowering decline's path taint lands on the path
 ## that produced it.
 ##
-## A lowering decline (`lowerDegrade`: an unwritten global read, among
+## A lowering decline (`queueDegrade`: an unwritten global read, among
 ## others) cannot fork a path from inside `lower`; it queues its taint in
-## `loweringPendingTaint`, and the walk arm that called `lower` drains it onto
+## the lowering queue (`symval`), and the walk arm that called `lower` drains it onto
 ## the path it lowered for (`drainPendingLowerEffects`). Two arms called the
 ## raw `lower` and never drained: the runtime-discriminator variant
 ## constructor's plain fields (`isVariantConstructSym`) and a `Table` key

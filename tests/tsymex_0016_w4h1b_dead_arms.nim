@@ -53,7 +53,10 @@ suite "RFC-0016 H1b HRV-99 - dead boundary arms stay removed":
     check callSites == 1
 
   test "the string carriers are caught once each, at that call site, not at the boundary":
-    let rt = codeLines(srcRoot / "smt" / "runtime.nim")
+    # RFC-0016 INT-34 B4: the call site moved with `lower` into
+    # `lower_expr.nim`; `runtime.nim` is read too, so neither file may add one.
+    let rt = codeLines(srcRoot / "smt" / "runtime.nim") &
+             codeLines(srcRoot / "smt" / "lower_expr.nim")
     for c in stringCarriers:
       var n = 0
       for l in rt:

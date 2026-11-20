@@ -344,6 +344,12 @@ const
   # reason, so each path stays its own named const below).
   runtimePath           = currentSourcePath.parentDir() / ".." / "src" /
                            "nelli" / "smt" / "runtime.nim"
+  lowerExprPath         = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "lower_expr.nim"   ## RFC-0016 INT-34 B4: `lower`
+  walkCtxPath           = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "walk_ctx.nim"   ## RFC-0016 INT-34 B6a: the context's verbs
+  walkExprPath          = currentSourcePath.parentDir() / ".." / "src" /
+                           "nelli" / "smt" / "walk_expr.nim"   ## RFC-0016 INT-34 B6b: the drains
   runtimeStringsPath    = currentSourcePath.parentDir() / ".." / "src" /
                            "nelli" / "smt" / "runtime_strings.nim"
   runtimeFloatsPath     = currentSourcePath.parentDir() / ".." / "src" /
@@ -365,14 +371,12 @@ let
   # `staticRead` only accepts a string literal argument, so each read must
   # stay its own declaration — these cannot be produced by a loop. The
   # `scannedFiles` table below is what ties each one to actual scan
-  # coverage (R4-1). R5 correction: `runtimeContent` IS referred back to by
-  # name below — the include-graph guard passes it directly to
-  # `extractIncludedFragmentNames(runtimeContent)` — since the include
-  # DIRECTIVE lines it needs to parse live only in runtime.nim's own text,
-  # never in an included fragment's (staticRead can't see across an
-  # `include`, R3-2). The other per-fragment consts are consumed only
-  # indirectly, through `scannedFiles`.
+  # coverage (R4-1). Each is consumed through `scannedFiles`; the
+  # include-graph guard (INT-34 B7) reads the runtime family itself.
   runtimeContent           = readFile(runtimePath)
+  lowerExprContent         = readFile(lowerExprPath)
+  walkCtxContent           = readFile(walkCtxPath)
+  walkExprContent          = readFile(walkExprPath)
   runtimeStringsContent    = readFile(runtimeStringsPath)
   runtimeFloatsContent     = readFile(runtimeFloatsPath)
   runtimeExceptionsContent = readFile(runtimeExceptionsPath)
@@ -383,6 +387,9 @@ let
 
   scannedFiles: seq[(string, string)] = @[
     ("runtime.nim", runtimeContent),
+    ("lower_expr.nim", lowerExprContent),
+    ("walk_ctx.nim", walkCtxContent),
+    ("walk_expr.nim", walkExprContent),
     ("runtime_strings.nim", runtimeStringsContent),
     ("runtime_floats.nim", runtimeFloatsContent),
     ("runtime_exceptions.nim", runtimeExceptionsContent),
@@ -592,10 +599,13 @@ proc isExemptedLine(fname, trimmed: string): bool =
   ## directly, never through `parseAtomicOperand`; the one `let` that holds a
   ## hoisted operand is the parser's own `__sym_` temporary, which the arm
   ## returns on before this peek.
-  fname == "src/nelli/smt/runtime.nim" and
+  ##
+  ## RFC-0016 INT-34 B6b: `bindsViewWholeShape` is `walk_expr.nim`'s now.
+  (fname == "src/nelli/smt/runtime.nim" and
     (trimmed == "if formal.isVar and stmt.cargs[i].kind == iekVar:" or
-     trimmed == "assignsChar: stmt.avalue.kind == iekStrSetAt)" or
-     trimmed == "if s.lvalue != nil and s.lvalue.kind == iekTupleLit:")
+     trimmed == "assignsChar: stmt.avalue.kind == iekStrSetAt)")) or
+  (fname == "src/nelli/smt/walk_expr.nim" and
+    trimmed == "if s.lvalue != nil and s.lvalue.kind == iekTupleLit:")
 
 proc scanForSubfieldIekShapePeeks(fname, contents: string,
                                    violations: var seq[KindViolation]) =
@@ -654,25 +664,24 @@ suite "symex H1 — isAtomicIR shape-coupling permanent audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "include-graph guard (R3-3/R4-1): every runtime.nim `include \"...\"` fragment is in scannedFiles":
+  test "include-graph guard (R3-3/R4-1, INT-34 B7): no runtime-family file includes a fragment":
     ## R3-2/R3-3 (RFC-parser-normalization #146 round 3), hardened by R4-1
-    ## (round 4 code review). Structurally ties the scanned-file set to what
-    ## `runtime.nim` actually `include`s, so a future sixth fragment fails
-    ## THIS assertion the moment it's added, rather than silently riding
-    ## along unscanned the way `runtime_floats.nim`/`runtime_exceptions.nim`/
-    ## `runtime_closures.nim` did before the R3-3 fix. Checking against
-    ## `scannedFiles`' name column (rather than a standalone name list, R4-1)
-    ## means a name can only appear here already paired with the content
-    ## that gets fed through `scanForSubfieldIekShapePeeks` in the audit
-    ## test above — there is no name-only way to clear this guard.
-    let included = extractIncludedFragmentNames(runtimeContent)
-    check included.len > 0  ## sanity: the scan itself must find runtime.nim's
-                             ## known includes, or this guard is vacuous.
+    ## (round 4 code review). The guard tied the scanned-file set to what
+    ## `runtime.nim` `include`d, so an included fragment could not ride along
+    ## unscanned the way `runtime_floats.nim`/`runtime_exceptions.nim`/
+    ## `runtime_closures.nim` did before the R3-3 fix. RFC-0016 INT-34 B7
+    ## made the last fragment (`runtime_heap.nim`) a module, so the guard is
+    ## now that no runtime-family file includes anything: a new `include`
+    ## anywhere in the family fails here, and its fragment must be given a
+    ## `scannedFiles` entry (or made a module) before this can be relaxed.
+    ## `runtime_heap.nim` keeps its `scannedFiles` entry as a module.
     var scannedNames: seq[string]
     for (name, _) in scannedFiles: scannedNames.add name
-    for name in included:
-      checkpoint("runtime.nim includes: " & name)
-      check name in scannedNames
+    check "runtime_heap.nim" in scannedNames
+    for (label, path) in runtimeFamilySources():
+      let included = extractIncludedFragmentNames(readFile(path))
+      checkpoint(label & " includes: " & $included)
+      check included.len == 0
 
   test "extractIncludedFragmentNames captures every quoted name on a comma-separated include line (R4-latent)":
     ## R4-latent (round 4 code review, Low): the original extractor took

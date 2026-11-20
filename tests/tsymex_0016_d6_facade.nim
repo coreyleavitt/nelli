@@ -14,12 +14,14 @@
 ##     small cache macro forms, and the `nelliVmAliasAudit` self-audit block
 ##     that now also audits the moved modules). Ceiling 970, a little over,
 ##     so a doc-comment edit is not a failure; a new body in the facade is.
+##     RFC-0016 INT-34 C1 folded the four DB macro bodies into one skeleton:
+##     940 lines, ceiling 950.
 import std/[unittest, strutils]
 import audit_scan_utils
 import nelli/symex
 import nelli   ## the union of both: a name hidden here is hidden under each
 
-const facadeLineCeiling = 970
+const facadeLineCeiling = 950
 
 const facadeSrc = staticRead("../src/nelli/symex.nim")
 

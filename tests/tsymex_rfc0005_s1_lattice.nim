@@ -134,7 +134,11 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
         at = src.find(name, at + 1)
     var src = ""
     for f in ["runtime.nim", "runtime_heap.nim", "dsl_parser.nim",
-              "definedness.nim"]:
+              "definedness.nim",
+              "walk_types.nim",    # RFC-0016 INT-34 B2: the walker's types
+              "walk_path.nim",     # RFC-0016 INT-34 B3: the fork constructors
+              "walk_ctx.nim",      # RFC-0016 INT-34 B6a: the walk context's verbs
+              "walk_expr.nim"]:    # RFC-0016 INT-34 B6b: the drains and halts
       let path = currentSourcePath().parentDir.parentDir / "src" / "nelli" / "smt" / f
       if fileExists(path):
         for line in readFile(path).splitLines():
@@ -191,7 +195,8 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
       runTaint(classOf(heUnresolvedRef)) + runTaint(classOf(beBudgetExhausted))
 
 suite "RFC-0005 S1 (b) -- the Path carrier and the degrade() funnel (runtime.nim test hook)":
-  # `Path`/`WalkCtx`/`Degrade` are private to the runtime unit, so -- exactly
+  # `Path`/`WalkCtx`/`Degrade` are not exported past the runtime unit (they
+  # are `walk_types.nim`'s, which `runtime` does not re-export), so -- exactly
   # the H1 pattern (`h1PathHasHeapFields`) -- one exported hook drives the
   # real templates/procs and reports what it observed.
   let probe = rfc0005S1CarrierProbe()
@@ -332,6 +337,22 @@ proc scanWriters(src, file, field: string): seq[Writer] =
 proc allWriters(field: string): seq[Writer] =
   for path in walkFiles(smtDir / "runtime*.nim"):
     result.add scanWriters(readFile(path), path.extractFilename, field)
+  # RFC-0016 INT-34 B2: `Path` and `WalkCtx` are declared in `walk_types.nim`;
+  # a writer there (a constructor beside the type) is a writer too.
+  let wt = smtDir / "walk_types.nim"
+  result.add scanWriters(readFile(wt), wt.extractFilename, field)
+  # RFC-0016 INT-34 B3: the fork constructors are `walk_path.nim`'s.
+  let wp = smtDir / "walk_path.nim"
+  result.add scanWriters(readFile(wp), wp.extractFilename, field)
+  # RFC-0016 INT-34 B6a: the S1 test hook moved to `walk_ctx.nim` with
+  # region R3.
+  let wc = smtDir / "walk_ctx.nim"
+  result.add scanWriters(readFile(wc), wc.extractFilename, field)
+  # RFC-0016 INT-34 B6b: the drains and the path join moved to
+  # `walk_expr.nim` with region R4 (no writer among them; scanned so a new
+  # one there is seen).
+  let we = smtDir / "walk_expr.nim"
+  result.add scanWriters(readFile(we), we.extractFilename, field)
 
 proc routinesOf(ws: seq[Writer]): seq[string] =
   var s: HashSet[string]
@@ -349,9 +370,9 @@ suite "RFC-0005 S1 (d) -- the .taint / .runTaint writer grep-pin":
     checkpoint(report(ws))
     check routinesOf(ws) == @[
       "runtime.nim:applyClosureGround",      # descentBase: `taint: {}` (fresh root)
-      "runtime.nim:forkPathTaintPrimitive",  # the ONE fork constructor
-      "runtime.nim:rfc0005S1CarrierProbe",   # test hook (synthetic parents)
-      "runtime.nim:taintInPlace",            # the mutation-shaped join
+      "walk_ctx.nim:rfc0005S1CarrierProbe",  # test hook (synthetic parents; INT-34 B6a)
+      "walk_path.nim:forkPathTaintPrimitive",  # the ONE fork constructor (INT-34 B3)
+      "walk_path.nim:taintInPlace",            # the mutation-shaped join (INT-34 B3)
     ]
 
   test "WalkCtx.runTaint is written ONLY at the run drain (derived, never at a site)":

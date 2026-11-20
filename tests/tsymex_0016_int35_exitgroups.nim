@@ -13,7 +13,7 @@
 ## could change an entry's handler depth after it was parked, and a `try`
 ## would then claim it at the wrong depth. It is private to `exits`; its one
 ## reader, `visitSince`, hands out only the path.
-import std/[unittest, strutils, sets, os]
+import std/[unittest, strutils, sets]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
@@ -56,15 +56,17 @@ suite "INT-35: exit-group guards":
 # A frame built field by field could leave its exit group at the zero value,
 # bound to no clock, and the slip showed only at its first `park`. Each frame
 # is now made by `initLoopFrame`/`initCallFrame`/`initCallFrameCtx`, which bind
-# the group to the walk's clock. The types are private to `runtime`, so no
-# other module can name them; inside it, no other construction is left.
+# the group to the walk's clock. The types live in `walk_types` (RFC-0016
+# INT-34 B2), which `runtime` does not re-export, so no module outside the
+# runtime family can name them; inside the family, no other construction is
+# left.
 
 proc frameConstructions(): seq[string] =
   ## Each `LoopFrame(`/`CallFrame(`/`CallFrameCtx(` construction in the
-  ## walker's source, comments and strings removed, outside the constructors.
-  let smt = currentSourcePath().parentDir() / ".." / "src" / "nelli" / "smt"
-  for f in ["runtime.nim", "runtime_heap.nim"]:
-    let code = codeOf(readFile(smt / f)).splitLines
+  ## walker's source (every runtime-family file: the frame types are
+  ## `walk_types`'), comments and strings removed, outside the constructors.
+  for (f, path) in runtimeFamilySources():
+    let code = codeOf(readFile(path)).splitLines
     var inCtor = false
     for i, line in code:
       if line.len > 0 and line[0] notin {' ', '\t'}:

@@ -134,7 +134,8 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
         at = src.find(name, at + 1)
     var src = ""
     for f in ["runtime.nim", "runtime_heap.nim", "dsl_parser.nim",
-              "definedness.nim"]:
+              "definedness.nim",
+              "walk_types.nim"]:   # RFC-0016 INT-34 B2: the walker's types
       let path = currentSourcePath().parentDir.parentDir / "src" / "nelli" / "smt" / f
       if fileExists(path):
         for line in readFile(path).splitLines():
@@ -191,7 +192,8 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
       runTaint(classOf(heUnresolvedRef)) + runTaint(classOf(beBudgetExhausted))
 
 suite "RFC-0005 S1 (b) -- the Path carrier and the degrade() funnel (runtime.nim test hook)":
-  # `Path`/`WalkCtx`/`Degrade` are private to the runtime unit, so -- exactly
+  # `Path`/`WalkCtx`/`Degrade` are not exported past the runtime unit (they
+  # are `walk_types.nim`'s, which `runtime` does not re-export), so -- exactly
   # the H1 pattern (`h1PathHasHeapFields`) -- one exported hook drives the
   # real templates/procs and reports what it observed.
   let probe = rfc0005S1CarrierProbe()
@@ -332,6 +334,10 @@ proc scanWriters(src, file, field: string): seq[Writer] =
 proc allWriters(field: string): seq[Writer] =
   for path in walkFiles(smtDir / "runtime*.nim"):
     result.add scanWriters(readFile(path), path.extractFilename, field)
+  # RFC-0016 INT-34 B2: `Path` and `WalkCtx` are declared in `walk_types.nim`;
+  # a writer there (a constructor beside the type) is a writer too.
+  let wt = smtDir / "walk_types.nim"
+  result.add scanWriters(readFile(wt), wt.extractFilename, field)
 
 proc routinesOf(ws: seq[Writer]): seq[string] =
   var s: HashSet[string]

@@ -513,7 +513,10 @@ suite "RFC-0016 D3: the include surface":
     # `runtime_heap.nim`). Its surface is an EXACT set, not a ceiling: a new
     # name fails (add it to `heapPinned` only after deciding it belongs), and
     # a removed one fails too (shrink the list).
-    let priv = definedNames(rt)
+    # RFC-0016 INT-34 B2: the walker's types moved to `walk_types.nim`, which
+    # `runtime.nim` imports; to the include they are still names of the
+    # runtime unit, so the pinned set did not change with the move.
+    let priv = definedNames(rt) + definedNames(readSmt("walk_types.nim"))
     let text = readSmt("runtime_heap.nim")
     let got = referenced(text, priv - definedNames(text))
     var pinned: HashSet[string]
@@ -696,7 +699,8 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
 
   test "WalkCtx embeds the sinks and sets the pointer where it sets the walk":
     let rt = readSmt("runtime.nim")
-    check rt.contains("    sinks:     LowerSinks")
+    # RFC-0016 INT-34 B2: `WalkCtx` is declared in `walk_types.nim`
+    check readSmt("walk_types.nim").contains("    sinks*:     LowerSinks")
     var sets, clears, setSinks, clearSinks = 0
     for l in rt.splitLines:
       let t = l.strip()
@@ -943,3 +947,77 @@ suite "RFC-0016 D3c-7: the strings module and string_lower_support leaf":
     check ar >= 0
     check rt[ar .. ^1].contains("\n  resetStringSupport()")
     check rt[ar .. ^1].contains("\n  resetStringLowering()")
+
+const
+  ## RFC-0016 INT-34 B2. What `walk_types.nim` may import: std, `z3`, and the
+  ## leaves its field types come from (no module with walk code).
+  wtAllowed = ["std/tables", "std/options", "std/sets", "z3", "./types",
+               "./symval", "./walk_state", "./exits", "./concolictaxonomy"]
+  ## A sample of what B2 moved out of `runtime.nim`; the test below checks
+  ## every name `walk_types.nim` defines, this list keeps the intent legible.
+  wtMoved = ["Path", "Degrade", "Survivors", "CapKind", "DegradeSink",
+             "RawWitness", "RawResult", "SatCandidate", "LoopFrame",
+             "CallFrame", "CallFrameCtx", "WalkCtx", "LoopExits",
+             "PendingLowerEffects", "forEachExitGroup",
+             "collectExitGroupFields"]
+
+proc exportedFieldNames(text: string): HashSet[string] =
+  ## The field names an object body declares exported (`  name*: T`,
+  ## `  a*, b*: T`, `  case kind*: K`): a field shares its name with a
+  ## `runtime.nim` threadvar it mirrors (`WalkCtx.heapDepthErrors`) without
+  ## naming it.
+  for raw in codeOf(text).splitLines:
+    var t = raw.strip()
+    if raw.len == 0 or raw[0] != ' ': continue
+    if t.startsWith("case "): t = t[5 .. ^1]
+    let colon = t.find(':')
+    if colon <= 0: continue
+    for w in t[0 ..< colon].split(','):
+      let n = w.strip()
+      if n.len > 1 and n[^1] == '*':
+        let id = leadIdent(n[0 ..< n.len - 1])
+        if id.len == n.len - 1: result.incl id
+
+suite "RFC-0016 INT-34 B2: the walk_types leaf":
+  test "walk_types.nim imports only the allowed leaves":
+    let seen = importsOf(readSmt("walk_types.nim"))
+    checkpoint $seen
+    for s in seen: check s in wtAllowed
+    check "./symval" in seen and "./walk_state" in seen
+
+  test "walk_types.nim resets every threadvar it owns (it owns none)":
+    # Types only: a threadvar added here holds run state, which belongs in
+    # `walk_state.nim` with its reset. Owning one fails until this test names
+    # the proc that resets it.
+    var tvs: seq[string]
+    for l in readSmt("walk_types.nim").splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    checkpoint $tvs
+    check tvs.len == 0
+
+  test "walk_types names no runtime.nim symbol":
+    let priv = definedNames(readSmt("runtime.nim"))
+    let text = readSmt("walk_types.nim")
+    let named = referenced(viaHooks(text),
+                           priv - definedNames(text) - boundHere(text) -
+                             exportedFieldNames(text))
+    checkpoint $named
+    check named.len == 0
+
+  test "runtime.nim imports walk_types, re-exports names not the module, and defines none of its names":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("\nimport ./walk_types")
+    # the public surface is kept by `export walk_types.<name>`; a whole-module
+    # export would publish every walker type (`WalkCtx`, `Path`, `Degrade`)
+    check not rt.contains("\nexport walk_types\n")
+    check not rt.contains("\nexport walk_types except")
+    let defs = definedNames(rt)
+    let wt = definedNames(readSmt("walk_types.nim"))
+    for n in wtMoved:
+      checkpoint n
+      check n in wt
+    for n in wt:
+      if n in perModuleNames: continue
+      checkpoint n
+      check n notin defs

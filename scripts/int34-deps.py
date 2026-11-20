@@ -26,7 +26,9 @@ REGIONS = [
     ("R0 types, forkPath", None),
     ("R1 lower", "# ---- IR-expr → SymVal"),
     ("R2 solving", "# ---- Path / solve / walk"),
-    ("R3 frames, WalkCtx", "  LoopExits = object"),
+    # INT-34 B2: the frame types and `WalkCtx` are `walk_types.nim`'s now;
+    # R3 starts at the first routine that takes a `WalkCtx`.
+    ("R3 frames, WalkCtx", "proc degrade(w: var WalkCtx"),
     ("R4 expression drains", "# Fork-site registry (Phase 15 H1"),
     ("R6 statement arms, walk", 'include "runtime_heap.nim"'),
     ("R7 probes, closure descent", "# ---- Statement exit-taint test hook"),

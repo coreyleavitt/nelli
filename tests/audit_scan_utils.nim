@@ -54,7 +54,9 @@ const
     # -6, -7): the shared value types, the run state, the sort-checked Z3
     # term builders, the heap algebra, and the string lowering support.
     "symval.nim", "walk_state.nim", "z3check.nim", "heap_model.nim",
-    "string_lower_support.nim"]
+    "string_lower_support.nim",
+    # RFC-0016 INT-34 B2: the walker's types (`Path`, the frames, `WalkCtx`).
+    "walk_types.nim"]
     ## Every file that holds, or has held, code that was `runtime.nim`'s. A
     ## source audit that pins "the walker's sites of kind K" counts K over THIS
     ## set, never over a hand-picked subset: a file move then changes which

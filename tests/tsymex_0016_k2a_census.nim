@@ -288,7 +288,7 @@ const sanctionedCtors = ["degrade", "halted", "exact", "surviving", "continued",
                          "selfTainted", "carriedDegrade", "asDegrade",
                          "heapArmDegrade"]
   ## RFC-0016 K7c. The procs that DEFINE the sanctioned `Degrade`/`Survivors`
-  ## constructors (runtime.nim's privacy note). Their own literals are the
+  ## constructors (walk_types.nim's `Degrade`/`Survivors` note). Their own literals are the
   ## definitions, not use sites, so the census skips a sanctioned proc's body
   ## structurally, by name; every literal outside them is still a site.
 

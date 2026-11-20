@@ -137,9 +137,11 @@ suite "K8b: the floor":
     check "family:generic" in p[0] and "below the floor" in p[0]
     # a family that did not run is not judged
     check floorProblems(fig, floor, {faCallShape}).len == 0
-    # above the floor passes
+    # above the floor passes, unless the run is full (the ratchet)
     fig[faGeneric].covered = 11
     check floorProblems(fig, floor, {faGeneric}).len == 0
+    let up = floorProblems(fig, floor, {faGeneric}, ratchet = true)
+    check up.len == 1 and "raise the floor to 11" in up[0]
 
   test "RED: a changed pair universe must be re-measured":
     var floor: PairFigure
@@ -168,6 +170,20 @@ suite "K8b: a family split into halves is judged on their union":
     result = rec(fam, choice)
     result.testFile = familyFiles[fam][half]
 
+  proc withOthers(recs: seq[ExercisedRecord]; keep: FamilyScope;
+                  row = "linux-c"): seq[ExercisedRecord] =
+    ## `recs` plus a `declined` record from both halves of every OTHER family:
+    ## each ran on the row and covered no pair, so a full run's "every family
+    ## has records" check passes and the test judges only `keep`.
+    result = recs
+    for fam in FamilyScope:
+      if fam == keep: continue
+      for h in 0 .. 1:
+        var r = halfRec(fam, h, newSeq[int](famDims[fam].len))
+        r.outcome = "declined"
+        r.row = row
+        result.add r
+
   test "every family names its halves, each a suite on disk":
     for fam in FamilyScope:
       check familyFiles[fam].len == 2
@@ -181,7 +197,8 @@ suite "K8b: a family split into halves is judged on their union":
     floor[faGeneric].covered = 6
     let a = halfRec(faGeneric, 0, @[0, 0, 0])
     let b = halfRec(faGeneric, 1, @[1, 1, 1])
-    check exercisedJoinProblems(@[a, b], "linux-c", floor).len == 0
+    check exercisedJoinProblems(withOthers(@[a, b], faGeneric), "linux-c",
+                                floor).len == 0
     check pairwiseFigure(@[a])[faGeneric].covered == 3
     check pairwiseFigure(@[b])[faGeneric].covered == 3
 
@@ -189,11 +206,36 @@ suite "K8b: a family split into halves is judged on their union":
     var floor: PairFigure
     for fam in FamilyScope: floor[fam] = FamFigure(total: pairUniverse(fam).len)
     let a = halfRec(faCallShape, 0, @[0, 0, 0])
-    let p = exercisedJoinProblems(@[a], "linux-c", floor)
+    let p = exercisedJoinProblems(withOthers(@[a], faCallShape), "linux-c", floor)
     check p.len == 1
     check familyFiles[faCallShape][1] in p[0]
     # a narrowed run (a slice of the suites) evidences no union: not judged
     check exercisedJoinProblems(@[a], "linux-c", floor, partial = true).len == 0
+
+  test "RED: a full run fails a family whose suites wrote nothing on the row":
+    var floor: PairFigure
+    for fam in FamilyScope: floor[fam] = FamFigure(total: pairUniverse(fam).len)
+    let recs = withOthers(@[], faGeneric)
+    let p = exercisedJoinProblems(recs, "linux-c", floor)
+    check p.len == 1
+    check "family:generic" in p[0] and "no cells-exercised records" in p[0]
+    # records of another row do not count on this leg
+    check exercisedJoinProblems(withOthers(@[], faGeneric, "msvc"), "linux-c",
+                                floor).len == 3   # one per family
+    # a narrowed run does not judge it
+    check exercisedJoinProblems(recs, "linux-c", floor, partial = true).len == 0
+
+  test "RED: a figure above its floor fails a full run, naming the new floor":
+    var floor: PairFigure
+    for fam in FamilyScope: floor[fam] = FamFigure(total: pairUniverse(fam).len)
+    floor[faGeneric].covered = 5
+    let a = halfRec(faGeneric, 0, @[0, 0, 0])
+    let b = halfRec(faGeneric, 1, @[1, 1, 1])
+    let recs = withOthers(@[a, b], faGeneric)
+    let p = exercisedJoinProblems(recs, "linux-c", floor)
+    check p.len == 1
+    check "above the floor" in p[0] and "raise the floor to 6" in p[0]
+    check exercisedJoinProblems(recs, "linux-c", floor, partial = true).len == 0
 
   test "RED: a partial run still judges a family whose halves both ran":
     var floor: PairFigure

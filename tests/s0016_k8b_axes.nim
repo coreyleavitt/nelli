@@ -259,7 +259,8 @@ proc renderAxisFloor*(f: AxisFigure): string =
   result = "# RFC-0016 K8b (section 12 item 4, first clause): exact rows\n" &
     "# exercised by the axis suites (s0016_k8b_axes `axisFiles`), per axis.\n" &
     "# axis<TAB>exercised<TAB>exact rows. K1 judges it per leg. It only rises;\n" &
-    "# a changed exact-row count must be re-measured.\n"
+    "# a full run holds it to equality (a figure above its floor fails until the\n" &
+    "# floor is raised); a changed exact-row count must be re-measured.\n"
   for a in AxisScope:
     result.add scopePrefix[a] & "\t" & $f[a].exercised & "\t" & $f[a].total & "\n"
 
@@ -272,7 +273,10 @@ proc axisJoinProblems*(ex: seq[ExercisedRecord]; legRow: string;
   ## exact-row count equal to the floor's (a changed denominator is
   ## re-measured); and each axis whose suites all ran on the leg at or above
   ## its floor. An axis with some of its suites' records and not all fails,
-  ## naming the missing ones, unless the run is partial.
+  ## naming the missing ones, unless the run is partial. On a full run an
+  ## axis with suites and NO records on the leg's row fails too (the leg ran
+  ## none of them), and a figure above its floor fails until the floor is
+  ## raised.
   result = axisRecordProblems(ex)
   var mine: seq[ExercisedRecord]
   for r in ex:
@@ -291,7 +295,12 @@ proc axisJoinProblems*(ex: seq[ExercisedRecord]; legRow: string;
       for r in mine:
         if r.family == a and r.testFile == f: ran = true
       if ran: present.add f else: missing.add f
-    if present.len == 0: continue
+    if present.len == 0:
+      if not partial:
+        result.add scopePrefix[a] & ": no cells-exercised records" &
+          (if legRow.len > 0: " on row " & legRow else: "") &
+          "; the axis figure is judged on all of " & axisFiles[a].join(", ")
+      continue
     if missing.len > 0:
       if not partial:
         result.add scopePrefix[a] & ": no cells-exercised records from " &
@@ -303,3 +312,8 @@ proc axisJoinProblems*(ex: seq[ExercisedRecord]; legRow: string;
         $fig[a].total & " exact rows exercised is below the floor " &
         $floor[a].exercised & " in " & axisFloorFile & "; unexercised: " &
         unexercised(mine, a).join(", ")
+    elif not partial and fig[a].exercised > floor[a].exercised:
+      result.add scopePrefix[a] & ": " & $fig[a].exercised & "/" &
+        $fig[a].total & " exact rows exercised is above the floor " &
+        $floor[a].exercised & " (raise the floor to " & $fig[a].exercised &
+        " in " & axisFloorFile & ")"

@@ -1243,38 +1243,60 @@ suite "RFC-0016 K8b: the cells-exercised records, K1's second kind":
       seq[ExercisedRecord] =
     @[exRec(fam, a, row, 0), exRec(fam, b, row, 1)]
 
+  proc fill(rs: seq[ExercisedRecord]; keep: FamilyScope; rows: seq[string]):
+      seq[ExercisedRecord] =
+    ## `rs` plus a `declined` record from both halves of every other family on
+    ## each of `rows`: a full run needs every family to have run on the leg.
+    result = rs
+    for row in rows:
+      for fam in FamilyScope:
+        if fam == keep: continue
+        for h in 0 .. 1:
+          var r = exRec(fam, newSeq[int](famDims[fam].len), row, h)
+          r.outcome = "declined"
+          result.add r
+
   test "the join reads them from the record directory beside the pins":
     removeDir(exDir)
-    writeExercisedTo(exDir, bothHalves(faCallShape, @[0, 0, 0], @[0, 0, 0]))
+    writeExercisedTo(exDir, fill(bothHalves(faCallShape, @[0, 0, 0], @[0, 0, 0]),
+                                 faCallShape, @["linux-c"]))
     let ex = loadExercised(exDir)
-    check ex.len == 2
+    check ex.len == 6
     check loadRecords(exDir).len == 0          # not a pin record
     var floor = loadFloor(root / floorFile)
     for fam in FamilyScope: floor[fam].covered = 0
+    floor[faCallShape].covered = 3             # one (0,0,0) program: 3 pairs
     check exercisedJoinProblems(ex, "", floor).len == 0
     removeDir(exDir)
 
   test "RED: a family below its floor fails the join; another row is not judged":
-    let ex = bothHalves(faGeneric, @[0, 0, 0], @[0, 0, 0]) &
-             bothHalves(faGeneric, @[1, 1, 1], @[1, 1, 1], "msvc")
+    let ex = fill(bothHalves(faGeneric, @[0, 0, 0], @[0, 0, 0]) &
+                  bothHalves(faGeneric, @[1, 1, 1], @[1, 1, 1], "msvc"),
+                  faGeneric, @["linux-c", "msvc"])
     var floor = loadFloor(root / floorFile)
     for fam in FamilyScope: floor[fam].covered = 0
     floor[faGeneric].covered = 4
     let p = exercisedJoinProblems(ex, "", floor)
-    check p.len == 0                            # 6 pairs over both rows
+    check p.len == 1                            # 6 pairs over both rows
+    check "raise the floor to 6" in p[0]        # a full run banks a gain
+    check exercisedJoinProblems(ex, "", floor, partial = true).len == 0
     let q = exercisedJoinProblems(ex, "linux-c", floor)
     check q.len == 1                            # 3 pairs on linux-c
     check "family:generic" in q[0]
-    check exercisedJoinProblems(ex, "mingw", floor).len == 0
+    # a row with no records at all has no family run: each is named
+    check exercisedJoinProblems(ex, "mingw", floor).len == 3
+    check exercisedJoinProblems(ex, "mingw", floor, partial = true).len == 0
 
   test "RED: a family's halves are judged together; a missing half fails":
     var floor = loadFloor(root / floorFile)
     for fam in FamilyScope: floor[fam].covered = 0
     floor[faGeneric].covered = 6                # neither half alone covers 6
     check exercisedJoinProblems(
-      bothHalves(faGeneric, @[0, 0, 0], @[1, 1, 1]), "linux-c", floor).len == 0
-    let p = exercisedJoinProblems(@[exRec(faGeneric, @[0, 0, 0])], "linux-c",
-                                  floor)
+      fill(bothHalves(faGeneric, @[0, 0, 0], @[1, 1, 1]), faGeneric,
+           @["linux-c"]), "linux-c", floor).len == 0
+    let p = exercisedJoinProblems(
+      fill(@[exRec(faGeneric, @[0, 0, 0])], faGeneric, @["linux-c"]), "linux-c",
+      floor)
     check p.len == 1
     check familyFiles[faGeneric][1] in p[0]
 
@@ -1283,7 +1305,7 @@ suite "RFC-0016 K8b: the cells-exercised records, K1's second kind":
     rs[0].cells[1] = CellKey(scope: faExnMemory, key: "k8b/writeAt/never")
     var floor = loadFloor(root / floorFile)
     for fam in FamilyScope: floor[fam].covered = 0
-    check exercisedJoinProblems(rs, "", floor).len == 1
+    check exercisedJoinProblems(rs, "", floor, partial = true).len == 1
 
 suite "RFC-0016 W2-z: the record census":
   proc rec(target: string; v: PinVerdict): PinRecord =

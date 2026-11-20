@@ -9,6 +9,14 @@ import std/[unittest, options, tables, sets]
 import nelli/choice
 import nelli/smt/[types, symex_codec]
 import nelli/engine/types
+from nelli/smt/admission import cellKey, axConstruct
+import ./s8cu_helpers
+
+var held = true   # cleared by any test of this file that fails
+
+template trackFailure() =
+  teardown:
+    if testStatusIMPL != TestStatus.OK: held = false
 
 const ubSpan = ord(high(UbKind)) - ord(low(UbKind))
 
@@ -20,6 +28,7 @@ proc subsets[E: enum](): seq[set[E]] =
       result.add(result[i] + {e})
 
 suite "INT-34 C1: Soundness":
+  trackFailure()
   test "every soundness round-trips":
     var undef: seq[set[UbOrdinal]] = @[{}]
     for o in 0 .. ubSpan: undef.add {UbOrdinal(o)}
@@ -62,6 +71,7 @@ suite "INT-34 C1: Soundness":
     check storedSoundness(initTable[string, string]()).isNone
 
 suite "INT-34 C1: gaps":
+  trackFailure()
   test "every gap kind and class round-trips":
     var gaps: seq[FindingGap]
     for c in DegradeClass:
@@ -95,6 +105,7 @@ suite "INT-34 C1: gaps":
     check storedGaps(bad).isNone
 
 suite "INT-34 C1: the notes record":
+  trackFailure()
   test "every hint kind and severity round-trips through the head":
     var hints: seq[FindingHint]
     for k in SymexErrorKind:
@@ -159,6 +170,7 @@ suite "INT-34 C1: the notes record":
     check storedUndefined(initTable[string, string](), w).isNone
 
 suite "INT-34 C1: verdict and raised metadata":
+  trackFailure()
   test "a verdict carries its soundness and gaps":
     let s = Soundness(pathTaint: {scIncomplete}, replay: rsNotNeeded)
     let g = @[FindingGap(class: DegradeClass(0), kind: SymexErrorKind(0),
@@ -178,3 +190,11 @@ suite "INT-34 C1: verdict and raised metadata":
       check m["rdef"] == (if def: "1" else: "0")
       check storedSoundness(m).get == Soundness()
     check not storedRaisedDefect(initTable[string, string]())
+
+suite "INT-34 C1: the pin":
+  test "the verdict cache's records round-trip":
+    pinNever(cellKey(axConstruct, "cache/record/codec"), held,
+      "every soundness, gap, hint, diagnostic, undefined kind, verdict and " &
+      "raised sentinel the verdict cache stores round-trips through " &
+      "`symex_codec`'s encoding, and a decode refuses what no encode writes, " &
+      "a malformed record being a miss")

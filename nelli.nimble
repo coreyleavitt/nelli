@@ -2099,6 +2099,8 @@ task test, "Run the test suite":
             "tsymex_0016_int6a5_bodypush",
             # RFC-0016 int6-m6: a stdlib routine whose body pushes check options is unreadable to the opaque defect scan, as a user one is.
             "tsymex_0016_int6m6_stdbodypush",
+            # RFC-0016 int6-s: the check-option scan's cost in the compile-time VM stays inside the bound in its .cfg.
+            "tsymex_0016_int6s_scancost",
             # RFC-0016 int6-t: the opaque scan finds a check push in the typed body (template, macro or text); the stdlib's audited loop-counter step is read through.
             "tsymex_0016_int6t_typedpush",
             # RFC-0016 int6-t: the same under --rangeChecks:off --boundChecks:off (a template's boundChecks: on region raises out of an opaque callee).

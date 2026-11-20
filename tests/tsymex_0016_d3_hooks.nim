@@ -16,8 +16,10 @@ suite "RFC-0016 D3c-2: lowerHooks":
       check not f.isNil
       inc n
     # The exact inventory: lower, lowerClosureCall, currentFrameId,
-    # registerCapCell, depositStrIndexOob and (INT-87, 9e37524b)
-    # depositUndefinedOob. The sixth is filled in `runtime.nim`'s
-    # `lowerHooks = LowerHooks(...)`; a seventh must be named here.
-    check n == 6
+    # registerCapCell, depositStrIndexOob, (INT-87, 9e37524b)
+    # depositUndefinedOob and (INT-34 B3) noteUbAtFork, which the fork
+    # templates of the `walk_path` leaf call on the rare path. Each is filled
+    # in `runtime.nim`'s `lowerHooks = LowerHooks(...)`; an eighth must be
+    # named here.
+    check n == 7
 

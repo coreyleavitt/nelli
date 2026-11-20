@@ -515,8 +515,10 @@ suite "RFC-0016 D3: the include surface":
     # a removed one fails too (shrink the list).
     # RFC-0016 INT-34 B2: the walker's types moved to `walk_types.nim`, which
     # `runtime.nim` imports; to the include they are still names of the
-    # runtime unit, so the pinned set did not change with the move.
-    let priv = definedNames(rt) + definedNames(readSmt("walk_types.nim"))
+    # runtime unit, so the pinned set did not change with the move. INT-34
+    # B3: likewise the routines that moved to `walk_path.nim`.
+    let priv = definedNames(rt) + definedNames(readSmt("walk_types.nim")) +
+               definedNames(readSmt("walk_path.nim"))
     let text = readSmt("runtime_heap.nim")
     let got = referenced(text, priv - definedNames(text))
     var pinned: HashSet[string]
@@ -720,7 +722,8 @@ suite "RFC-0016 D3c-2: the walk_state leaf":
       if f notin ["runtime.nim", "walk_state.nim"]:
         callers.add codeOf(readFile(p))   # a comment is not a caller
     for h in ["lower", "lowerClosureCall",
-              "currentFrameId", "registerCapCell", "depositStrIndexOob"]:
+              "currentFrameId", "registerCapCell", "depositStrIndexOob",
+              "noteUbAtFork"]:   ## INT-34 B3: called by walk_path's forks
       checkpoint h
       check ws.contains("\n  " & h & "*: proc(")
       # a field no module outside runtime.nim calls is dead: delete it
@@ -1018,6 +1021,78 @@ suite "RFC-0016 INT-34 B2: the walk_types leaf":
       checkpoint n
       check n in wt
     for n in wt:
+      if n in perModuleNames: continue
+      checkpoint n
+      check n notin defs
+
+const
+  ## RFC-0016 INT-34 B3. What `walk_path.nim` may import: std, `z3`, and the
+  ## leaves below it (no module with walk code above the value core).
+  wpAllowed = ["std/tables", "std/options", "z3", "./types", "./symval",
+               "./walk_state", "./walk_types", "./heap_model", "./z3check"]
+  ## A sample of what B3 moved out of `runtime.nim`; the test below checks
+  ## every name `walk_path.nim` defines, this list keeps the intent legible.
+  wpMoved = ["forkPathTaintPrimitive", "forkPath", "forkPathTainted",
+             "forkPathMerged", "deepCopyHeapState", "taintInPlace",
+             "cellValue", "tabValAt", "tabMoreEq", "containerCardConds",
+             "probeProto", "unwrittenResultZero", "h1ForkIsolation"]
+  ## The routines `runtime.nim` exported before the move: re-exported by
+  ## name, and no other.
+  wpPublic = ["h1PathHasHeapFields", "h1ForkIsolation",
+              "seedCallerHeapInWalkCtx", "isFollowConcreteWalk", "svWithRaw",
+              "c1ClosurePoCApply"]
+
+suite "RFC-0016 INT-34 B3: the walk_path leaf":
+  test "walk_path.nim imports only the allowed leaves":
+    let seen = importsOf(readSmt("walk_path.nim"))
+    checkpoint $seen
+    for s in seen: check s in wpAllowed
+    check "./walk_types" in seen and "./walk_state" in seen
+
+  test "walk_path.nim resets every threadvar it owns (it owns none)":
+    # R0's threadvars stayed in `runtime.nim` with the routines that read
+    # them. Owning one fails until this test names the proc that resets it
+    # (called from `resetSymexRunState`) and its thread-state release.
+    var tvs: seq[string]
+    for l in readSmt("walk_path.nim").splitLines:
+      if l.startsWith("var ") and "{.threadvar.}" in l:
+        tvs.add leadIdent(l[4 .. ^1])
+    checkpoint $tvs
+    check tvs.len == 0
+
+  test "walk_path names no runtime.nim symbol":
+    let priv = definedNames(readSmt("runtime.nim"))
+    let text = readSmt("walk_path.nim")
+    let named = referenced(viaHooks(text),
+                           priv - definedNames(text) - boundHere(text))
+    checkpoint $named
+    check named.len == 0
+
+  test "noteUbAtFork is reached through the hook, its empty test inline":
+    let text = codeOf(readSmt("walk_path.nim"))
+    check text.count("lowerHooks.noteUbAtFork(") == 2
+    check text.count("if newUb != {}:") == 2
+    # the body stays in runtime.nim (R4), with no forward declaration
+    check readSmt("runtime.nim").count("\nproc noteUbAtFork(") == 1
+
+  test "runtime.nim imports walk_path, re-exports names not the module, and defines none of its names":
+    let rt = readSmt("runtime.nim")
+    check rt.contains("\nimport ./walk_path")
+    check not rt.contains("\nexport walk_path\n")
+    check not rt.contains("\nexport walk_path except")
+    var exported, want: HashSet[string]
+    for l in codeOf(rt).splitLines:
+      for w in l.split({' ', ','}):
+        if w.startsWith("walk_path."): exported.incl w["walk_path.".len .. ^1]
+    for n in wpPublic: want.incl n
+    checkpoint $exported
+    check exported == want
+    let defs = definedNames(rt)
+    let wp = definedNames(readSmt("walk_path.nim"))
+    for n in wpMoved:
+      checkpoint n
+      check n in wp
+    for n in wp:
       if n in perModuleNames: continue
       checkpoint n
       check n notin defs

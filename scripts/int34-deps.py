@@ -23,7 +23,11 @@ import sys
 # (label, anchor): a region starts at the first line that starts with its
 # anchor and ends where the next region starts.
 REGIONS = [
-    ("R0 types, forkPath", None),
+    # INT-34 B3: R0's procedures that read no `runtime.nim` threadvar (the
+    # `forkPath*` templates, `tabValAt`, the literal protos, the `WalkCtx`
+    # readers) are `walk_path.nim`'s now; R0 keeps the run state and the
+    # routines that read it. `noteUbAtFork` is reached through `lowerHooks`.
+    ("R0 run state", None),
     ("R1 lower", "# ---- IR-expr → SymVal"),
     ("R2 solving", "# ---- Path / solve / walk"),
     # INT-34 B2: the frame types and `WalkCtx` are `walk_types.nim`'s now;

@@ -135,7 +135,8 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
     var src = ""
     for f in ["runtime.nim", "runtime_heap.nim", "dsl_parser.nim",
               "definedness.nim",
-              "walk_types.nim"]:   # RFC-0016 INT-34 B2: the walker's types
+              "walk_types.nim",    # RFC-0016 INT-34 B2: the walker's types
+              "walk_path.nim"]:    # RFC-0016 INT-34 B3: the fork constructors
       let path = currentSourcePath().parentDir.parentDir / "src" / "nelli" / "smt" / f
       if fileExists(path):
         for line in readFile(path).splitLines():
@@ -338,6 +339,9 @@ proc allWriters(field: string): seq[Writer] =
   # a writer there (a constructor beside the type) is a writer too.
   let wt = smtDir / "walk_types.nim"
   result.add scanWriters(readFile(wt), wt.extractFilename, field)
+  # RFC-0016 INT-34 B3: the fork constructors are `walk_path.nim`'s.
+  let wp = smtDir / "walk_path.nim"
+  result.add scanWriters(readFile(wp), wp.extractFilename, field)
 
 proc routinesOf(ws: seq[Writer]): seq[string] =
   var s: HashSet[string]
@@ -355,9 +359,9 @@ suite "RFC-0005 S1 (d) -- the .taint / .runTaint writer grep-pin":
     checkpoint(report(ws))
     check routinesOf(ws) == @[
       "runtime.nim:applyClosureGround",      # descentBase: `taint: {}` (fresh root)
-      "runtime.nim:forkPathTaintPrimitive",  # the ONE fork constructor
       "runtime.nim:rfc0005S1CarrierProbe",   # test hook (synthetic parents)
-      "runtime.nim:taintInPlace",            # the mutation-shaped join
+      "walk_path.nim:forkPathTaintPrimitive",  # the ONE fork constructor (INT-34 B3)
+      "walk_path.nim:taintInPlace",            # the mutation-shaped join (INT-34 B3)
     ]
 
   test "WalkCtx.runTaint is written ONLY at the run drain (derived, never at a site)":

@@ -630,6 +630,17 @@ type LowerHooks* = object
     ## A string element access outside its bounds (RFC-0016 PRC-07): the
     ## checked build's `IndexDefect` sink or the undefined-access deposit. It
     ## reads the build's check options, which `runtime.nim` owns.
+  noteUbAtFork*: proc(parentTaint: Taint; child: pointer;
+                      newUb: set[UbKind]) {.nimcall.}
+    ## RFC-0016 INT-34 B3. A fork (`walk_path`'s `forkPathTainted`,
+    ## `taintInPlace`) newly put an undefined behaviour on `child`: under
+    ## `tUndefined` that is the target's hit. It reads the run's target, which
+    ## `runtime.nim` owns. Called only on the rare path: the fork tests
+    ## `newUb != {}` inline first. `child` is the `Path` (`walk_types`, which
+    ## imports this module, so the type cannot be named here), passed as
+    ## `cast[pointer]` and read back by `runtime.nim` as `cast[Path]` straight
+    ## into the call: the caller holds it for the call's duration, and neither
+    ## side stores the pointer (the `currentWalkCtxPtr` idiom).
 
 var lowerHooks*: LowerHooks
   ## Written once at `runtime.nim` module init; read-only afterwards.

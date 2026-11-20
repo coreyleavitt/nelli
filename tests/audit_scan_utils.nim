@@ -56,7 +56,9 @@ const
     "symval.nim", "walk_state.nim", "z3check.nim", "heap_model.nim",
     "string_lower_support.nim",
     # RFC-0016 INT-34 B2: the walker's types (`Path`, the frames, `WalkCtx`).
-    "walk_types.nim"]
+    "walk_types.nim",
+    # RFC-0016 INT-34 B3: making and forking paths (region R0's procedures).
+    "walk_path.nim"]
     ## Every file that holds, or has held, code that was `runtime.nim`'s. A
     ## source audit that pins "the walker's sites of kind K" counts K over THIS
     ## set, never over a hand-picked subset: a file move then changes which

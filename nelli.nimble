@@ -647,7 +647,7 @@ task test, "Run the test suite":
             "tfuzzworkerproto", "tfuzzworker", "tfuzzworkerprocess",
             "tfuzzworkerlifecycle", "tfuzzforkworker", "tfuzzexternalworker",
             "tfuzzorchestrator", "tfuzzrespawnstorm", "tfuzzbootstrapbreaker",
-            "tfuzzprocessisolation",
+            "tfuzzprocessisolation", "tfuzzdberrorsisolation",
             "tfuzzreverify", "tfuzzcrashinfo",
             "tfuzzwinworker", "tfuzzwinshm", "tfuzzwinjoblimits",
             # Track E — coverage transport + corpus/DB channel.

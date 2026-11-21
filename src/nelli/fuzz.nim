@@ -599,20 +599,37 @@ type
       ## once (it runs when the frontier stalls). RFC-0016 K8a reads this as
       ## its second findings source.
     dbErrors*: seq[string]
+      ## CR4-M1: after those, the symex cache errors the property's own
+      ## executions made (in-process, and from each isolated child).
       ## Wiring audit C-9. The `DbError`s the campaign's database use raised
       ## (corpus load and save, and the orchestrator's `requestSave`,
       ## `requestRemove` and `requestSaveSecondary` funnel), one entry each,
       ## in order, as `Report.dbErrors` reports a `forAll` run's. A failing
       ## database ends no campaign: the entry is lost to the disk, not to the
       ## run.
+    symexFindings*: seq[SymexFinding]
+      ## CR4-M1. What `assertCoveredBy` found inside the campaign's property
+      ## executions, one per call site and target, as `Report.symexFindings`
+      ## reports a `forAll` run's. A campaign owns its executions' findings
+      ## as a run does: it opens an engine frame around the loop. With
+      ## `processIsolation` the property runs in a child, whose findings
+      ## cannot cross the pipe whole: only their count does
+      ## (`isolatedSymexFindings`).
+    isolatedSymexFindings*: int
+      ## CR4-M1. Under `processIsolation`, the sum over executions of the
+      ## distinct findings each child execution made (a child's frame is
+      ## per execution, so the same finding in two executions counts twice).
+      ## Zero in-process.
     droppedSymexFindings*: int
       ## Wiring audit C-9; `Report.droppedSymexFindings`. How far the
-      ## process's count of dropped symex findings moved during the campaign
-      ## (a property that calls `assertCoveredBy` on a thread with no engine
-      ## frame).
+      ## process's count of dropped symex findings moved during the campaign.
+      ## Since CR4-M1 a property on the campaign's own thread is not a drop
+      ## (the campaign's frame owns it); this counts only findings made off
+      ## any frame, such as on a thread the property started.
     droppedSymexDbErrors*: int
       ## Wiring audit C-9; `Report.droppedSymexDbErrors`. The same for symex
-      ## cache errors made off any run's thread.
+      ## cache errors made off any frame on a thread that is not the main
+      ## one. Errors made on the campaign's own thread are in `dbErrors`.
     stats*: CampaignStats
       ## RFC-fuzzer-nextgen S5 (a+b): the read-only campaign observability
       ## surface — see `CampaignStats`'s own doc for the full field list and
@@ -728,6 +745,14 @@ type
       ## any `vInteresting`/`vTimedOut` a `Target` doesn't (yet) classify. Dedup
       ## and oracle logic should prefer this over parsing `message`.
     runResult*: RunResult
+    symexDbErrors*: seq[string]
+      ## CR4-M1. The symex DB errors the property made during this run, for a
+      ## producer that ran it out of process (an isolated worker child sends
+      ## them back in its result frame). Empty for every in-process path:
+      ## the campaign's own engine frame owns those.
+    symexFindingCount*: int
+      ## CR4-M1. The distinct symex findings the property made during this
+      ## run, out of process only (as `symexDbErrors`).
     cmpLog*: Option[seq[CmpLogEntry]]
       ## RFC-fuzzer-nextgen R12 (code review): this run's captured comparison-
       ## operand log, for a producer that captured it OUT-OF-PROCESS and so
@@ -1214,6 +1239,11 @@ type
       ## Wiring audit C-9. The `DbError`s the funnel (`requestSave`,
       ## `requestRemove`, `requestSaveSecondary`) and the campaign's corpus
       ## calls caught, read back via `dbErrors*` for `FuzzReport.dbErrors`.
+    workerDbErrors: seq[string]
+      ## CR4-M1. The symex DB errors isolated children reported
+      ## (`Observation.symexDbErrors`), in submit order.
+    workerFindings: int
+      ## CR4-M1. The sum of `Observation.symexFindingCount` over submits.
     annotationViolations: seq[AnnotationViolation]
       ## RFC-0016 K8-0 (INT-33). Every distinct false-annotation claim any
       ## `concolicBridge` call reported (`ConcolicFlipResult.annotationViolations`),
@@ -1630,6 +1660,8 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## first submit that DOES get answered (any verdict) resets the streak.
   ## `bootstrapWindow == 0` (the default) leaves this whole block inert.
   result = o.worker.submit(input)
+  o.workerDbErrors.add result.symexDbErrors   # CR4-M1
+  o.workerFindings += result.symexFindingCount
   if o.spawnFreshWorker != nil:
     let firstSubmitSinceSpawn = o.workerInputsServed == 0
     inc o.workerInputsServed
@@ -2190,6 +2222,13 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
     concolicBridge = assist.bridge)
   let droppedBefore = droppedSymexFindings()     # wiring audit C-9
   let droppedDbBefore = droppedSymexDbErrors()
+  # CR4-M1: the campaign owns what its property executions produce, as a
+  # `forAll` run owns its own. The frame is popped just before the report is filled
+  # (and on any exit path by the defer).
+  pushEngineFrame()
+  var frameOpen = true
+  defer:
+    if frameOpen: popEngineFrame()
   var rng = initSplitMix64(settings.seed)
   # R4 (code review): gate corpus load/save on their OWN closure fields, not
   # `saveImpl` — a hand-built `ExampleDatabase` can populate `saveImpl` /
@@ -2635,6 +2674,12 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   let elapsedDur = getMonoTime() - started
   result.annotationViolations = orchestrator.annotationViolations
   result.dbErrors = orchestrator.dbErrors   # wiring audit C-9
+  result.dbErrors.add orchestrator.workerDbErrors   # CR4-M1
+  result.isolatedSymexFindings = orchestrator.workerFindings
+  result.dbErrors.add engineStack[^1].dbErrors
+  for f in engineStack[^1].symexFindings.values: result.symexFindings.add f
+  frameOpen = false
+  popEngineFrame()
   result.droppedSymexFindings = droppedSymexFindings() - droppedBefore
   result.droppedSymexDbErrors = droppedSymexDbErrors() - droppedDbBefore
   result.undefinedFindings = orchestrator.undefinedFindings

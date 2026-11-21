@@ -68,3 +68,35 @@ suite "C-9: fuzz reports the drop counts":
     let rep = fuzz(integers(0, 10), t, fr, FuzzSettings(maxIterations: 5, seed: 1))
     check rep.droppedSymexFindings == 1
     check rep.droppedSymexDbErrors == 1
+
+suite "CR4-M1: a campaign owns what its property executions produce":
+  test "a main-thread property's symex DB error is on the report, not leaked":
+    discard consumeSymexDbErrors()
+    var fr = newCoverageFrontier("owned")
+    let t = Target[int](run: proc(x: int): Observation[int] =
+      recordSymexDbError("cache write failed: " & $x)
+      recordSymexFinding(FindingOrigin(site: "f.nim(1, 1)", fnId: "f"),
+                         SymexFinding(targetDesc: "label(\"t\")", status: sfSat))
+      Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
+    let rep = fuzz(integers(0, 10), t, fr,
+                   FuzzSettings(maxIterations: 3, seed: 1))
+    check rep.dbErrors.len >= 1
+    check "cache write failed" in rep.dbErrors[0]
+    check consumeSymexDbErrors().len == 0
+    check rep.droppedSymexDbErrors == 0
+    check rep.droppedSymexFindings == 0
+    check rep.symexFindings.len == 1
+
+  test "a campaign nested in a run reaches the enclosing run too":
+    discard consumeSymexDbErrors()
+    var fr = newCoverageFrontier("owned-nested")
+    let t = Target[int](run: proc(x: int): Observation[int] =
+      recordSymexDbError("inner")
+      Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
+    var inner: FuzzReport
+    let r = forAll(integers(0, 0), proc(x: int) =
+      inner = fuzz(integers(0, 10), t, fr,
+                   FuzzSettings(maxIterations: 1, seed: 1)),
+      Settings(maxExamples: 1, seed: 1))
+    check "inner" in inner.dbErrors
+    check "inner" in r.dbErrors

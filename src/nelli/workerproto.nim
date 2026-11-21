@@ -47,8 +47,8 @@
 ##   nelli's `Verdict`/`CrashInfo` taxonomy. The actual
 ##   `SetInformationJobObject`/`TerminateJobObject` calls are E4c.
 
-import std/[os, strutils, options, times]
-import ./binaryio, ./fuzz
+import std/[os, strutils, options, times, tables, sequtils]
+import ./binaryio, ./fuzz, ./engine
 import ./bootstrapbreaker
 export bootstrapbreaker
 
@@ -65,7 +65,9 @@ type
 
 const
   nelliFrameMagic = 0x464C454E'u32     ## "NELF", little-endian byte order
-  nelliFrameVersion* = 1'u32
+  nelliFrameVersion* = 2'u32
+    ## 2 (CR4-M1): the result frame carries the child's symex DB errors and
+    ## finding count after the observation's message.
   nelliMaxFrameBytes* = 16 * 1024 * 1024
     ## Hard cap on one frame's payload. `decodeFrameHeader` checks the
     ## length prefix against this BEFORE the I/O layer attempts to read that
@@ -157,6 +159,9 @@ proc encodeObservationLite*(obs: Observation[void]): seq[byte] =
     of ckExitCode: result.putI32(int32(c.exitCode))
     of ckWinException: result.putU32(c.code)
   result.putRawStr(obs.message)
+  result.putU32(uint32(obs.symexDbErrors.len))   # CR4-M1
+  for e in obs.symexDbErrors: result.putRawStr(e)
+  result.putU32(uint32(obs.symexFindingCount))
 
 proc decodeObservationLite*[T](data: seq[byte]): Observation[T] =
   var pos = 0
@@ -180,7 +185,28 @@ proc decodeObservationLite*[T](data: seq[byte]): Observation[T] =
       let code = getU32(data, pos)
       crash = some(CrashInfo(kind: ckWinException, code: code, message: message))
   let message = getRawStr(data, pos)
-  Observation[T](verdict: verdict, crash: crash, message: message)
+  var errs: seq[string]
+  let nErrs = int(getU32(data, pos))
+  if nErrs > data.len - pos:   # each entry is at least its length prefix
+    raise newException(DbCorrupt, "worker result: impossible error count")
+  for _ in 0 ..< nErrs: errs.add getRawStr(data, pos)
+  let findings = int(getU32(data, pos))
+  Observation[T](verdict: verdict, crash: crash, message: message,
+                 symexDbErrors: errs, symexFindingCount: findings)
+
+proc dispatchOwned*(dispatch: proc(input: ChoiceSeq): Observation[void] {.closure.};
+                    input: ChoiceSeq): Observation[void] =
+  ## CR4-M1. Runs one worker-side `dispatch` inside its own engine frame and
+  ## puts what the property made in it on the observation, for the result
+  ## frame: the symex DB errors, and the count of distinct findings. The
+  ## frame is the parent campaign's own, moved across the pipe.
+  pushEngineFrame()
+  try:
+    result = dispatch(input)
+  finally:
+    result.symexDbErrors = engineStack[^1].dbErrors
+    result.symexFindingCount = engineStack[^1].symexFindings.values.toSeq.len
+    popEngineFrame()
 
 # --- worker-mode argv dispatch ------------------------------------------------
 

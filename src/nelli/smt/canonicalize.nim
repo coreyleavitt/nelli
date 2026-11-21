@@ -1559,8 +1559,13 @@ const renderAsChoicesVersion* = "12"
   ##   over a closure iterator, and an `int` slice leave the callee
   ##   unreadable (an opaque `findIt` over an `int` slice was a trusted
   ##   sxSat). No key bytes change.
+  ## - RFC-0016 CR4-M2 (485->486): a cell held at several sorts whose float
+  ##   leaf is NaN in the model is recorded lossy (`crossSortCellFidelity`):
+  ##   the witness renders Nim's one canonical NaN, so the payload another
+  ##   view reads (`a[] == 0x7FF8_0000_0000_0001`) is not replayed. An
+  ##   INT-90 trusted sxSat becomes untrusted. No key bytes change.
 
-const symexWalkerVersion* = "485"
+const symexWalkerVersion* = "486"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

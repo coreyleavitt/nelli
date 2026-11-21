@@ -1479,7 +1479,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## through, matched by the counter symbol's declaration): 483->484.
     ## RFC-0016 int6-f2 (`findIt`'s counter step is read through only where
     ## its loop calls a stdlib `items` bounded below `high(int)`): 484->485.
-    check symexWalkerVersion == "485"
+    check symexWalkerVersion == "486"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

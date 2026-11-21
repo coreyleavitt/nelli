@@ -1173,7 +1173,7 @@ proc heapSortObserved*(typeId: string): bool =
     if key == typeId or key.startsWith(typeId & "__"): return true
   false
 
-proc crossSortCellFidelity*(b: SnapshotBuild) =
+proc crossSortCellFidelity*(b: SnapshotBuild, w: RawWitness) =
   ## RFC-0016 INT-88. A cell held at two sorts (a `ptr int` and a `ptr float`
   ## at one address) is one allocation, which the witness builds as its
   ## owner's type and hands every other position as a typed view of it
@@ -1209,8 +1209,30 @@ proc crossSortCellFidelity*(b: SnapshotBuild) =
     # `resolveRef`), a view wider than its owner included. A desynced run
     # is not.
     let exactViews = not anyRef and crossSortExactCell(held)
+    # CR4-M2: the model's float has ONE NaN, which the witness renders as
+    # Nim's canonical NaN; the bytes the cell's integer view reads (a NaN
+    # payload) are then not the model's, so a NaN float leaf in a cell held
+    # at several sorts is not reproducible by the witness.
+    var nanLeaf = ""
+    if held.len >= 2:
+      for k in idxs:
+        let nm = b.entries[k].name
+        for tbl in [0, 1]:
+          if nanLeaf.len > 0: break
+          if tbl == 0:
+            for path, v in w.float64Vals:
+              if v != v and (path == nm or path.startsWith(nm & ".")):
+                nanLeaf = path; break
+          else:
+            for path, v in w.float32Vals:
+              if v != v and (path == nm or path.startsWith(nm & ".")):
+                nanLeaf = path; break
     let why =
       if anyRef: "a `ref` shares it"
+      elif nanLeaf.len > 0:
+        "its float leaf '" & nanLeaf & "' is NaN in the model, and the " &
+        "witness renders one canonical NaN (the payload of a NaN another " &
+        "view reads is lost)"
       elif exactViews: ""
       elif observed.len > 1: "the walk constrained " & $observed.len &
                              " of its sorts (" & observed.join(", ") & ")"
@@ -1743,7 +1765,7 @@ proc buildHeapSnapshot*(m: Z3Model, w: var RawWitness, env: Env,
         again = true
     if not again and i >= b.queue.len: break
   renderCrossSortViews(b, m, w)   # RFC-0016 INT-90
-  crossSortCellFidelity(b)   # RFC-0016 INT-88
+  crossSortCellFidelity(b, w)   # RFC-0016 INT-88
   # RFC-0005 S8bh (item 2). A `ptr` cell whose input target (`sel`, see
   # `ptrTargets`) is a field of an object the snapshot holds as a cell
   # aliases that field: `aliasRef = "&<cell>.<field>"`, which the typed

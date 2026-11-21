@@ -79,6 +79,21 @@ proc crossSortFloatFirst(a: ptr int; b: ptr float) =
      b[] == 1.0 and a[] != 0x3FF0_0000_0000_0000:
     symexTarget("hit")
 
+proc nanPayload(a: ptr int; b: ptr float) =
+  if a != nil and b != nil and cast[pointer](a) == cast[pointer](b) and
+     a[] == 0x7FF8_0000_0000_0001 and b[] != b[]:
+    symexTarget("hit")
+
+proc nanIntNotNan(a: ptr int; b: ptr float) =
+  if a != nil and b != nil and cast[pointer](a) == cast[pointer](b) and
+     a[] == 5 and b[] != b[]:
+    symexTarget("hit")
+
+proc nanPayloadNotNan(a: ptr int; b: ptr float) =
+  if a != nil and b != nil and cast[pointer](a) == cast[pointer](b) and
+     a[] == 0x7FF8_0000_0000_0001 and b[] == b[]:
+    symexTarget("hit")
+
 # ---- an int32 pair <-> int64 ---------------------------------------------------
 
 proc pairLow(p: ptr Pair; q: ptr int64) =
@@ -450,5 +465,18 @@ suite "INT-90: two sorts' heaps at one address":
     checkpoint show(r.errors)
     check r.status == sxSat
 
+  test "CR4-M2: a NaN payload in the int view is no witness the float can rebuild":
+    # the model's float has one NaN, the witness renders Nim's canonical one:
+    # the cell's int view would read 0x7FF8000000000000, not ...0001
+    let r = symexFind(nanPayload, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check not r.trusted
+    check show(r.errors).contains("NaN")
+
+  test "CR4-M2 controls: a NaN has the exponent bits, a non-NaN does not":
+    check pinFind(nanIntNotNan, tLabel("hit")).status == sxUnsat
+    check pinFind(nanPayloadNotNan, tLabel("hit")).status == sxUnsat
+
   test "the walker's version floor":
-    check parseInt(symexWalkerVersion) >= 456
+    check parseInt(symexWalkerVersion) >= 486

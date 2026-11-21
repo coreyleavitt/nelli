@@ -314,13 +314,19 @@ suite "INT-59 (2): the shapes at their edges":
 
 # ---- (3) the cost ------------------------------------------------------------
 
-const int59Budget = 15_000_000
-  ## The walk's units, bounded: 12,066,441 measured on c at walker 421 (the
+let int59Budget =
+  if z3FullVersion().startsWith("5."): 15_000_000 else: 24_100_000
+  ## The walk's units, bounded. The 5.1 row, 15M: 12,066,441 measured on
+  ## c at walker 421 (the
   ## SAT target query, which bit-blasts the division to find `t = 21`),
   ## with 24% headroom for a Z3 search-order drift. Before the interval
   ## argument the walk took 35.2M (each conversion range side bit-blasted
   ## to an UNSAT, the walk's and the tail walk's); 15M also sits under
   ## `seqQueryRLimit` (40M), so the row cannot pass by exhausting a budget.
+  ## The 4.13.4 row (the Windows legs' pin), 24.1M: Z3 4.13.4 searches the
+  ## same query harder, 19,421,121 measured on the z3-4.13.4 dev image, and
+  ## the same 24% headroom rule gives 24.08M; it is also under 40M. The 5.1
+  ## bound is not loosened: the version the test sees selects the row.
 
 proc i59Trunc(a, b: int8) =
   let t = int(a)

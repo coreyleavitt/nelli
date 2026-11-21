@@ -223,7 +223,8 @@ suite "INT-62 (2): a view with no structural range gets no fact":
 
 # ---- (3) the cost ------------------------------------------------------------
 
-const int62Ratio = 10
+let int62Ratio =
+  if z3FullVersion().startsWith("5."): 10 else: 30
   ## The packed program's walk, at most this many times the sum of its rows'
   ## own walks. Measured on c at walker 421 (the rows are fixed): rows
   ## 3,520 + 14,613 + 94,723 + 560 + 14,667 + 531 = 128,614 units; packed
@@ -233,6 +234,11 @@ const int62Ratio = 10
   ## target's search. Before the abstraction the packed walk was 2.35M
   ## with the view ranges in every query, and past 16.5M (128 times) with
   ## neither.
+  ## The 4.13.4 row (the Windows legs' pin), 30: Z3 4.13.4 searches the
+  ## packed target query harder; measured on the z3-4.13.4 dev image, the
+  ## rows sum to 130,108 units and the packed walk is 2,586,033 (19.9
+  ## times), and 30 is that ratio with the same half again of margin. The
+  ## 5.1 bound is not loosened: the version the test sees selects the row.
 
 import ./int62_rows
 

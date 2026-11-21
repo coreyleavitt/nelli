@@ -265,10 +265,12 @@ suite "S8by (3), RFC-0016 S8ci: a query's terms in Z3's own translation order":
     ## so the units: `lastNl`'s walk took 1,026,624 units (Z3 5.1) and
     ## 1,219,607 (4.13.4) in S8by's order (roots in order, arguments last
     ## to first), 498,867 and 676,321 sorted by the walk context's ids.
+    ## The pinned 4.13.4 count is the one measured on the z3-4.13.4 dev
+    ## image (786,490; the earlier 786,466 was a stale reading).
     let w = walk(lastNl, "s8by_lastnl", smallCap)
     check w.status == sxSat
     if z351: check w.units == 498_821
-    else: check w.units == 786_466
+    else: check w.units == 786_490
 
   test "symexWalkerVersion >= 379 (S8ci: Z3's translation order)":
     check parseInt(symexWalkerVersion) >= 379

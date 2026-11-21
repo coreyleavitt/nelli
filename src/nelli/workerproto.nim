@@ -186,11 +186,16 @@ proc decodeObservationLite*[T](data: seq[byte]): Observation[T] =
       crash = some(CrashInfo(kind: ckWinException, code: code, message: message))
   let message = getRawStr(data, pos)
   var errs: seq[string]
-  let nErrs = int(getU32(data, pos))
-  if nErrs > data.len - pos:   # each entry is at least its length prefix
+  # R2-6: read the counts unsigned; `int(uint32)` is negative on a 32-bit int.
+  let nErrs = getU32(data, pos)
+  if uint64(nErrs) > uint64(high(int)) or
+     int64(nErrs) > int64(data.len - pos):   # each entry is at least its length prefix
     raise newException(DbCorrupt, "worker result: impossible error count")
-  for _ in 0 ..< nErrs: errs.add getRawStr(data, pos)
-  let findings = int(getU32(data, pos))
+  for _ in 0 ..< int(nErrs): errs.add getRawStr(data, pos)
+  let findingsRaw = getU32(data, pos)
+  if uint64(findingsRaw) > uint64(high(int)):
+    raise newException(DbCorrupt, "worker result: impossible finding count")
+  let findings = int(findingsRaw)
   Observation[T](verdict: verdict, crash: crash, message: message,
                  symexDbErrors: errs, symexFindingCount: findings)
 

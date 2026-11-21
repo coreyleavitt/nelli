@@ -122,4 +122,45 @@ suite "CR4-M1: each in-process execution has its own frame":
     check n >= 50
     check campaignNotes == 0
     check campaignEvents == 0
-    check rep.dbErrors.len >= 50
+    check rep.dbErrors == @["kept"]   # R2-3: one distinct message
+    check rep.dbErrorsOmitted == rep.iterations - 1
+
+suite "R2-3: the report's dbErrors is bounded":
+  proc errTarget(msg: proc(n: int): string): Target[int] =
+    var n = 0
+    Target[int](run: proc(x: int): Observation[int] =
+      inc n
+      recordSymexDbError(msg(n))
+      Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
+
+  test "the same error every execution is kept once and the rest counted":
+    var fr = newCoverageFrontier("bounded-same")
+    let rep = fuzz(integers(0, 10), errTarget(proc(n: int): string = "same"),
+                   fr, FuzzSettings(maxIterations: 2000, seed: 1))
+    check rep.iterations == 2000
+    check rep.dbErrors == @["same"]
+    check rep.dbErrorsOmitted == 1999
+
+  test "distinct errors are capped at 256 and the overflow counted":
+    var fr = newCoverageFrontier("bounded-distinct")
+    let rep = fuzz(integers(0, 10),
+                   errTarget(proc(n: int): string = "e" & $(n mod 300)),
+                   fr, FuzzSettings(maxIterations: 300, seed: 1))
+    check rep.iterations == 300
+    check rep.dbErrors.len == 256
+    check rep.dbErrors[0] == "e1"
+    check rep.dbErrorsOmitted == 44
+
+  test "the campaign frame does not hold the per-execution errors":
+    var fr = newCoverageFrontier("bounded-frame")
+    var held = -1
+    var n = 0
+    let t = Target[int](run: proc(x: int): Observation[int] =
+      inc n
+      recordSymexDbError("same")
+      if n == 100: held = engineStack[^2].dbErrors.len
+      Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
+    discard fuzz(integers(0, 10), t, fr,
+                 FuzzSettings(maxIterations: 150, seed: 1))
+    check n >= 100
+    check held == 0

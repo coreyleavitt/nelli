@@ -74,7 +74,7 @@ suite "workerproto: frame encode/decode round-trip":
   test "decodeFrameHeader rejects a length prefix over the max frame size":
     var hdr: seq[byte]
     hdr.putU32(0x464C454E'u32)
-    hdr.putU32(1'u32)
+    hdr.putU32(nelliFrameVersion)
     hdr.putU32(uint32(nelliMaxFrameBytes) + 1'u32)
     expect(FrameError):
       discard decodeFrameHeader(hdr)
@@ -87,7 +87,7 @@ suite "workerproto: frame encode/decode round-trip":
     ## alone cannot catch.
     var hdr: seq[byte]
     hdr.putU32(0x464C454E'u32)
-    hdr.putU32(1'u32)
+    hdr.putU32(nelliFrameVersion)
     hdr.putU32(uint32(nelliMaxFrameBytes))
     check decodeFrameHeader(hdr) == nelliMaxFrameBytes
 
@@ -131,6 +131,30 @@ suite "workerproto: observation-lite codec round-trip":
       of ckSignal: check got.crash.get.signal == c.signal
       of ckExitCode: check got.crash.get.exitCode == c.exitCode
       of ckWinException: check got.crash.get.code == c.code
+
+suite "workerproto: observation-lite counts (R2-6)":
+  test "symex errors and the finding count round-trip":
+    let obs = Observation[void](verdict: vOk, symexDbErrors: @["a", "b"],
+                                symexFindingCount: 3)
+    let got = decodeObservationLite[void](encodeObservationLite(obs))
+    check got.symexDbErrors == @["a", "b"]
+    check got.symexFindingCount == 3
+
+  test "an error count beyond the remaining bytes declines the frame":
+    var d = encodeObservationLite(Observation[void](verdict: vOk))
+    # the last 8 bytes are the error count then the finding count
+    for i in d.len - 8 ..< d.len - 4: d[i] = 0xFF'u8
+    expect DbCorrupt:
+      discard decodeObservationLite[void](d)
+
+  test "a finding count above high(int) declines the frame":
+    var d = encodeObservationLite(Observation[void](verdict: vOk))
+    for i in d.len - 4 ..< d.len: d[i] = 0xFF'u8
+    when sizeof(int) == 4:
+      expect DbCorrupt:
+        discard decodeObservationLite[void](d)
+    else:
+      check decodeObservationLite[void](d).symexFindingCount == 0xFFFFFFFF
 
 suite "workerproto: argv call-site-ID dispatch":
   test "parseWorkerModeId returns \"\" for ordinary argv (not worker mode)":

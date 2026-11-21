@@ -18,6 +18,7 @@ import std/[options, times, monotimes, os, strutils, sets, tables, algorithm]
 import ./strategy, ./datasource, ./engine, ./rng, ./coverage, ./choice, ./fuzzir, ./db, ./bandit,
        ./learnedstate, ./crashinfo, ./bootstrapbreaker, ./fuzzcheckpoint, ./fuzzcorpus,
        ./fuzzoperator, ./fuzzcrash
+import ./errorlog
 import ./smt/concolictaxonomy, ./smt/soundness
 export soundness
 export fuzzir
@@ -598,7 +599,12 @@ type
       ## They are parse-time facts, so they appear once the bridge has run
       ## once (it runs when the frontier stalls). RFC-0016 K8a reads this as
       ## its second findings source.
+    dbErrorsOmitted*: int
+      ## R2-3. How many errors `dbErrors` does not hold: every repeat of a
+      ## message it has, and every new one past its cap.
     dbErrors*: seq[string]
+      ## R2-3: each DISTINCT message once, first occurrence first, at most
+      ## `errorLogCap` (256) of them; `dbErrorsOmitted` counts the rest.
       ## CR4-M1: after those, the symex cache errors the property's own
       ## executions made (in-process, and from each isolated child).
       ## Wiring audit C-9. The `DbError`s the campaign's database use raised
@@ -1235,11 +1241,11 @@ type
       ## `ConcolicBridgeResult.flip` in here via `foldFlipResult`, and every
       ## admission decision via `recordAdmitOutcome`, at those same two call
       ## sites. Read back via `concolicYield*` for `CampaignStats.concolicYield`.
-    dbErrors: seq[string]
-      ## Wiring audit C-9. The `DbError`s the funnel (`requestSave`,
+    dbErrors: ErrorLog
+      ## Wiring audit C-9 (bounded, R2-3). The `DbError`s the funnel (`requestSave`,
       ## `requestRemove`, `requestSaveSecondary`) and the campaign's corpus
       ## calls caught, read back via `dbErrors*` for `FuzzReport.dbErrors`.
-    workerDbErrors: seq[string]
+    workerDbErrors: ErrorLog
       ## CR4-M1. The symex DB errors isolated children reported
       ## (`Observation.symexDbErrors`), in submit order.
     workerFindings: int
@@ -1660,7 +1666,7 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
   ## first submit that DOES get answered (any verdict) resets the streak.
   ## `bootstrapWindow == 0` (the default) leaves this whole block inert.
   result = o.worker.submit(input)
-  o.workerDbErrors.add result.symexDbErrors   # CR4-M1
+  o.workerDbErrors.add result.symexDbErrors   # CR4-M1, R2-3
   o.workerFindings += result.symexFindingCount
   if o.spawnFreshWorker != nil:
     let firstSubmitSinceSpawn = o.workerInputsServed == 0
@@ -1699,7 +1705,11 @@ proc run*[T](o: Orchestrator[T]; input: ChoiceSeq): Observation[T] =
 proc dbErrors*[T](o: Orchestrator[T]): seq[string] =
   ## Wiring audit C-9. The `DbError`s this orchestrator's funnel and its
   ## campaign's corpus calls caught, oldest first (`FuzzReport.dbErrors`).
-  o.dbErrors
+  o.dbErrors.entries
+
+proc dbErrorsOmitted*[T](o: Orchestrator[T]): int =
+  ## R2-3. The funnel errors `dbErrors` does not hold (repeats, over the cap).
+  o.dbErrors.omitted
 
 template guardDb[T](o: Orchestrator[T]; what: string; body: untyped) =
   ## Runs a database call; a `DbError` is recorded on `o` (named by `what`),
@@ -2212,6 +2222,7 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # `target.run` directly — matching the E1 note above); it stays a required
   # parameter purely to carry `T` and preserve one signature for both modes.
   let isolated = settings.executor.processIsolation
+  var campaignDbErrors: ErrorLog   # R2-3
   let initialWorker =
     if isolated: spawnFreshWorker()
     else:
@@ -2223,7 +2234,12 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
       newInProcessWorker(s, Target[T](run: proc(x: T): Observation[T] =
         pushEngineFrame()
         try: target.run(x)
-        finally: popEngineFrame()))
+        finally:
+          popEngineFrame()
+          # R2-3: the pop merged this execution's errors into the campaign
+          # frame; move them to the bounded log so the frame stays empty.
+          campaignDbErrors.add engineStack[^1].dbErrors
+          engineStack[^1].dbErrors.setLen 0))
   let orchestrator = newOrchestrator(initialWorker, frontier,
     policy = OrchestratorPolicy(
       bootstrapWindow: (if isolated: processIsolationBootstrapWindow else: 0),
@@ -2688,10 +2704,16 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   # see `CampaignStats`'s doc for the full per-field sourcing.
   let elapsedDur = getMonoTime() - started
   result.annotationViolations = orchestrator.annotationViolations
-  result.dbErrors = orchestrator.dbErrors   # wiring audit C-9
-  result.dbErrors.add orchestrator.workerDbErrors   # CR4-M1
+  var finalErrs = orchestrator.dbErrors   # wiring audit C-9
+  finalErrs.merge orchestrator.workerDbErrors   # CR4-M1
   result.isolatedSymexFindings = orchestrator.workerFindings
-  result.dbErrors.add engineStack[^1].dbErrors
+  campaignDbErrors.add engineStack[^1].dbErrors
+  finalErrs.merge campaignDbErrors
+  result.dbErrors = finalErrs.entries
+  # An enclosing run owns what this campaign saw: hand the bounded set up in
+  # the frame, whose pop merges it (the per-execution drain left it empty).
+  engineStack[^1].dbErrors = finalErrs.entries
+  result.dbErrorsOmitted = finalErrs.omitted
   for f in engineStack[^1].symexFindings.values: result.symexFindings.add f
   frameOpen = false
   popEngineFrame()

@@ -183,14 +183,17 @@ proc proveSteps*(L: int) =
   echo "INT57STEP L=", L, " ", formatFloat(epochTime() - t0, ffDecimal, 2),
     " s (slowest ", formatFloat(worst, ffDecimal, 2), " s)"
 
-proc proveOrder*(L: int; signs: openArray[(bool, bool)]) =
+proc proveOrder*(L: int; signs: openArray[(bool, bool)];
+                 las: Slice[int] = 1 .. 1000) =
   ## Obligation (B) for key size `L`, every pair of digit counts, over the
-  ## given sign pairs.
+  ## given sign pairs. `las` restricts the first operand's digit count (the
+  ## default is all of them), so a suite can take one slice of the pairs;
+  ## the slices of one `L` and sign set partition its obligations.
   let ctx = newContext()
   let t0 = epochTime()
   var n, bad = 0
   var worst = 0.0
-  for la in 1 .. L:
+  for la in max(1, las.a) .. min(L, las.b):
     for lb in 1 .. L:
       for (sa, sb) in signs:
         let t1 = epochTime()

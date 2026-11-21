@@ -6,7 +6,7 @@
 ## statement of Nim 2.2.10's `filterIt` (sequtils.nim), and `let y = f x`.
 ## `parseExpr` read only `nnkCall` as a call: the command declined with
 ## `feUnsupportedExprKind` on every path, so a `filterIt` over a
-## `seq[seq[int]]` parameter (`tsymex_0016_k9cg_unbacked_p`'s FilterIt
+## `seq[seq[int]]` parameter (`tsymex_0016_k9cg_unbacked_p_*`'s FilterIt
 ## probe) never had a clean hit at any unroll. The label marker in command
 ## syntax (`symexTarget "t"`) was walked as an ordinary call, not a label.
 ##

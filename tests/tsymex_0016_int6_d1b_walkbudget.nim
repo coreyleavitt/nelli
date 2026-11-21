@@ -8,7 +8,7 @@
 ## builds, the check's own overhead and the context's teardown. A walk of
 ## large queries hides it; a k-unroll of small ones is made of it. The
 ## `filterIt` over a `seq[seq[int]]` parameter below (the
-## `tsymex_0016_k9cg_unbacked_p` FilterIt probe's shape) forks every path
+## `tsymex_0016_k9cg_unbacked_p_*` FilterIt probe's shape) forks every path
 ## every iteration, about 12x the queries per unroll step, each a ~1.5k-unit
 ## plain check of ~430 term visits. Measured on c, podman (int6 D1b,
 ## 2026-11-19), walk time only:

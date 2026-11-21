@@ -18,35 +18,30 @@
 ## item and one barrier per `a` grew the agenda with the subject, and no
 ## build finished. With the cut gone the language runs past `maxAgenda`
 ## and declines (`agendaBudgetWhy`), read here as past a budget.
+##
+## Part 2 of 3 of what was `tsymex_0016_s8co_skipworld_b` (patterns 6-11 in one
+## run: 58 s on c with its compile, 194 s on the Windows leg, near its 240 s
+## watchdog): patterns 9, 10 here. Per-part counts are below; the whole run's
+## were 90 languages built, 2 past a budget (P11 R8), 2 past `argCap` (P9 R4).
 import std/[unittest, strutils]
 import ./s8co_skipworld
 import nelli/smt/pcre_select
 
 const langs: seq[Lang] = @[
-  (6, 'M', @[2, 5, 6, 8]), (6, 'R', @[2, 3, 4, 5, 6]),
-  (7, 'M', @[2, 4, 5, 6]), (7, 'R', @[2, 4]),
-  (8, 'M', @[2, 5, 6]), (8, 'R', @[2, 3, 4, 5, 6]),
-  # P9 R2: the recursion cut's producer (above). P9 R4: past `argCap`
-  # (`a+(*SKIP:N)c` runs one SKIP:N per `a` under LIMIT_RECURSION, which a
-  # single-byte repeat never deepens).
+  # P9 R2: the recursion cut's producer (above). P9 R4: past `argCap` (`a+(*SKIP:N)c`
+  # runs one SKIP:N per `a` under LIMIT_RECURSION, which a single-byte repeat
+  # never deepens).
   (9, 'M', @[2, 4]), (9, 'R', @[2, 4]),
-  (10, 'M', @[2, 5, 7, 8, 9, 10]), (10, 'R', @[2, 3, 4, 5]),
-  # P11 R8: past the guess budget (`maxGuessStates`).
-  (11, 'M', @[2, 6, 8]), (11, 'R', @[2, 3, 4, 5, 6, 7, 8])]
+  (10, 'M', @[2, 5, 7, 8, 9, 10]), (10, 'R', @[2, 3, 4, 5])]
 
-suite "S8co item 4: the automata read a kept ignore_skip_arg under a limit (6-11)":
+suite "S8co item 4: the automata read a kept ignore_skip_arg under a limit (P9, P10)":
   test "search languages against native and the concrete call":
     let r = runLangs(langs, ["acaca"])
     echo r.report
     checkpoint r.bad[0 ..< min(r.bad.len, 30)].join("\n")
     check r.declined.len == 0
-    check r.budgeted.len == 2   # P11 R8, both start classes
+    check r.budgeted.len == 0
     check r.inherent.len == 2   # P9 R4, both start classes
-    # At 7deb0b0b (before the worlds) 42 of these 94 languages built;
-    # the rest declined with `costStaleWhy`. Now every one builds but the
-    # four past a budget or `argCap` below.
-    check r.built == 90
+    check r.built == 26   # the three parts' 46 + 26 + 18 are the whole run's 90
     check r.bad.len == 0
     check r.errs > 0
-    # A state held two worlds (two guesses open at once) in some build.
-    check worldPeak >= 2

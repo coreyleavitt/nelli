@@ -850,7 +850,12 @@ task test, "Run the test suite":
             # only when the resolved callee is the stdlib symbol; a user
             # overload is walked as a user call; markers match by module;
             # walker 149->150.
-            "tsymex_rfc0005_s8c_resolution",
+            "tsymex_rfc0005_s8c_resolution_a",
+            "tsymex_rfc0005_s8c_resolution_b",
+            "tsymex_rfc0005_s8c_resolution_c",
+            "tsymex_rfc0005_s8c_resolution_d",
+            "tsymex_rfc0005_s8c_resolution_e",
+            "tsymex_rfc0005_s8c_resolution_f",
             # RFC-0005 S8d -- type heads resolved by symbol: a user type named
             # like a stdlib/builtin type (seq/Table/HashSet/Natural/int8/bool/
             # Rune) is not modelled as it; walker 150->151.
@@ -1251,7 +1256,9 @@ task test, "Run the test suite":
             "tsymex_0016_s8co_propfold",
             "tsymex_0016_s8co_skipsat",
             "tsymex_0016_s8co_skipworld_a",
-            "tsymex_0016_s8co_skipworld_b",
+            "tsymex_0016_s8co_skipworld_b1",
+            "tsymex_0016_s8co_skipworld_b2",
+            "tsymex_0016_s8co_skipworld_b3",
             "tsymex_rfc0005_s8cf_classes",
             "tsymex_rfc0005_s8cf_classes_b",
             "tsymex_rfc0005_s8cf_jitutf",
@@ -1961,9 +1968,16 @@ task test, "Run the test suite":
             "tsymex_0016_int57_orderproof_small",
             "tsymex_0016_int57_orderproof_s19",
             "tsymex_0016_int57_orderproof_s20",
-            "tsymex_0016_int57_orderproof_b19_same",
+            "tsymex_0016_int57_orderproof_b19_same_a",
+            "tsymex_0016_int57_orderproof_b19_same_b",
+            "tsymex_0016_int57_orderproof_b19_same_c",
+            "tsymex_0016_int57_orderproof_b19_same_d",
             "tsymex_0016_int57_orderproof_b19_mixed",
-            "tsymex_0016_int57_orderproof_b20_same",
+            "tsymex_0016_int57_orderproof_b20_same_a",
+            "tsymex_0016_int57_orderproof_b20_same_b",
+            "tsymex_0016_int57_orderproof_b20_same_c",
+            "tsymex_0016_int57_orderproof_b20_same_d",
+            "tsymex_0016_int57_orderproof_b20_same_e",
             "tsymex_0016_int57_orderproof_b20_mixed",
             "tsymex_0016_int74_renderslice",
             # RFC-0016 K2-0: the probe batch (SND-13, CRH-06, CRH-08, CRH-09, INT-11, INT-12, INT-15, INT-22, PND-13, W-19b, W-19c, W-22, W-24).
@@ -2067,7 +2081,11 @@ task test, "Run the test suite":
             "tsymex_0016_k9cg_unbacked_e",
             "tsymex_0016_k9cg_unbacked_l",
             "tsymex_0016_k9cg_unbacked_n",
-            "tsymex_0016_k9cg_unbacked_p",
+            "tsymex_0016_k9cg_unbacked_p_a",
+            "tsymex_0016_k9cg_unbacked_p_b",
+            "tsymex_0016_k9cg_unbacked_p_c",
+            "tsymex_0016_k9cg_unbacked_p_d",
+            "tsymex_0016_k9cg_unbacked_p_filterit",
             "tsymex_0016_k9cg_unbacked_table",
             # RFC-0016 K9d: no verdict suite without a native pin (the census of tsymex_* files asserting sxSat/sxUnsat/sxRaised with no native idiom), ratcheted at its ceiling; pinFind, the generator that pins a suite's own symexFind call.
             "tsymex_0016_k9d_census",

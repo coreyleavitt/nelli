@@ -2,7 +2,7 @@
 ## byte order) at key size 20, the two mixed-sign pairs (non-negative against
 ## negative, and the reverse). Split from `tsymex_0016_int57_orderproof_small`
 ## (which describes the whole proof) to keep each suite under the per-test
-## limit; the same-sign pairs are in `tsymex_0016_int57_orderproof_b20_same`.
+## limit; the same-sign pairs are in `tsymex_0016_int57_orderproof_b20_same_*`.
 import std/[unittest, strutils, times]
 import nelli
 import nelli/symex

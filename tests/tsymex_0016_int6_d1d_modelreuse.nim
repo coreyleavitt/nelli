@@ -12,7 +12,7 @@
 ## satisfies one arm: `refuteStatus` evaluates the query's new roots in the
 ## models it kept (`satByModel`) and answers SAT without a search when one
 ## fits. Measured on c, podman (int6 D1d, 2026-11-19), the `filterIt` over a
-## `seq[seq[int]]` below (`tsymex_0016_k9cg_unbacked_p`'s FilterIt shape):
+## `seq[seq[int]]` below (`tsymex_0016_k9cg_unbacked_p_*`'s FilterIt shape):
 ##   unroll 3:   426 solvers,  14.0M units charged  ->  270 solvers,  8.30M
 ##   unroll 4: 3,906 solvers, 141.4M units charged  ->  2,417 solvers, 86.0M
 ## (1,489 of 3,125 pruning checks decided by a kept model at unroll 4).

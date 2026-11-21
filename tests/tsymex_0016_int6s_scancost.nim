@@ -8,7 +8,7 @@
 ## text counted a byte at a time, 15,821,232 VM iterations for that one scan
 ## against the compiler's default `--maxLoopIterationsVM` of 10,000,000. Every
 ## program whose walk registers a `system.nim` routine (an `items` over a seq)
-## failed to compile (`tsymex_0016_k9cg_unbacked_p`).
+## failed to compile (`tsymex_0016_k9cg_unbacked_p_*`).
 ##
 ## The bound, in `tsymex_0016_int6s_scancost.nim.cfg`, is this file's whole
 ## VM budget: 4,000,000 iterations per evaluation. Measured on the pinned

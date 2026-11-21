@@ -111,8 +111,8 @@ suite "INT-57 (S): reading digits from the left (key sizes 3, 5, 10)":
       proveSteps(L)
 
 suite "INT-57 (B): the order over two magnitudes is Nim's byte order":
-  # key sizes 19 and 20 are in `tsymex_0016_int57_orderproof_b19_same`, `tsymex_0016_int57_orderproof_b19_mixed` and
-  # `tsymex_0016_int57_orderproof_b20_*`
+  # key sizes 19 and 20 are in `tsymex_0016_int57_orderproof_b19_same_*`, `tsymex_0016_int57_orderproof_b19_mixed` and
+  # `tsymex_0016_int57_orderproof_b20_*` (the same-sign pairs in parts)
   for L in [3, 5, 10]:
     test "key size " & $L & ", every pair of digit counts and signs":
       proveOrder(L, allPairs)

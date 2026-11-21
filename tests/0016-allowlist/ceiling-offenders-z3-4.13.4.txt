@@ -572,7 +572,6 @@ tsymex_rfc0005_s8bz_overlap  90.2  seed: the largest of the three measured times
 tsymex_rfc0005_s8bz_written  81.6  seed: the largest of the three measured times
 tsymex_rfc0005_s8bz_written_b  88.6  seed: the largest of the three measured times
 tsymex_rfc0005_s8bz_written_c  80.6  seed: the largest of the three measured times
-tsymex_rfc0005_s8c_resolution  92.6  seed: the largest of the three measured times
 tsymex_rfc0005_s8ca_calls  86.2  seed: the largest of the three measured times
 tsymex_rfc0005_s8ca_closures  68.9  seed: the largest of the three measured times
 tsymex_rfc0005_s8ca_closures_heap  84.2  seed: the largest of the three measured times

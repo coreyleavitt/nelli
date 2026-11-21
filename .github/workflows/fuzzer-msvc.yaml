@@ -58,8 +58,7 @@ name: fuzzer-msvc
 # `_deps` -- same discipline, same regex, as the other two Windows legs.
 #
 # SHARDING (2026-11-09). The leg was one serial job: the fuzzer + db suite
-# (~37 min) followed by every tsymex_0016_* walker test (~50 s each, 89 and
-# growing), which hit the 90-minute timeout on every main push. It is now a
+# (~37 min) followed by every tsymex_0016_* walker test, which hit the 90-minute timeout on every main push. It is now a
 # matrix:
 #   suites       the fuzzer + db suite and the named contract tests
 #   shards       Linux job; derives the walker-test list and partitions it
@@ -70,9 +69,14 @@ name: fuzzer-msvc
 #   walker       one job per shard, each running only its own tests
 #   fuzzer-msvc  the join: needs everything above and keeps the leg's old
 #                job name, so anything keyed on that check name still works
-# To change the shard count, edit WALKER_SHARDS in the `shards` job. Pick it so
-# a shard stays under ~30 min (4 shards measured 14-35 min, run 42725930944), well under its 60-minute
-# timeout. Setup per job is cheap: the Z3 prefix and the deps clones are
+# To change the shard count, edit WALKER_SHARDS (workflow env). Sizing rule:
+# shards >= ceil(tests / (budget_min * 60 / seconds_per_test)), where budget_min
+# is the walker job's timeout-minutes divided by 1.4 (40% headroom: a shard may
+# run 40% over its estimate before the timeout bites) and seconds_per_test is
+# measured under vcc. Measured 2026-11-20: 373 tests x ~67 s = ~417 min of
+# work, so 417 / (60 / 1.4 = 42.9) needs 10 shards; 12 gives ~31 tests and
+# ~35 min per shard. Re-measure and resize when the glob grows.
+# Setup per job is cheap: the Z3 prefix and the deps clones are
 # restored from actions/cache (.github/actions/setup-msvc-leg), and the Nim
 # artifact is a ~22MB digest-verified download.
 
@@ -124,7 +128,7 @@ concurrency:
 
 
 env:
-  WALKER_SHARDS: "5"
+  WALKER_SHARDS: "12"
 
 jobs:
   suites:

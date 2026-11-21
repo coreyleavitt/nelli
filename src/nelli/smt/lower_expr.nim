@@ -3699,20 +3699,33 @@ proc seqLenUpperBound*(l: Z3Int): Option[int] =
 proc maskedSeqData*(ctx: Z3Context; data: Z3AnyAst; len: Z3Int;
                    dflt: Z3AnyAst): Z3AnyAst =
   ## RFC-0016 PRC-34. The data array of a seq with every index outside
-  ## `0 ..< len` mapped to `dflt`: the term
-  ## `lambda i. ite(0 <= i and i < len, data[i], dflt)`. A lambda is an
-  ## array term, not an axiom: Z3 beta-reduces a `select` of it, and a
-  ## disequality of two of them is one skolem witness (array
-  ## extensionality), so no universal over the array is asserted (the G4
-  ## hang lesson).
+  ## `0 ..< len` mapped to `dflt`: the pointwise array
+  ## `map(ite, mask, data, const(dflt))`, where `mask` is the lambda
+  ## `lambda i. 0 <= i and i < len` (a Bool array that mentions no data).
+  ## No universal is asserted (the G4 hang lesson): a `select` of the map
+  ## beta-reduces, and a disequality of two of them is one skolem witness
+  ## (array extensionality).
+  ##
+  ## Why a map and not `lambda i. ite(in-range, data[i], dflt)`: Z3 4.13.4's
+  ## array theory is incomplete on a lambda whose body reads a free array
+  ## (`incomplete (theory array)`, a sxUnknown on every unbounded `==`);
+  ## 5.1 decides it. The mask lambda reads no array, and the map of an
+  ## `ite` is the array theory's own `map` axiom, which both decide.
   let i = mkIntVar(ctx, "__seqEqMaskI")
   let inRange = (mkInt(0) <= i) and (i < len)
-  # Each raw term is wrapped (owned) before the next API call.
-  let sel = wrap[Z3AnyAst](ctx, checkedSelect(ctx, data.raw, i.raw))
-  let body = wrap[Z3AnyAst](ctx, checkedIte(ctx, inRange.raw, sel.raw, dflt.raw))
   var bound = [Z3_to_app(ctx.raw, i.raw)]
-  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw, cuint(1),
-    cast[ptr UncheckedArray[RawZ3App]](addr bound[0]), body.raw))
+  let mask = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw, cuint(1),
+    cast[ptr UncheckedArray[RawZ3App]](addr bound[0]), inRange.raw))
+  # Each raw term is wrapped (owned) before the next API call.
+  let dsort = ctx.checkErr Z3_get_array_sort_domain(ctx.raw,
+    sortOfRaw(ctx, data.raw))
+  let blank = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const_array(ctx.raw, dsort, dflt.raw))
+  # `ite`'s declaration at the element sort, read off an `ite` term of it.
+  let proto = wrap[Z3AnyAst](ctx, checkedIte(ctx, inRange.raw, dflt.raw, dflt.raw))
+  let decl = ctx.checkErr Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, proto.raw))
+  var args = [mask.raw, data.raw, blank.raw]
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_map(ctx.raw, decl, cuint(3),
+    cast[ptr UncheckedArray[RawZ3Ast]](addr args[0])))
 
 proc seqEqMasked*(a, b: SymVal): Option[Z3Bool] =
   ## RFC-0016 PRC-34. Whole-seq `==` with no length bound: equal lengths and

@@ -1572,8 +1572,14 @@ const renderAsChoicesVersion* = "12"
   ##   the witness renders Nim's one canonical NaN, so the payload another
   ##   view reads (`a[] == 0x7FF8_0000_0000_0001`) is not replayed. An
   ##   INT-90 trusted sxSat becomes untrusted. No key bytes change.
+  ## - RFC-0016 CI seq-eq (487->488): an unbounded whole-seq `==` masks each
+  ##   data array as `map(ite, mask, data, const)` over a mask lambda that
+  ##   reads no array, not as one lambda that reads the data array: Z3
+  ##   4.13.4 answered the latter `incomplete (theory array)`. The term
+  ##   changes, the verdict is the same where both decide. No key bytes
+  ##   change.
 
-const symexWalkerVersion* = "487"
+const symexWalkerVersion* = "488"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

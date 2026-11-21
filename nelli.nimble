@@ -2125,6 +2125,7 @@ task test, "Run the test suite":
             "tsymex_0016_int6t_typedpush_off",
             # RFC-0016 int6-u: a routine declared inside a region a template or macro pushes is placed under that push (declines), found in the typed body.
             "tsymex_0016_int6u_hostpush",
+            "tsymex_0016_int6u_compilecost",
             # RFC-0016 int6-u: sequtils' own audited loop-counter step is read through by the opaque scan (pre-int6-t verdicts).
             "tsymex_0016_int6u_seqinc",
             # RFC-0016 int6-w2: an opaque toSeq(s.items) builds (the effect summary skips a type slot; an untyped expression declines).

@@ -1069,110 +1069,224 @@ proc reachesDef(n, def: NimNode): bool =
   for c in n:
     if reachesDef(c, def): return true
 
-proc expanderDefs(n: NimNode; name: string; acc: var seq[NimNode]) =
-  if n.kind in {nnkTemplateDef, nnkMacroDef} and n.len >= 7 and
-     nimIdentNormalize(routineNameOf(n[0])) == name:
-    acc.add n
-  for c in n: expanderDefs(c, name, acc)
+type ExpDef = tuple[node: NimNode, exported: bool, module: string]
+  ## A template or macro definition of a module's text (its includes' too),
+  ## and the module it is defined in (the root, for an include).
 
-proc visibleAsts(m: ModuleScan; own: NimNode; unplaced: var string):
-    seq[NimNode] =
-  ## The parsed texts a call at the module's level may name a template or
-  ## macro from: this module's own and every user module it imports, what
-  ## those re-export too. `unplaced` is set where one cannot be read.
-  result.add own
-  var queue: seq[string]
-  for ev in m.events:
-    if not ev.call: queue.add ev.targets
-  var seen: seq[string]
-  while queue.len > 0:
-    let t = queue.pop()
-    if t.startsWith("lib:") or t.startsWith("lib?:"): continue
-    if t.startsWith("?"):
-      unplaced = "an import names a module the scan cannot place (`" & t & "`)"
-      continue
-    let raw = anchored(t)
-    let path = if raw.len > 0: raw else: t
-    let key = normalPath(path)
-    if key in seen: continue
-    seen.add key
-    let ast = bodyAstOf(path)
-    if ast == nil:
-      unplaced = "`" & path.extractFilename & "` cannot be read"
-      continue
-    result.add ast
-    queue.add defsOf(path).reexports
+type ExpIndex = object
+  unknown: string                       ## why the module's text is not read whole
+  defs: Table[string, seq[ExpDef]]      ## per `nimIdentNormalize`d name
+  imports: seq[string]                  ## what it imports, as `CompileEvent.targets`
 
-proc expansionPushes(asts: seq[NimNode]; callee: string;
-                     seen: var seq[string]): string =
-  ## "" or why the template or macro `callee` may push a check option where it
-  ## expands: a macro (its expansion is not read), or a template whose text,
-  ## or a template or macro its text calls, holds a check pragma. A name no
-  ## visible text defines is the toolchain's (none pushes, int6-w2).
-  if callee in seen: return
-  if seen.len > 32:
-    # Fail closed: an expansion nested past the read depth is not shown to
-    # push nothing.
+var expIndexCache {.compileTime.}: Table[string, ExpIndex]
+var expVerdicts {.compileTime.}: Table[string, string]
+var expActive {.compileTime.}: seq[string]
+var expTaint {.compileTime.}: int
+  ## RFC-0016 CR4-H1 (round 3). The scope-resolved read of a template's or a
+  ## macro's expansion: per module read once (`expIndexOf`), per (module,
+  ## name) judged once (`expansionVerdict`).
+
+const expansionDepthCap = 16
+
+proc indexWalk(n: NimNode; module, fromFile: string; including: var seq[string];
+               ix: var ExpIndex) =
+  case n.kind
+  of nnkStmtList, nnkStmtListExpr:
+    for c in n: indexWalk(c, module, fromFile, including, ix)
+  of nnkWhenStmt:
+    # Every branch may be compiled: fail closed.
+    for br in n:
+      if br.len > 0: indexWalk(br[br.len - 1], module, fromFile, including, ix)
+  of nnkPragmaBlock:
+    if n.len > 1: indexWalk(n[1], module, fromFile, including, ix)
+  of nnkTemplateDef, nnkMacroDef:
+    if n.len >= 7:
+      let nm = nimIdentNormalize(routineNameOf(n[0]))
+      if nm.len == 0:
+        if ix.unknown.len == 0:
+          ix.unknown = "a definition whose name the scan cannot read: `" &
+                       n[0].repr & "`"
+      else:
+        ix.defs.mgetOrPut(nm, @[]).add (node: n,
+          exported: n[0].kind == nnkPostfix, module: module)
+  of nnkIncludeStmt:
+    let env = compileTimeEnv()
+    for c in n:
+      let rel = includePathOf(c)
+      let path = if rel.len > 0: resolveInclude(env, fromFile, rel) else: ""
+      if path.len == 0:
+        if ix.unknown.len == 0:
+          ix.unknown = "cannot place `include " & c.repr & "` from `" &
+                       fromFile & "`"
+        continue
+      if normalPath(path) in including: continue
+      let ast = bodyAstOf(path)
+      if ast == nil:
+        if ix.unknown.len == 0:
+          ix.unknown = "`" & path.extractFilename & "` cannot be read"
+        continue
+      including.add normalPath(path)
+      indexWalk(ast, module, path, including, ix)
+      discard including.pop()
+  else: discard
+
+proc expIndexOf(raw: string): ExpIndex =
+  ## The module at `raw`'s template and macro definitions, its includes'
+  ## among them, and its imports; read once per compile.
+  let key = normalPath(raw)
+  if key in expIndexCache: return expIndexCache[key]
+  var ix: ExpIndex
+  let ast = bodyAstOf(raw)
+  if ast == nil:
+    ix.unknown = "`" & raw.extractFilename & "` cannot be read"
+  else:
+    var including = @[key]
+    indexWalk(ast, raw, raw, including, ix)
+    let m = scanOf(key, raw)
+    if m.unknown.len > 0 and ix.unknown.len == 0: ix.unknown = m.unknown
+    for ev in m.events:
+      if not ev.call:
+        for t in ev.targets: ix.imports.add t
+  expIndexCache[key] = ix
+  ix
+
+proc expTargetPath(t: string; why: var string): string =
+  ## The user module an import target names; "" for a library one (the
+  ## toolchain's) and where it cannot be placed (`why` is set).
+  if t.startsWith("lib:") or t.startsWith("lib?:"): return ""
+  if t.startsWith("?"):
+    why = "an import names a module the scan cannot place (`" & t & "`)"
+    return ""
+  let raw = anchored(t)
+  let path = if raw.len > 0: raw else: t
+  if isOwnRuntime(normalPath(path)) or isOwnSource(path): return ""
+  path
+
+proc exportedDefsOf(target, name: string; acc: var seq[ExpDef];
+                    why: var string; seen: var seq[string]) =
+  ## What the module `target` hands an importer under `name`: its exported
+  ## definitions, and what it re-exports.
+  let path = expTargetPath(target, why)
+  if path.len == 0: return
+  let key = normalPath(path)
+  if key in seen: return
+  seen.add key
+  let ix = expIndexOf(path)
+  if ix.unknown.len > 0:
+    why = "`" & path.extractFilename & "` is not read whole: " & ix.unknown
+    return
+  let d = defsOf(path)
+  if d.unknown.len > 0:
+    why = "`" & path.extractFilename & "` is not read whole: " & d.unknown
+    return
+  if name in d.exportedNames:
+    why = "`" & path.extractFilename & "` re-exports `" & name &
+          "` from a module the scan does not place"
+    return
+  for e in ix.defs.getOrDefault(name):
+    if e.exported: acc.add e
+  for rt in d.reexports:
+    exportedDefsOf(rt, name, acc, why, seen)
+
+proc scopeDefs(modRaw, name: string; acc: var seq[ExpDef]; why: var string) =
+  ## The templates and macros named `name` that a call in the module `modRaw`
+  ## resolves to among the user modules: its own, then its imports' exports.
+  let ix = expIndexOf(modRaw)
+  if ix.unknown.len > 0:
+    why = "`" & modRaw.extractFilename & "` is not read whole: " & ix.unknown
+    return
+  acc.add ix.defs.getOrDefault(name)
+  var seen = @[normalPath(modRaw)]
+  for t in ix.imports:
+    exportedDefsOf(t, name, acc, why, seen)
+
+proc expansionVerdict(modRaw, name: string; depth: int): string =
+  ## "" or why the template or macro `name`, as a module `modRaw` sees it,
+  ## may push a check option where it expands: a macro (its expansion is not
+  ## read), a template whose text holds a check pragma, or one that calls such
+  ## a template or macro, each callee resolved in the scope of the module that
+  ## defines the caller. A name no user module in scope defines is the
+  ## toolchain's (none pushes, int6-w2), where every module in scope was read.
+  let vkey = normalPath(modRaw) & "|" & name
+  if vkey in expVerdicts: return expVerdicts[vkey]
+  if vkey in expActive:
+    inc expTaint          # a cycle: the others on it are judged on their own
+    return
+  if depth > expansionDepthCap:
+    inc expTaint
     return "a template whose expansion nests deeper than the scan reads"
-  seen.add callee
-  var defs: seq[NimNode]
-  for a in asts: expanderDefs(a, callee, defs)
-  for d in defs:
-    if d.kind == nnkMacroDef:
-      return "a macro, whose expansion the scan does not read"
-    if pushesInBody(d[6]):
-      return "a template whose text pushes check options"
-    var calls: seq[NimNode]
-    proc gather(n: NimNode; acc: var seq[NimNode]) =
-      if n.kind in {nnkCall, nnkCommand, nnkCallStrLit, nnkIdent}:
-        acc.add n
-      for c in n: gather(c, acc)
-    gather(d[6], calls)
-    for c in calls:
-      let nm = calleeName(c)
-      if nm.len == 0 or nm == callee: continue
-      let inner = expansionPushes(asts, nm, seen)
-      if inner.len > 0:
-        return "a template that expands `" & nm & "`, " & inner
+  var defs: seq[ExpDef]
+  var why = ""
+  scopeDefs(modRaw, name, defs, why)
+  if why.len > 0:
+    result = "a name the scan cannot resolve (" & why & ")"
+    expVerdicts[vkey] = result
+    return
+  expActive.add vkey
+  let t0 = expTaint
+  block judge:
+    for d in defs:
+      if d.node.kind == nnkMacroDef:
+        result = "a macro, whose expansion the scan does not read"
+        break judge
+      if pushesInBody(d.node[6]):
+        result = "a template whose text pushes check options"
+        break judge
+      var names: seq[string]
+      proc gather(n: NimNode; acc: var seq[string]) =
+        var nm = ""
+        case n.kind
+        of nnkCall, nnkCommand, nnkCallStrLit: nm = calleeName(n)
+        of nnkInfix, nnkPrefix, nnkPostfix:
+          if n.len > 0: nm = nimIdentNormalize(nameOf(n[0]))
+        of nnkStmtList:
+          for c in n:
+            if c.kind in {nnkIdent, nnkDotExpr}:
+              let b = calleeName(c)
+              if b.len > 0 and b notin acc: acc.add b
+        else: discard
+        if nm.len > 0 and nm notin acc: acc.add nm
+        for c in n: gather(c, acc)
+      gather(d.node[6], names)
+      for nm in names:
+        let inner = expansionVerdict(d.module, nm, depth + 1)
+        if inner.len > 0:
+          result = "a template that expands `" & nm & "`, " & inner
+          break judge
+  discard expActive.pop()
+  if result.len > 0 or expTaint == t0: expVerdicts[vkey] = result
 
-proc moduleLevelExpansionHost(file: string; ast, def: NimNode; line: int;
-                              m: ModuleScan): string =
+proc moduleLevelExpansionHost(file, root: string; ast, def: NimNode;
+                              line: int): string =
   ## RFC-0016 CR4-H1. "" or why the routine `def`, declared at its module's
   ## level, lies inside the arguments of a template's or a macro's call whose
   ## expansion may push a check option around it. As `pushingHost` and
   ## `typedPushingHost` place a routine declared inside a routine, this
   ## places one declared in a call's block: the scan reads this module's text
-  ## alone, where an imported template's matched push and pop are not. Fail
-  ## closed: a callee that is no name, a macro, or a module that cannot be
-  ## read declines; a callee defined in no visible text is the toolchain's.
-  if def == nil: return
+  ## alone, where an imported template's matched push and pop are not. The
+  ## callee is resolved by scope (`expansionVerdict`). Fail closed: a callee
+  ## that is no name, a macro, a module in scope that cannot be read, or a
+  ## routine in a call's span that cannot be placed declines.
   if file notin callHosts:
     var acc: seq[CallHost]
     collectCallHosts(ast, acc)
     callHosts[file] = acc
-  var unplaced = ""
-  var asts: seq[NimNode]
-  var read = false
   for h in callHosts[file]:
-    if h.first > line or line > h.last or not reachesDef(h.node, def): continue
+    if h.first > line or line > h.last: continue
+    if def == nil:
+      return "it is declared inside the call of `" & h.node[0].repr &
+             "` (line " & $h.first & "), and the scan cannot place its " &
+             "definition there"
+    if not reachesDef(h.node, def): continue
     let callee = calleeName(h.node)
     let at = "it is declared inside the call of `" & h.node[0].repr &
              "` (line " & $h.first & "), "
     if callee.len == 0:
       return at & "whose callee is not a name the scan reads"
-    if not read:
-      asts = visibleAsts(m, ast, unplaced)
-      read = true
-    var seen: seq[string]
-    let why = expansionPushes(asts, callee, seen)
+    let why = expansionVerdict(root, callee, 0)
     if why.len > 0:
       return at & "which is " & why & ": it takes that push's where it " &
              "stands, which the scan of the module's statements does not read"
-    if unplaced.len > 0:
-      var defs: seq[NimNode]
-      for a in asts: expanderDefs(a, callee, defs)
-      if defs.len == 0:
-        return at & "whose definition the scan cannot find: " & unplaced
 
 proc positionUnreadable(impl: NimNode; file: string; line: int;
                         st: CheckState; m: ModuleScan): string =
@@ -1225,7 +1339,9 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
     if ast == nil: ast = bodyAstOf(file)
     if ast != nil:
       let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
-      let top = moduleLevelExpansionHost(file, ast, def, line, m)
+      let rootAt = anchored(moduleFileOf(impl[0], file))
+      let root = if rootAt.len > 0: rootAt else: moduleFileOf(impl[0], file)
+      let top = moduleLevelExpansionHost(file, root, ast, def, line)
       if top.len > 0: return top
 
 proc stdlibDefClean(impl: NimNode; file: string; line: int;

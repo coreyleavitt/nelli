@@ -436,7 +436,7 @@ proc scanFile(sc: var Scanner; path, text: string) =
   sc.visit = saved
   sc.pending = true
 
-proc includePathOf(n: NimNode): string =
+proc includePathOf*(n: NimNode): string =
   case n.kind
   of nnkStrLit, nnkRStrLit, nnkTripleStrLit: n.strVal
   of nnkIdent, nnkSym: n.strVal
@@ -450,7 +450,7 @@ proc includePathOf(n: NimNode): string =
     if n.len == 2 and nameOf(n[0]) == "./": includePathOf(n[1]) else: ""
   else: ""  # k2: fail-closed: "": scanInclude sets res.unknown
 
-proc resolveInclude(env: SourceEnv; fromFile, rel: string): string =
+proc resolveInclude*(env: SourceEnv; fromFile, rel: string): string =
   ## Beside the including file, then under each directory above it (`include
   ## system/x` from `lib/system.nim`, `std/private/x` from anywhere under `lib`).
   let name = if rel.endsWith(".nim"): rel else: rel & ".nim"

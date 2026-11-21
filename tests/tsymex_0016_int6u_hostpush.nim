@@ -27,6 +27,10 @@ import nelli/smt/canonicalize
 import nelli/smt/errorkind
 import ./s8cu_helpers
 import ./int6tlib/s0016_int6t_pushers
+import ./int6tlib/s0016_int6u_transx
+import ./int6tlib/s0016_int6u_zinc
+import ./int6tlib/s0016_int6u_zrev
+import ./int6tlib/s0016_int6u_deep
 
 type R = range[0 .. 10]
 
@@ -65,6 +69,20 @@ suite "int6-u: a routine declared inside a template's or macro's push":
     checkpoint show(x.errors)
     check x.status == sxRaised
 
+# CR4-H1, round 3: routines declared inside `suite` and `test` blocks, in a
+# file that imports nelli, nelli/symex and the shared helpers, compile at the
+# default `maxLoopIterationsVM` (the scan once walked every module reachable
+# from the imports once per identifier of every template body it met).
+suite "int6-u: routines inside test blocks (compile cost)":
+  test "a routine in a test block is walked":
+    proc innerBlk(w: int): int = int(R(w))
+    proc outerBlk(v: int) =
+      if innerBlk(v) == 300: symexTarget("hit")
+    check native(outerBlk(300)) == "RangeDefect"
+    let x = pinFind(outerBlk, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+
 # CR4-H1: the same regions around a routine at the MODULE's level. The
 # helper module's template and macro are expanded here; the scan reads this
 # module's text alone, in which the matched push and pop are not.
@@ -82,6 +100,23 @@ plainRegion:
   proc innerPlainTop(w: int): int = int(R(w))
 proc outerPlainTop(v: int) =
   if innerPlainTop(v) == 300: symexTarget("hit")
+
+# CR4-H1, round 3: a template resolved by scope. The pushing template is
+# defined in no module this one imports directly or defines itself.
+wrapX:
+  proc innerTransTop(w: int): int = int(R(w))
+proc outerTransTop(v: int) =
+  if innerTransTop(v) == 300: symexTarget("hit")
+
+rangeOffInc:
+  proc innerIncTop(w: int): int = int(R(w))
+proc outerIncTop(v: int) =
+  if innerIncTop(v) == 300: symexTarget("hit")
+
+deepT0:
+  proc innerDeepTop(w: int): int = int(R(w))
+proc outerDeepTop(v: int) =
+  if innerDeepTop(v) == 300: symexTarget("hit")
 
 proc innerNoCallTop(w: int): int = int(R(w))
 proc outerNoCallTop(v: int) =
@@ -133,6 +168,25 @@ suite "int6-u: a routine at the module's level inside a template's or macro's pu
   test "an imported macro's rangeChecks: off region":
     check native(outerMacroTop(300)) == "hit"
     pinDecline(outerMacroTop, sk, feCheckOption, needle = "declared inside")
+
+  test "a template that calls a pushing template of a module not imported":
+    check native(outerTransTop(300)) == "hit"
+    pinDecline(outerTransTop, sk, feCheckOption, needle = "declared inside")
+
+  test "a pushing template a module defines by `include`":
+    check native(outerIncTop(300)) == "hit"
+    pinDecline(outerIncTop, sk, feCheckOption, needle = "declared inside")
+
+  test "a routine in an included file, the template in its includer":
+    check native(outerRev(300)) == "hit"
+    pinDecline(outerRev, sk, feCheckOption, needle = "declared inside")
+
+  test "an expansion nested past the read depth declines (fails closed)":
+    check native(outerDeepTop(300)) == "hit"
+    pinDecline(outerDeepTop, sk, feCheckOption, needle = "declared inside")
+
+  test "the walker version carries the round-3 scope index (floor)":
+    check parseInt(symexWalkerVersion) >= 490
 
   test "the verdict equals the same-module template's":
     check native(outerTmplHere(300)) == "hit"

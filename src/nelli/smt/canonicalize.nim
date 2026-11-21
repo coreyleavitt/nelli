@@ -1572,8 +1572,15 @@ const renderAsChoicesVersion* = "12"
   ##   the witness renders Nim's one canonical NaN, so the payload another
   ##   view reads (`a[] == 0x7FF8_0000_0000_0001`) is not replayed. An
   ##   INT-90 trusted sxSat becomes untrusted. No key bytes change.
+  ## - RFC-0016 CR4-H1 round 3 (487->490; the integration branch is at 489,
+  ##   490 is taken here and the control loop reconciles at merge): the
+  ##   expansion read of `check_options.moduleLevelExpansionHost` resolves a
+  ##   callee by scope, through transitive imports and `include`, from a
+  ##   per-module index read once, and an expansion nested past the depth
+  ##   bound declines (fail closed). A template reached that way, which the
+  ##   round-2 read missed, now declines its routine. No key bytes change.
 
-const symexWalkerVersion* = "487"
+const symexWalkerVersion* = "490"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

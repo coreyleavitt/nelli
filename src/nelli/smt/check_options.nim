@@ -1266,18 +1266,20 @@ proc moduleLevelExpansionHost(file, root: string; ast, def: NimNode;
   ## alone, where an imported template's matched push and pop are not. The
   ## callee is resolved by scope (`expansionVerdict`). Fail closed: a callee
   ## that is no name, a macro, a module in scope that cannot be read, or a
-  ## routine in a call's span that cannot be placed declines.
+  ## callee whose expansion pushes declines, for a routine the scan cannot
+  ## place (a template's product) under each call spanning its line.
   if file notin callHosts:
     var acc: seq[CallHost]
     collectCallHosts(ast, acc)
     callHosts[file] = acc
   for h in callHosts[file]:
     if h.first > line or line > h.last: continue
-    if def == nil:
-      return "it is declared inside the call of `" & h.node[0].repr &
-             "` (line " & $h.first & "), and the scan cannot place its " &
-             "definition there"
-    if not reachesDef(h.node, def): continue
+    # A routine a template's body declares (`proc name*` in `rowProc`) is
+    # nowhere by that name in the text: its position is the call's line, and
+    # `def` is nil. Which call it is under cannot then be told, so every call
+    # whose span holds the line is judged, the callee's expansion alone
+    # deciding: a call whose expansion pushes nothing leaves the position.
+    if def != nil and not reachesDef(h.node, def): continue
     let callee = calleeName(h.node)
     let at = "it is declared inside the call of `" & h.node[0].repr &
              "` (line " & $h.first & "), "

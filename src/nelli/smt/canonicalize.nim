@@ -1599,8 +1599,14 @@ const renderAsChoicesVersion* = "12"
   ##   facts refute it, instead of reaching `routeRaise`'s full solve. An
   ##   undecided side is kept. Verdicts are unchanged; the walk's solves and
   ##   prune log differ. No key bytes change.
+  ## - RFC-0016 W4 CR (491->492): a routine a module-local template produces
+  ##   at module level (its definition is not in the text by its own name) is
+  ##   no longer declined `feCheckOption` by the module-level expansion read
+  ##   for being unplaceable; each call spanning its line is judged by the
+  ##   callee's expansion, which declines only when it may push. Verdicts of
+  ##   such routines change from a decline to a walk. No key bytes change.
 
-const symexWalkerVersion* = "491"
+const symexWalkerVersion* = "492"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

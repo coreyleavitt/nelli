@@ -122,6 +122,19 @@ proc innerNoCallTop(w: int): int = int(R(w))
 proc outerNoCallTop(v: int) =
   if innerNoCallTop(v) == 300: symexTarget("hit")
 
+# A routine a module-local template produces at module level (the template's
+# body declares `proc name`, so the scan finds no definition by that name),
+# its body calling another module-local template and nelli's `symexTarget`.
+# Neither pushes: the position is read, not declined.
+template prodRow(acc) =
+  acc = acc + 7
+template prodProc(name, body: untyped) {.dirty.} =
+  proc name(a: int) =
+    var acc = 0
+    body
+    if acc == a: symexTarget("hit")
+prodProc(outerProd): prodRow(acc)
+
 # The same-module forms stand last: a push a template's text holds is a
 # possible state of every later position of its own module.
 template rangeOffHere(body: untyped) =
@@ -188,6 +201,16 @@ suite "int6-u: a routine at the module's level inside a template's or macro's pu
   test "the walker version carries the round-3 scope index (floor)":
     check parseInt(symexWalkerVersion) >= 489
 
+  test "a routine a non-pushing local template produces is read (control)":
+    check native(outerProd(7)) == "hit"
+    let r = symexFind(outerProd, tLabel("hit"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check r.trusted
+    var ks: set[SymexErrorKind]
+    for e in r.errors: ks.incl e.kind
+    check feCheckOption notin ks
+
   test "the verdict equals the same-module template's":
     check native(outerTmplHere(300)) == "hit"
     sameVerdict(outerTmplTop, outerTmplHere)
@@ -211,3 +234,6 @@ suite "int6-u: a routine at the module's level inside a template's or macro's pu
 suite "int6-u: walker version":
   test "walker version floor >= 486":
     check parseInt(symexWalkerVersion) >= 486
+
+  test "walker version floor >= 492 (a template's product is not declined)":
+    check parseInt(symexWalkerVersion) >= 492

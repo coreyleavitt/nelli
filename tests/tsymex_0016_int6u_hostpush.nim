@@ -20,7 +20,7 @@
 ## a push in a template's text as a possible state of its own module's
 ## positions, which would make this suite's routines deviate.
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, macros]
 import nelli
 import nelli/symex
 import nelli/smt/canonicalize
@@ -65,6 +65,95 @@ suite "int6-u: a routine declared inside a template's or macro's push":
     checkpoint show(x.errors)
     check x.status == sxRaised
 
+# CR4-H1: the same regions around a routine at the MODULE's level. The
+# helper module's template and macro are expanded here; the scan reads this
+# module's text alone, in which the matched push and pop are not.
+rangeOff:
+  proc innerTmplTop(w: int): int = int(R(w))
+proc outerTmplTop(v: int) =
+  if innerTmplTop(v) == 300: symexTarget("hit")
+
+emitRangeOff:
+  proc innerMacroTop(w: int): int = int(R(w))
+proc outerMacroTop(v: int) =
+  if innerMacroTop(v) == 300: symexTarget("hit")
+
+plainRegion:
+  proc innerPlainTop(w: int): int = int(R(w))
+proc outerPlainTop(v: int) =
+  if innerPlainTop(v) == 300: symexTarget("hit")
+
+proc innerNoCallTop(w: int): int = int(R(w))
+proc outerNoCallTop(v: int) =
+  if innerNoCallTop(v) == 300: symexTarget("hit")
+
+# The same-module forms stand last: a push a template's text holds is a
+# possible state of every later position of its own module.
+template rangeOffHere(body: untyped) =
+  {.push rangeChecks: off.}
+  body
+  {.pop.}
+
+macro emitRangeOffHere(body: untyped): untyped =
+  result = newStmtList(
+    nnkPragma.newTree(ident"push",
+      nnkExprColonExpr.newTree(ident"rangeChecks", ident"off")),
+    body,
+    nnkPragma.newTree(ident"pop"))
+
+rangeOffHere:
+  proc innerTmplHere(w: int): int = int(R(w))
+proc outerTmplHere(v: int) =
+  if innerTmplHere(v) == 300: symexTarget("hit")
+
+emitRangeOffHere:
+  proc innerMacroHere(w: int): int = int(R(w))
+proc outerMacroHere(v: int) =
+  if innerMacroHere(v) == 300: symexTarget("hit")
+
+template sameVerdict(imported, here: untyped) =
+  let a = symexFind(imported, tLabel("hit"))
+  let b = symexFind(here, tLabel("hit"))
+  checkpoint show(a.errors)
+  checkpoint show(b.errors)
+  check a.status == b.status
+  check a.trusted == b.trusted
+  # The kinds, not their count: the same-module form also declines the
+  # caller, which stands after the template's text (a possible push).
+  var ka, kb: set[SymexErrorKind]
+  for e in a.errors: ka.incl e.kind
+  for e in b.errors: kb.incl e.kind
+  check ka == kb
+
+suite "int6-u: a routine at the module's level inside a template's or macro's push":
+  test "an imported template's rangeChecks: off region":
+    check native(outerTmplTop(300)) == "hit"
+    pinDecline(outerTmplTop, sk, feCheckOption, needle = "declared inside")
+
+  test "an imported macro's rangeChecks: off region":
+    check native(outerMacroTop(300)) == "hit"
+    pinDecline(outerMacroTop, sk, feCheckOption, needle = "declared inside")
+
+  test "the verdict equals the same-module template's":
+    check native(outerTmplHere(300)) == "hit"
+    sameVerdict(outerTmplTop, outerTmplHere)
+
+  test "the verdict equals the same-module macro's":
+    check native(outerMacroHere(300)) == "hit"
+    sameVerdict(outerMacroTop, outerMacroHere)
+
+  test "an imported template that pushes nothing is walked (control)":
+    check native(outerPlainTop(300)) == "RangeDefect"
+    let x = pinFind(outerPlainTop, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+
+  test "a routine in no template call is walked (control)":
+    check native(outerNoCallTop(300)) == "RangeDefect"
+    let x = pinFind(outerNoCallTop, tRaisedExn("RangeDefect"))
+    checkpoint show(x.errors)
+    check x.status == sxRaised
+
 suite "int6-u: walker version":
-  test "walker version floor >= 482":
-    check parseInt(symexWalkerVersion) >= 482
+  test "walker version floor >= 486":
+    check parseInt(symexWalkerVersion) >= 486

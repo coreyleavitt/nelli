@@ -1559,8 +1559,16 @@ const renderAsChoicesVersion* = "12"
   ##   over a closure iterator, and an `int` slice leave the callee
   ##   unreadable (an opaque `findIt` over an `int` slice was a trusted
   ##   sxSat). No key bytes change.
+  ## - RFC-0016 CR4-H1 (485->486): a routine at its module's level, inside
+  ##   the block argument of a template's or a macro's call, declines
+  ##   `feCheckOption` where the expansion may push a check option around it
+  ##   (a template whose text, or a template it expands, pushes; any macro;
+  ##   a callee that is no name), as one declared inside a routine does
+  ##   (`check_options.moduleLevelExpansionHost`). It was walked under the
+  ##   module's own checks, a false verdict where the template came from
+  ##   another module. No key bytes change.
 
-const symexWalkerVersion* = "485"
+const symexWalkerVersion* = "486"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

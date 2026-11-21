@@ -1046,6 +1046,130 @@ proc typedPushingHost(impl: NimNode): string =
              "scan of the module's statements does not read"
     o = o.owner
 
+type CallHost = tuple[first, last: int; node: NimNode]
+
+var callHosts {.compileTime.}: Table[string, seq[CallHost]]
+  ## RFC-0016 CR4-H1. Per file read, the module-level calls with a statement
+  ## block among their arguments (a template's or a macro's `body`), with
+  ## their line spans: computed once per file.
+
+proc collectCallHosts(n: NimNode; acc: var seq[CallHost]) =
+  if n.kind in hostKinds or n.kind in {nnkTemplateDef, nnkMacroDef}: return
+  if n.kind in {nnkCall, nnkCommand}:
+    var block0 = false
+    for c in n:
+      if c.kind == nnkStmtList: block0 = true
+    if block0: acc.add (first: n.lineInfoObj.line, last: lastLine(n), node: n)
+  for c in n: collectCallHosts(c, acc)
+
+proc reachesDef(n, def: NimNode): bool =
+  ## `def` is under `n`, through no other routine.
+  if n == def: return true
+  if n.kind in hostKinds: return false
+  for c in n:
+    if reachesDef(c, def): return true
+
+proc expanderDefs(n: NimNode; name: string; acc: var seq[NimNode]) =
+  if n.kind in {nnkTemplateDef, nnkMacroDef} and n.len >= 7 and
+     nimIdentNormalize(routineNameOf(n[0])) == name:
+    acc.add n
+  for c in n: expanderDefs(c, name, acc)
+
+proc visibleAsts(m: ModuleScan; own: NimNode; unplaced: var string):
+    seq[NimNode] =
+  ## The parsed texts a call at the module's level may name a template or
+  ## macro from: this module's own and every user module it imports, what
+  ## those re-export too. `unplaced` is set where one cannot be read.
+  result.add own
+  var queue: seq[string]
+  for ev in m.events:
+    if not ev.call: queue.add ev.targets
+  var seen: seq[string]
+  while queue.len > 0:
+    let t = queue.pop()
+    if t.startsWith("lib:") or t.startsWith("lib?:"): continue
+    if t.startsWith("?"):
+      unplaced = "an import names a module the scan cannot place (`" & t & "`)"
+      continue
+    let raw = anchored(t)
+    let path = if raw.len > 0: raw else: t
+    let key = normalPath(path)
+    if key in seen: continue
+    seen.add key
+    let ast = bodyAstOf(path)
+    if ast == nil:
+      unplaced = "`" & path.extractFilename & "` cannot be read"
+      continue
+    result.add ast
+    queue.add defsOf(path).reexports
+
+proc expansionPushes(asts: seq[NimNode]; callee: string;
+                     seen: var seq[string]): string =
+  ## "" or why the template or macro `callee` may push a check option where it
+  ## expands: a macro (its expansion is not read), or a template whose text,
+  ## or a template or macro its text calls, holds a check pragma. A name no
+  ## visible text defines is the toolchain's (none pushes, int6-w2).
+  if callee in seen or seen.len > 32: return
+  seen.add callee
+  var defs: seq[NimNode]
+  for a in asts: expanderDefs(a, callee, defs)
+  for d in defs:
+    if d.kind == nnkMacroDef:
+      return "a macro, whose expansion the scan does not read"
+    if pushesInBody(d[6]):
+      return "a template whose text pushes check options"
+    var calls: seq[NimNode]
+    proc gather(n: NimNode; acc: var seq[NimNode]) =
+      if n.kind in {nnkCall, nnkCommand, nnkCallStrLit, nnkIdent}:
+        acc.add n
+      for c in n: gather(c, acc)
+    gather(d[6], calls)
+    for c in calls:
+      let nm = calleeName(c)
+      if nm.len == 0 or nm == callee: continue
+      let inner = expansionPushes(asts, nm, seen)
+      if inner.len > 0:
+        return "a template that expands `" & nm & "`, " & inner
+
+proc moduleLevelExpansionHost(file: string; ast, def: NimNode; line: int;
+                              m: ModuleScan): string =
+  ## RFC-0016 CR4-H1. "" or why the routine `def`, declared at its module's
+  ## level, lies inside the arguments of a template's or a macro's call whose
+  ## expansion may push a check option around it. As `pushingHost` and
+  ## `typedPushingHost` place a routine declared inside a routine, this
+  ## places one declared in a call's block: the scan reads this module's text
+  ## alone, where an imported template's matched push and pop are not. Fail
+  ## closed: a callee that is no name, a macro, or a module that cannot be
+  ## read declines; a callee defined in no visible text is the toolchain's.
+  if def == nil: return
+  if file notin callHosts:
+    var acc: seq[CallHost]
+    collectCallHosts(ast, acc)
+    callHosts[file] = acc
+  var unplaced = ""
+  var asts: seq[NimNode]
+  var read = false
+  for h in callHosts[file]:
+    if h.first > line or line > h.last or not reachesDef(h.node, def): continue
+    let callee = calleeName(h.node)
+    let at = "it is declared inside the call of `" & h.node[0].repr &
+             "` (line " & $h.first & "), "
+    if callee.len == 0:
+      return at & "whose callee is not a name the scan reads"
+    if not read:
+      asts = visibleAsts(m, ast, unplaced)
+      read = true
+    var seen: seq[string]
+    let why = expansionPushes(asts, callee, seen)
+    if why.len > 0:
+      return at & "which is " & why & ": it takes that push's where it " &
+             "stands, which the scan of the module's statements does not read"
+    if unplaced.len > 0:
+      var defs: seq[NimNode]
+      for a in asts: expanderDefs(a, callee, defs)
+      if defs.len == 0:
+        return at & "whose definition the scan cannot find: " & unplaced
+
 proc positionUnreadable(impl: NimNode; file: string; line: int;
                         st: CheckState; m: ModuleScan): string =
   ## RFC-0016 PRC-07. Why the routine's check state at the four checks cannot be
@@ -1090,6 +1214,15 @@ proc positionUnreadable(impl: NimNode; file: string; line: int;
   # owner and costs one step.
   let typed = typedPushingHost(impl)
   if typed.len > 0: return typed
+  # RFC-0016 CR4-H1: a routine at its module's level inside a template's or
+  # macro's call: the expansion's push is nowhere in this module's text.
+  if not isStdlibFile(file):
+    var ast = scannedAst(m, file)
+    if ast == nil: ast = bodyAstOf(file)
+    if ast != nil:
+      let def = findRoutineDef(ast, routineNameOf(impl[0]), line)
+      let top = moduleLevelExpansionHost(file, ast, def, line, m)
+      if top.len > 0: return top
 
 proc stdlibDefClean(impl: NimNode; file: string; line: int;
                     m: ModuleScan): bool =

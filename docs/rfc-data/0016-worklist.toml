@@ -2543,7 +2543,7 @@ note = "Breaks \"never hang, always classify\" on modelled exact rows (magic `In
 slice = "K8b"
 source = "RFC-0016 K8b, the admission-axis suites (INT-56), seed 20261117"
 cells = []
-pins = ["tsymex_0016_int57_strlenstall", "tsymex_0016_int57_backstop", "tsymex_0016_int57_orderproof_small", "tsymex_0016_int57_orderproof_s19", "tsymex_0016_int57_orderproof_s20", "tsymex_0016_int57_orderproof_b19_same", "tsymex_0016_int57_orderproof_b19_mixed", "tsymex_0016_int57_orderproof_b20_same", "tsymex_0016_int57_orderproof_b20_mixed", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_magic_a", "tsymex_0016_k8b_axes_magic_b", "tsymex_0016_k8b_axes_magic_c", "tsymex_0016_k8b_axes_magic_d", "tsymex_0016_k8b_axes_typeclass_a", "tsymex_0016_k8b_axes_typeclass_b", "tsymex_0016_k8b_axes_typeop"]
+pins = ["tsymex_0016_int57_strlenstall", "tsymex_0016_int57_backstop", "tsymex_0016_int57_orderproof_small", "tsymex_0016_int57_orderproof_s19", "tsymex_0016_int57_orderproof_s20", "tsymex_0016_int57_orderproof_b19_same_a", "tsymex_0016_int57_orderproof_b19_same_b", "tsymex_0016_int57_orderproof_b19_same_c", "tsymex_0016_int57_orderproof_b19_same_d", "tsymex_0016_int57_orderproof_b19_mixed", "tsymex_0016_int57_orderproof_b20_same_a", "tsymex_0016_int57_orderproof_b20_same_b", "tsymex_0016_int57_orderproof_b20_same_c", "tsymex_0016_int57_orderproof_b20_same_d", "tsymex_0016_int57_orderproof_b20_same_e", "tsymex_0016_int57_orderproof_b20_mixed", "tsymex_0016_k8b_axes", "tsymex_0016_k8b_axes_magic_a", "tsymex_0016_k8b_axes_magic_b", "tsymex_0016_k8b_axes_magic_c", "tsymex_0016_k8b_axes_magic_d", "tsymex_0016_k8b_axes_typeclass_a", "tsymex_0016_k8b_axes_typeclass_b", "tsymex_0016_k8b_axes_typeop"]
 
 [[row]]
 id = "INT-58"

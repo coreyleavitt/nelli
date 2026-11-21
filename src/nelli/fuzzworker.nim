@@ -578,7 +578,7 @@ when defined(posix):
         except DbCorrupt: break
       if shmName.len > 0: shmResetCoverage(shmName)   # per-input reset — BEFORE the run (E2b pin #4)
       if cmpShmName.len > 0: shmResetCmpLog(cmpShmName)
-      let obs = dispatch(input)
+      let obs = dispatchOwned(dispatch, input)
       if shmName.len > 0: shmPublishCoverage(shmName, obs.coverage)
       else:
         try: dumpCoverageOnce(obs.coverage)            # E2a file-dump fallback, unchanged
@@ -843,7 +843,7 @@ when defined(posix):
       if pid == 0:
         armParentDeathSignal(selfPidBeforeFork)
         discard close(outPipe[0])
-        let obs = dispatch(input)
+        let obs = dispatchOwned(dispatch, input)
         let resultBytes = encodeObservationLite(obs)
         try: writeFrame(outPipe[1], resultBytes)
         except FrameError: discard
@@ -1328,7 +1328,7 @@ when defined(windows):
         except DbCorrupt: break
       if shmName.len > 0: shmResetCoverage(shmName)   # per-input reset — BEFORE the run (E2b pin #4)
       if cmpShmName.len > 0: shmResetCmpLog(cmpShmName)
-      let obs = dispatch(input)
+      let obs = dispatchOwned(dispatch, input)
       if shmName.len > 0: shmPublishCoverage(shmName, obs.coverage)
       if cmpShmName.len > 0: shmPublishCmpLog(cmpShmName)
       let resultBytes = encodeObservationLite(obs)

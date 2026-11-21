@@ -8,4 +8,3 @@
 # scripts/dt-bounded.sh), not listed.
 #
 # Baseline: run 42434778262 at ad623d97, 1031 of 1031 registered tests ran, 1 red.
-tsymex_rfc0005_s8cn_step1d  INT-43: official Z3 5.1.0 spends about 1.66x the rlimit units of the image's Z3 on the same queries, so grow_stale_dead returns sxUnknown (canceled under seqQueryRLimit) instead of sxUnsat; passes in podman

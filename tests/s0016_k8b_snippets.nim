@@ -17,6 +17,14 @@
 ## `tsymex_0016_k8b_axes`), so a row that leaves `exact` fails here too.
 import nelli/smt/admission
 
+when defined(windows) and not defined(vcc):
+  # mingw gcc has no `__syscall` calling convention, which nimbase.h emits
+  # for `{.syscall.}` on Windows (N_SYSCALL). The `routine/syscall` and
+  # `type/syscall` fragments are programs the leg compiles natively, and the
+  # axis floor counts them exercised on every row, so the convention is
+  # defined away for the C compiler rather than the rows left out.
+  {.passC: "-D__syscall=".}
+
 type
   AxisScope* = range[axTypeClass .. axDefinedness]
     ## The admission axes other than construct (K8a-gen's shapes).

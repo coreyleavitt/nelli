@@ -2248,6 +2248,7 @@ task test, "Run the test suite":
             "tsymex_0016_wiring_cover",
             "tsymex_0016_int38_notes",
             "tsymex_0016_int30_refcfiber",
+            "tsymex_0016_ci_stdlibeq",
             "tsymex_rfc0005_r1_keyflags",
             "tsymex_rfc0005_r1_keyimpl",
             "tsymex_rfc0005_r1_keymethod",

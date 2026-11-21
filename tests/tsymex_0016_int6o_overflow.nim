@@ -90,6 +90,18 @@ proc sutInnerOff(v: int) =
   else: symexTarget("hit")
   {.pop.}
 
+# An ambiguous push: whether the routine is compiled with overflowChecks off
+# depends on a `when`, so its position is off on one reading and on on the
+# other and no single setting models it (`feOverflowCheckOption`).
+const flagOn = declared(system)
+when flagOn:
+  {.push overflowChecks: off.}
+proc sutAmbiguous(v: int) =
+  if v + 1 > v: discard
+  else: symexTarget("hit")
+when flagOn:
+  {.pop.}
+
 proc nativeRaises(f: proc (v: int) {.nimcall.}; v: int): string =
   try:
     f(v)
@@ -179,6 +191,11 @@ suite "int6-o: an overflow-off region in a checked build":
     pinDecline(sutInnerOff, cellKey(axDefinedness, "add/signed/pushOff/inner"),
                ubSignedOverflow, excluding = {feOverflowCheckOption,
                                               feCheckOption})
+
+suite "int6-o: an ambiguous push is declined":
+  test "a push under a `when` is feOverflowCheckOption":
+    pinDecline(sutAmbiguous, cellKey(axPragma, "routine/overflowChecks"),
+               feOverflowCheckOption, needle = "overflowChecks off")
 
 suite "int6-o: walker version":
   test "walker version floor >= 467":

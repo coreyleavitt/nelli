@@ -1567,8 +1567,13 @@ const renderAsChoicesVersion* = "12"
   ##   (`check_options.moduleLevelExpansionHost`). It was walked under the
   ##   module's own checks, a false verdict where the template came from
   ##   another module. No key bytes change.
+  ## - RFC-0016 CR4-M2 (486->487): a cell held at several sorts whose float
+  ##   leaf is NaN in the model is recorded lossy (`crossSortCellFidelity`):
+  ##   the witness renders Nim's one canonical NaN, so the payload another
+  ##   view reads (`a[] == 0x7FF8_0000_0000_0001`) is not replayed. An
+  ##   INT-90 trusted sxSat becomes untrusted. No key bytes change.
 
-const symexWalkerVersion* = "486"
+const symexWalkerVersion* = "487"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

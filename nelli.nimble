@@ -2074,7 +2074,11 @@ task test, "Run the test suite":
             "tsymex_0016_k9cg_unbacked_e",
             "tsymex_0016_k9cg_unbacked_l",
             "tsymex_0016_k9cg_unbacked_n",
-            "tsymex_0016_k9cg_unbacked_p",
+            "tsymex_0016_k9cg_unbacked_p_a",
+            "tsymex_0016_k9cg_unbacked_p_b",
+            "tsymex_0016_k9cg_unbacked_p_c",
+            "tsymex_0016_k9cg_unbacked_p_d",
+            "tsymex_0016_k9cg_unbacked_p_filterit",
             "tsymex_0016_k9cg_unbacked_table",
             # RFC-0016 K9d: no verdict suite without a native pin (the census of tsymex_* files asserting sxSat/sxUnsat/sxRaised with no native idiom), ratcheted at its ceiling; pinFind, the generator that pins a suite's own symexFind call.
             "tsymex_0016_k9d_census",

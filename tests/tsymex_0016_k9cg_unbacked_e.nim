@@ -14,7 +14,7 @@
 ## source per file: this file an empty literal (E),
 ## `tsymex_0016_k9cg_unbacked_l.nim` a non-empty literal (L),
 ## `tsymex_0016_k9cg_unbacked_n.nim` `newSeq` (N) and
-## `tsymex_0016_k9cg_unbacked_p.nim` a parameter (P);
+## `tsymex_0016_k9cg_unbacked_p_{a,b,c,d}.nim` a parameter (P);
 ## `tsymex_0016_k9cg_unbacked_table.nim` runs the `seq[Table[int,int]]`
 ## probes. The 184 walks in one file took about 240 s (152 s of it
 ## compiling), past `scripts/dt-bounded.sh`'s default 180 s cap; two sources

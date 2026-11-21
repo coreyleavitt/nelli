@@ -13,7 +13,7 @@ skipsites.txt	90
 defined.txt	0
 errorkind.txt	63
 ids.txt	70
-linux-host-known-red.txt	1
+linux-host-known-red.txt	0
 magic.txt	0
 nightly-cpp-known-red.txt	1
 nightly-msvc-known-red.txt	0

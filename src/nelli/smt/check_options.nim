@@ -1109,7 +1109,11 @@ proc expansionPushes(asts: seq[NimNode]; callee: string;
   ## expands: a macro (its expansion is not read), or a template whose text,
   ## or a template or macro its text calls, holds a check pragma. A name no
   ## visible text defines is the toolchain's (none pushes, int6-w2).
-  if callee in seen or seen.len > 32: return
+  if callee in seen: return
+  if seen.len > 32:
+    # Fail closed: an expansion nested past the read depth is not shown to
+    # push nothing.
+    return "a template whose expansion nests deeper than the scan reads"
   seen.add callee
   var defs: seq[NimNode]
   for a in asts: expanderDefs(a, callee, defs)

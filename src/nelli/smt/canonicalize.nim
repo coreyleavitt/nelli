@@ -1593,8 +1593,14 @@ const renderAsChoicesVersion* = "12"
   ##   than the bound was tainted `beBudgetExhausted`. The fan-out and the
   ##   taint are gone; an untrusted sxUnknown at the walk work cap becomes a
   ##   trusted sxSat. No key bytes change.
+  ## - RFC-0016 W4 perf (490->491): an `IndexDefect` raise side `indexOobSide`
+  ##   forks is first asked the bounded check a loop guard runs under
+  ##   (`loopArmInfeasible`), and dropped (and logged) when the path's own
+  ##   facts refute it, instead of reaching `routeRaise`'s full solve. An
+  ##   undecided side is kept. Verdicts are unchanged; the walk's solves and
+  ##   prune log differ. No key bytes change.
 
-const symexWalkerVersion* = "490"
+const symexWalkerVersion* = "491"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

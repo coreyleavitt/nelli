@@ -2166,6 +2166,14 @@ proc indexOobSide*(cp: Path; oob: Z3Bool; unchecked: bool; loc: string;
   ## in-range continuation stays exact.
   if unchecked or boundsUnchecked():
     decideUndefined(cp, uncheckedIndexUb(), oob, uncheckedIndexSite(loc), w)
+  elif loopArmInfeasible(w.z3, cp, oob, w.settings):
+    # W4 perf: the raise side is refuted on the path's own facts by the
+    # bounded check a loop guard runs under (`loopArmInfeasible`: a literal
+    # side without the solver, otherwise `loopPruneRLimit`), so no real
+    # execution of this path raises here and `routeRaise`'s full solve would
+    # find it UNSAT. Undecided keeps the arm (the `else`); the drop is logged
+    # in the prune window as every such drop is.
+    discard
   else:
     maybeForkDefect(cp, oob, "IndexDefect", none(string), w)
 

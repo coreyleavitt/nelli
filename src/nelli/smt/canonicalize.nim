@@ -1584,8 +1584,17 @@ const renderAsChoicesVersion* = "12"
   ##   read once, and an expansion nested past the depth bound declines
   ##   (fail closed). A template reached that way, which the round-2 read
   ##   missed, now declines its routine. No key bytes change.
+  ## - RFC-0016 INT-FI (489->490): the `=dup` a sink position runs on a seq
+  ##   of plain values (`isPlainValueType`: no user hook anywhere in it) is
+  ##   the value copy, not `dupSeqValue`'s k-unrolled element loop, which
+  ##   ran the element type's empty `=dup` once per element: a `seq[int]`
+  ##   added to a `seq[seq[int]]` in a loop multiplied the paths by the
+  ##   unroll bound each iteration, and a path whose inner seq was longer
+  ##   than the bound was tainted `beBudgetExhausted`. The fan-out and the
+  ##   taint are gone; an untrusted sxUnknown at the walk work cap becomes a
+  ##   trusted sxSat. No key bytes change.
 
-const symexWalkerVersion* = "489"
+const symexWalkerVersion* = "490"
   ## RFC-0016 W3-z int2: the lanes above were each bumped from their own
   ## base; integration renumbers them into one sequence (311 + one per
   ## lane bump, in merge order), so 340 is the first walker of the merged

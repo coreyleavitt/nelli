@@ -1488,7 +1488,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## 487->488.
     ## RFC-0016 CR4-H1 round 3 (scope index, transitive import and include,
     ## depth-bounded fail-closed): 488->489.
-    check symexWalkerVersion == "489"
+    ## RFC-0016 INT-FI (a sink position's `=dup` of a seq of plain values is
+    ## the value copy, not an unrolled element loop): 489->490.
+    check symexWalkerVersion == "490"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

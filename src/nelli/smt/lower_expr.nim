@@ -895,6 +895,11 @@ const walkerContextUnits* = 20_000
   ## unroll step; without this charge it was charged about 1M units a second
   ## of wall against the calibrated 3.9M, so `walkRLimit` was ~1,000 s of
   ## that shape and its unroll-5 walk ran to the 600 s stall backstop.
+  ## (Since INT-94, walker 489, that shape over plain values is the value
+  ## copy and a trusted 0.81M-unit walk; the calibration below is of the
+  ## walk as it was, and the same kind of explosion is still reachable
+  ## through a seq of a user-`=dup` type: `tsymex_0016_int6_d1b_walkbudget`'s
+  ## `filterHooked`.)
   ##
   ## Calibration (int6 D1b, 2026-11-19, podman `nelli-dev`, c, walk time
   ## only, one solver per query in both walks): wall = a * solvers + b *

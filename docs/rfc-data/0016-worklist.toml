@@ -3021,3 +3021,17 @@ evidence = "red at 30ccbeae (the new suite on the int6 tip): `lCrossType` (int a
 aliases = []
 cells = ["typeclass:pointer"]
 pins = ["tsymex_0016_int93_localaddr", "tsymex_0016_int65_ptrnil"]
+
+[[row]]
+id = "INT-94"
+table = "5.8c"
+title = "`tsymex_0016_k9cg_unbacked_p_filterit` (`filterIt` over a `seq[seq[int]]` parameter, a label reachable on every path) spent the whole walk work cap (1G units, 160-260 s on c, over the Windows legs' 240 s watchdog) and returned an untrusted `sxUnknown`. The fan-out was not the loop's: every `result.add(it)` of a `seq[int]` loop variable ran PRC-47's `=dup` model, a k-unrolled copy loop over the element's (empty) `=dup`, about 12x the paths a step and a `beBudgetExhausted` taint on every path whose inner seq was longer than the unroll bound"
+class = "precision"
+state = "closed"
+note = "fixed in the walker (490): the `=dup` a sink position runs on a seq of plain values (`isPlainValueType`: ints, bools, floats, strings, and seqs or arrays of those, so no user hook anywhere in it) is the value copy, as the explicit `=dup(x)` call's arm already read it (RFC-0005 S8cb item 5); `dupSeqValue`'s element loop is kept for a seq that holds a hooked type, whose per-element effects it exists for. The probe is 94 searches, 4.0M units and about a second of walk, a trusted `sxSat` (before: 25,509 searches, 1G units). The walk's statement-level order is unchanged: the label past a loop is reached only once the k-unroll has built every path, so the loop's own cost is what the budget buys; PRC-46/47's hooked-type suites are unchanged. Suite: 43 s on c and 48 s on `z3-4.13.4` (compile included), from 260 s and 229 s."
+sha = "0e08a6c3"
+slice = "W4"
+home = "wave 4 wiring fixes (`wip/w4perf-filterit`)"
+source = "`tsymex_0016_k9cg_unbacked_p_filterit` header; int6 D1b's measurement of the shape"
+cells = []
+pins = ["tsymex_0016_int94_dupcopy", "tsymex_0016_k9cg_unbacked_p_filterit"]

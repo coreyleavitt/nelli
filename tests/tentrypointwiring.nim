@@ -109,7 +109,6 @@ const
   approvedCallers = [
     "parseEntryImplWarned",  # the chokepoint itself
     "entryParse",            # review R1-11: the five cache/DB helpers' parse
-    "replayWitness",         # RFC-0005 S2: runs `fn`, never the walker
   ]
     ## Review R1-11: `symexCacheKeyForFn`, `saveSymexWitness`,
     ## `loadSymexWitnesses`, `saveSymexVerdict` and `loadSymexVerdict` no
@@ -123,11 +122,11 @@ const
     ## call inside `parseEntryImplWarned` itself -- the wrapper every
     ## walker-running entry macro must route through instead.
     ##
-    ## RFC-0005 S2 added `replayWitness`, deliberately: it parses `fn` only
-    ## for its parameter `IRType`s (to classify witness fidelity against the
-    ## same types `emitTyAndReader` rendered), then executes the REAL `fn` --
-    ## it takes no `SymexSettings` and never runs the walker, so there is
-    ## nothing for `parseEntryImplWarned` to warn about.
+    ## RFC-0005 S2 added `replayWitness` here, deliberately: it needs `fn`'s
+    ## parameter `IRType`s only (to classify witness fidelity against the same
+    ## types `emitTyAndReader` rendered), then executes the REAL `fn`. RFC-0016
+    ## W3-z R10 follow-up: it reads them with `parseEntryParams`, which does
+    ## not parse the body, so it calls `parseEntryImpl` no longer.
 
 proc declNameAt(rawLine: string): string =
   ## If `rawLine` is a top-level (column-0) `macro <name>` or `proc <name>`

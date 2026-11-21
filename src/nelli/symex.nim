@@ -438,9 +438,8 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
       return newTree(nnkStmtListExpr, pre,
                      newCall(bindSym"replayWitness", fn, witness, target,
                              pathTaint))
-  let parsed = parseEntryImpl(fn, "replayWitness",
-    defaultSymexSettings().budget.maxInstantiationsPerProc)
-  emitReplayWitness(fn, parsed.params, witness, target, pathTaint)
+  emitReplayWitness(fn, parseEntryParams(fn, "replayWitness"), witness, target,
+                    pathTaint)
 
 macro symexFind*(fn: typed,
                  target: static SymexTarget,

@@ -27361,6 +27361,24 @@ proc demoteUnrenderableWitnessTy(ty: IRType): IRType =
   if isRenderableWitnessTy(ty): ty
   else: tUninterp("__unsupported_witness:" & $ty)
 
+proc entryParam(id: NimNode; j: int): IRParam =
+  ## The `j`th name of the formal `id` (an `nnkIdentDefs`), as the walk's
+  ## parameter: its type and `var`ness, with no allocation hint (those are the
+  ## body pre-passes', `parseProc`'s).
+  let tyNode = id[id.len - 2]
+  # Phase 14 A7a: detect `var T` at the SUT parameter level so
+  # `isVar = true` is consistently set for top-level params, not
+  # just for callees (parseCalleeImpl already does this). The
+  # witness still extracts the INITIAL value via `initialEnv` --
+  # mutations are walker-internal symbolic operations.
+  var classified = classifyType(tyNode)
+  classified.ty = demoteUnrenderableWitnessTy(classified.ty)   ## CR-2c
+  IRParam(name: id[j].strVal, ty: classified.ty,
+          rangeLo: classified.range.lo,
+          rangeHi: classified.range.hi,
+          hasRange: classified.range.hasRange,
+          isVar: tyNode.kind == nnkVarTy)
+
 proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   ## RFC-parser-normalization N2: `procDef` is always already resolved by
   ## its callers (`resolveEntryImpl`'s hard-error wrapper, or an internal
@@ -27416,19 +27434,12 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
     # just for callees (parseCalleeImpl already does this). The
     # witness still extracts the INITIAL value via `initialEnv` —
     # mutations are walker-internal symbolic operations.
-    let isVarParam = tyNode.kind == nnkVarTy
-    var classified = classifyType(tyNode)
-    classified.ty = demoteUnrenderableWitnessTy(classified.ty)   ## CR-2c
     for j in 0 ..< id.len - 2:
       let name = id[j].strVal
-      var p = IRParam(name: name, ty: classified.ty,
-                      rangeLo: classified.range.lo,
-                      rangeHi: classified.range.hi,
-                      hasRange: classified.range.hasRange,
-                      isVar: isVarParam,
-                      isStringBacked: containsSym(ctx.procScoped.stringBackedParams, id[j]),
-                      isIntOffset: name in intOffsetParams,
-                      isScanOffset: name in scanOffsetParams)
+      var p = entryParam(id, j)
+      p.isStringBacked = containsSym(ctx.procScoped.stringBackedParams, id[j])
+      p.isIntOffset = name in intOffsetParams
+      p.isScanOffset = name in scanOffsetParams
       params.add p
       paramsNimSeq.add emitParam(p)
   # Phase 14 cycle C3: always wrap the proc body in `isBlock` so the
@@ -31143,6 +31154,23 @@ proc dupModelledKeys(p: ParseResult): seq[string] =
   ## RFC-0016 PRC-44: `p.dupModelled`, in a fixed order.
   for k in p.dupModelled: result.add k
   result.sort()
+
+proc parseEntryParams*(fn: NimNode, apiName: string): seq[IRParam] =
+  ## RFC-0016 W3-z R10 follow-up. The entry routine's parameters, as
+  ## `parseEntryImpl` gives them, without reading its body. `replayWitness`
+  ## takes only these (it runs the real routine, not the walk's model of it):
+  ## the full parse of a SUT that holds a replay reads every routine that
+  ## replay's expansion calls (some 190, the replay runtime's), which is most
+  ## of the compile-time VM's default iteration budget
+  ## (`tsymex_0016_w3z_r10_nestedreplay`).
+  let procDef = resolveEntryImpl(fn, apiName)
+  procDef.expectKind walkableRoutineKinds
+  let formalParams = procDef[3]
+  formalParams.expectKind nnkFormalParams
+  for i in 1 ..< formalParams.len:
+    let id = formalParams[i]
+    id.expectKind nnkIdentDefs
+    for j in 0 ..< id.len - 2: result.add entryParam(id, j)
 
 proc parseEntryImpl*(fn: NimNode, apiName: string, maxInst: int): ParseResult =
   ## RFC-parser-normalization N1. Collapses the three-step `getImpl` -> kind

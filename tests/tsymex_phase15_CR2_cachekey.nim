@@ -1486,7 +1486,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0016 CI seq-eq (an unbounded seq `==` masks its data arrays by
     ## a map over an array-free mask lambda, which Z3 4.13.4 decides):
     ## 487->488.
-    check symexWalkerVersion == "488"
+    ## RFC-0016 INT-FI (a sink position's `=dup` of a seq of plain values is
+    ## the value copy, not an unrolled element loop): 488->489.
+    check symexWalkerVersion == "489"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

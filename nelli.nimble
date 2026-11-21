@@ -2192,6 +2192,8 @@ task test, "Run the test suite":
             "tsymex_0016_int6_d1b_walkbudget",
             # RFC-0016 int6 D1d: a pruning check a model kept from an earlier SAT search satisfies is not searched.
             "tsymex_0016_int6_d1d_modelreuse",
+            # RFC-0016 INT-94: the =dup a sink position runs on a seq of plain values is the value copy, not an unrolled element loop.
+            "tsymex_0016_int94_dupcopy",
             # RFC-0016 INT-87: a cstring parameter is held by value, whether it is nil and its bytes up to the NUL.
             "tsymex_0016_int87_cstringparam",
             "tsymex_0016_d3b_walklog",

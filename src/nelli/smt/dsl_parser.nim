@@ -30554,6 +30554,17 @@ proc dupValue(src: IRExpr; t: NimNode; preamble: var seq[IRStmt];
   of ntyObject, ntyTuple, ntyArray:
     discard
   of ntySequence:
+    # RFC-0016 INT-FI: a seq whose elements are plain values (ints, bools,
+    # floats, strings, and seqs or arrays of those, `isPlainValueType`) has
+    # no user hook anywhere in it, so its `=dup` is a copy of the value and
+    # nothing else, as the explicit `=dup(x)` call's arm reads it (RFC-0005
+    # S8cb item 5). Before this the copy was `dupSeqValue`'s element loop,
+    # a k-unroll of the element type's (empty) `=dup` run: a `seq[int]` loop
+    # variable added to a `seq[seq[int]]` (`filterIt` over one) multiplied
+    # the paths by the unroll bound at every iteration and tainted every
+    # path whose inner seq was longer than it (`beBudgetExhausted`), for a
+    # copy no execution can observe.
+    if isPlainValueType(classifyType(t).ty): return src
     return dupSeqValue(src, t, preamble, ctx, depth)
   else: return nil  # k2: fail-closed: nil: a `distinct`, a generic
   let ity = classifyType(t).ty

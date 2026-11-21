@@ -849,12 +849,16 @@ proc productRows(sizes: seq[int]): seq[seq[int]] =
       dec i
     if i < 0: break
 
-proc pairwiseRows*(sizes: seq[int]): seq[seq[int]] =
+proc pairwiseRows*(sizes: seq[int]; maxRows = high(int)): seq[seq[int]] =
   ## A deterministic all-pairs covering array over fields with `sizes[i]`
   ## values each: for every two fields i < j and every value a of i and b of
   ## j, some row has a at i and b at j. Greedy: each row starts from the first
   ## uncovered pair and fills the other fields with the value covering the
-  ## most uncovered pairs (ties to the lowest index).
+  ## most uncovered pairs (ties to the lowest index). `maxRows` stops the
+  ## generation after that many rows: the rows are produced in order, so the
+  ## result is the leading `maxRows` rows of the full array (a caller that
+  ## runs no more than that need not build the rest: over two 512-value
+  ## domains the full array is 262144 rows).
   let k = sizes.len
   if k == 0: return @[newSeq[int](0)]
   for s in sizes:
@@ -864,22 +868,27 @@ proc pairwiseRows*(sizes: seq[int]): seq[seq[int]] =
     return
   var unc = newSeq[seq[bool]](k * k)
   var left = 0
+  var cur = newSeq[int](k * k)   # per pair: no uncovered entry before this
   for i in 0 ..< k:
     for j in i + 1 ..< k:
       unc[i * k + j] = newSeq[bool](sizes[i] * sizes[j])
       for x in 0 ..< unc[i * k + j].len: unc[i * k + j][x] = true
       left += unc[i * k + j].len
-  while left > 0:
+  while left > 0 and result.len < maxRows:
     var row = newSeq[int](k)
     for f in 0 ..< k: row[f] = -1
     block seed:
       for i in 0 ..< k:
         for j in i + 1 ..< k:
-          for x in 0 ..< unc[i * k + j].len:
+          # an entry only ever turns covered, so the first uncovered one
+          # never moves back: resume where the last row's scan stopped
+          for x in cur[i * k + j] ..< unc[i * k + j].len:
             if unc[i * k + j][x]:
+              cur[i * k + j] = x
               row[i] = x div sizes[j]
               row[j] = x mod sizes[j]
               break seed
+          cur[i * k + j] = unc[i * k + j].len
     for f in 0 ..< k:
       if row[f] >= 0: continue
       var best = 0
@@ -912,11 +921,13 @@ proc exceeds*(sizes: seq[int]; limit: int): bool =
       prod *= s
   prod > limit
 
-proc fieldRows*(sizes: seq[int]; limit = fieldProductFull):
+proc fieldRows*(sizes: seq[int]; limit = fieldProductFull;
+                maxRows = high(int)):
     tuple[rows: seq[seq[int]], full: bool] =
   ## the index rows over fields of these domain sizes: the full product when it
-  ## is at most `limit`, else the all-pairs covering array
-  if exceeds(sizes, limit): (pairwiseRows(sizes), false)
+  ## is at most `limit`, else the all-pairs covering array (its leading
+  ## `maxRows` rows: see `pairwiseRows`)
+  if exceeds(sizes, limit): (pairwiseRows(sizes, maxRows), false)
   else: (productRows(sizes), true)
 
 # --- the string domain (K9d-6) ---------------------------------------------
@@ -2422,7 +2433,7 @@ macro pinFind*(fn: typed; target: untyped;
   let sizesNow = nnkBracket.newTree()
   for d in domSyms: sizesNow.add newCall(bindSym"domLen", newDotExpr(d, ident"values"))
   doms.add quote do:
-    let `rows` = fieldRows(@`sizesNow`, pinFindCap)
+    let `rows` = fieldRows(@`sizesNow`, pinFindCap, pinFindCap)
     clearStringHints()
   let combos = newDotExpr(newDotExpr(rows, ident"rows"), ident"len")
   exh = infix(exh, "and", newDotExpr(rows, ident"full"))

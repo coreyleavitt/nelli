@@ -100,3 +100,26 @@ suite "CR4-M1: a campaign owns what its property executions produce":
       Settings(maxExamples: 1, seed: 1))
     check "inner" in inner.dbErrors
     check "inner" in r.dbErrors
+
+suite "CR4-M1: each in-process execution has its own frame":
+  test "note in a fuzz property is per-execution and the campaign frame stays empty":
+    var fr = newCoverageFrontier("owned-notes")
+    var n = 0
+    var campaignNotes = -1
+    var campaignEvents = -1
+    let t = Target[int](run: proc(x: int): Observation[int] =
+      inc n
+      note("example", x)
+      event("e")
+      recordSymexDbError("kept")
+      if n == 50:
+        # the frame below this execution's own is the campaign's
+        campaignNotes = engineStack[^2].notes.len
+        campaignEvents = engineStack[^2].eventsCategorical.len
+      Observation[int](verdict: vOk, coverage: Coverage(counters: @[1'u8])))
+    let rep = fuzz(integers(0, 10), t, fr,
+                   FuzzSettings(maxIterations: 60, seed: 1))
+    check n >= 50
+    check campaignNotes == 0
+    check campaignEvents == 0
+    check rep.dbErrors.len >= 50

@@ -2134,6 +2134,12 @@ const
 proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
               settings: FuzzSettings; assist: ConcolicAssist = ConcolicAssist();
               spawnFreshWorker: proc(): Worker[T] {.closure.} = nil): FuzzReport =
+  ## CR4-M1: the campaign owns an engine frame, and each in-process execution
+  ## runs in its own frame nested in it. So `note`, `target` and `event` are
+  ## accepted in a fuzz property and last one execution; a symex finding or
+  ## DB error the execution makes reaches the report (`symexFindings`,
+  ## `dbErrors`).
+  ##
   ## The coverage-guided fuzz loop, generalized over an arbitrary `Target` and a
   ## `CoverageFrontier` (FUZZ_PLAN D10). The corpus is choice-IR; each iteration
   ## mutates a parent, replays it to a value (split from the run, so any `Target`
@@ -2208,7 +2214,16 @@ proc fuzz*[T](s: Strategy[T]; target: Target[T]; frontier: var CoverageFrontier;
   let isolated = settings.executor.processIsolation
   let initialWorker =
     if isolated: spawnFreshWorker()
-    else: newInProcessWorker(s, target)
+    else:
+      # CR4-M1: each in-process execution runs in its own frame, nested in
+      # the campaign's. Popping it merges its findings and DB errors up and
+      # drops its `note`/`target`/`event` state, so the campaign frame holds
+      # only what the report reads however many executions run. (An isolated
+      # child gets the same from `dispatchOwned`.)
+      newInProcessWorker(s, Target[T](run: proc(x: T): Observation[T] =
+        pushEngineFrame()
+        try: target.run(x)
+        finally: popEngineFrame()))
   let orchestrator = newOrchestrator(initialWorker, frontier,
     policy = OrchestratorPolicy(
       bootstrapWindow: (if isolated: processIsolationBootstrapWindow else: 0),

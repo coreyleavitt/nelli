@@ -850,7 +850,12 @@ task test, "Run the test suite":
             # only when the resolved callee is the stdlib symbol; a user
             # overload is walked as a user call; markers match by module;
             # walker 149->150.
-            "tsymex_rfc0005_s8c_resolution",
+            "tsymex_rfc0005_s8c_resolution_a",
+            "tsymex_rfc0005_s8c_resolution_b",
+            "tsymex_rfc0005_s8c_resolution_c",
+            "tsymex_rfc0005_s8c_resolution_d",
+            "tsymex_rfc0005_s8c_resolution_e",
+            "tsymex_rfc0005_s8c_resolution_f",
             # RFC-0005 S8d -- type heads resolved by symbol: a user type named
             # like a stdlib/builtin type (seq/Table/HashSet/Natural/int8/bool/
             # Rune) is not modelled as it; walker 150->151.

@@ -5,9 +5,9 @@
 build.txt	5
 capkind.txt	0
 closed-legacy.txt	36
-ceiling-offenders-cpp.txt	783
+ceiling-offenders-cpp.txt	782
 ceiling-offenders-msvc.txt	422
-ceiling-offenders-z3-4.13.4.txt	744
+ceiling-offenders-z3-4.13.4.txt	743
 census.txt	49
 skipsites.txt	90
 defined.txt	0

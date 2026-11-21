@@ -707,3 +707,5 @@ suite "RFC-0016 PRC-34: shapes later slices modelled":
 suite "RFC-0016 S8cp-r: walker version":
   test "symexWalkerVersion is at least 400":
     check parseInt(symexWalkerVersion) >= 400
+  test "the unbounded seq == mask decides on Z3 4.13.4: walker >= 488":
+    check parseInt(symexWalkerVersion) >= 488

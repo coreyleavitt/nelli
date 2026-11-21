@@ -1483,7 +1483,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## call block takes that expansion's push): 485->486.
     ## RFC-0016 CR4-M2 (a NaN float leaf of a cross-sort cell makes the
     ## witness lossy): 486->487.
-    check symexWalkerVersion == "487"
+    ## RFC-0016 CI seq-eq (an unbounded seq `==` masks its data arrays by
+    ## a map over an array-free mask lambda, which Z3 4.13.4 decides):
+    ## 487->488.
+    check symexWalkerVersion == "488"
 
   test "CR-2 sub-test 5b: walkRLimit changes canonical form":
     ## RFC-0016 K7. A walk's total solver-work budget decides whether it ends

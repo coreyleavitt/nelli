@@ -1,8 +1,8 @@
 +++
 type = "review"
 id = "0016-review"
-title = "RFC-0016 code review ledger (0.9.2 Wave 1; 0.10.0 Waves 2-3)"
-state = "floor"
+title = "RFC-0016 code review ledger (0.9.2 Wave 1; 0.10.0 Waves 2-3; 0.11.0 Wave 4)"
+state = "pending"
 profile = "rfc-flow@6"
 +++
 
@@ -169,3 +169,12 @@ Six lenses ran: runtime soundness, parser soundness, replay and cache (opus); se
 - Round 9 liveness: `rV1` and `cWhI` have no recorded red-on-removal.
 - Round 9 out-of-scope: `orderOperands` may bind a later call operand before an earlier `iekVar` it writes (`next() in lo..hi` with `next` writing `lo`); untraced.
 - Earlier rounds: the facade re-exports `runtime`/`dsl` wholesale; heap_model int-width split; three `WalkCtx` hooks pending `walker_core`; devirtualisation on alias bodies untested; duplicate decline per alias.
+
+# 0.11.0 review (Wave 4)
+
+**Surface:** `36e6e6a5..5ae4e19f` (`v0.10.0` to the Wave 4 integration head `wip/int6-m5` after the wiring fixes and the full pin-strength run): `src/`, `scripts/`, `.github/workflows/`, `tests/0016-allowlist/`, `tests/s8cu_helpers.nim`, and the tests those changes added. INT-34 split `runtime.nim` into leaf modules (walk_types, walk_path, lower_expr, walk_solve, walk_ctx, walk_expr, runtime_heap, symex_codec) with an identical public-name surface and an empty sweep diff against the `16327e08` baseline. Reviewers read those moves as moves (`git diff -M --color-moved`) and judge the code that changed, not the code that moved.
+
+**Precondition:** the Wave 4 wiring audit ran this session over the same surface (findings A1-A5, B1-B10, C1-C9). All were fixed and merged at `f2583af2` and `5ae4e19f`. `0016/wiring` is recorded `proven` once the release gates are read.
+
+**Mandate:** the default one, from the standing `/loop` instruction, as for Wave 1: fix everything through Medium, and leave the Lows except cheap ones, which are batched.
+
